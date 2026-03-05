@@ -44,7 +44,7 @@ pub async fn cmd_send(
         Some(recipient) => {
             serde_json::json!({"type": "dm", "to": recipient, "content": content}).to_string()
         }
-        None => content.to_owned(),
+        None => serde_json::json!({"type": "message", "content": content}).to_string(),
     };
     let msg = send_message(&socket_path, username, &wire).await?;
     println!("{}", serde_json::to_string(&msg)?);
