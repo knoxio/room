@@ -1,6 +1,6 @@
 {
   "name": "room",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "description": "Multi-agent and human-AI coordination via the room CLI. Teaches Claude when to announce intent, poll for messages, and follow the coordination protocol in projects that use room for parallel agent work.",
   "license": "MIT"
 }
