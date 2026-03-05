@@ -12,10 +12,11 @@ use tokio::{
 
 use crate::{
     history,
-    message::{make_join, make_leave, parse_client_line, Message},
+    message::{make_join, make_leave, make_system, parse_client_line, Message},
 };
 
 type ClientMap = Arc<Mutex<HashMap<u64, broadcast::Sender<String>>>>;
+type StatusMap = Arc<Mutex<HashMap<String, String>>>;
 
 pub struct Broker {
     room_id: String,
@@ -44,6 +45,7 @@ impl Broker {
         eprintln!("[broker] listening on {}", self.socket_path.display());
 
         let clients: ClientMap = Arc::new(Mutex::new(HashMap::new()));
+        let status_map: StatusMap = Arc::new(Mutex::new(HashMap::new()));
         let chat_path = Arc::new(self.chat_path.clone());
         let room_id = Arc::new(self.room_id.clone());
         let mut next_id: u64 = 0;
@@ -57,6 +59,7 @@ impl Broker {
             clients.lock().await.insert(cid, tx.clone());
 
             let clients_clone = clients.clone();
+            let status_map_clone = status_map.clone();
             let chat_path_clone = chat_path.clone();
             let room_id_clone = room_id.clone();
 
@@ -66,6 +69,7 @@ impl Broker {
                     stream,
                     tx,
                     clients_clone.clone(),
+                    status_map_clone,
                     chat_path_clone,
                     room_id_clone,
                 )
@@ -84,6 +88,7 @@ async fn handle_client(
     stream: UnixStream,
     own_tx: broadcast::Sender<String>,
     clients: ClientMap,
+    status_map: StatusMap,
     chat_path: Arc<PathBuf>,
     room_id: Arc<String>,
 ) -> anyhow::Result<()> {
@@ -99,6 +104,9 @@ async fn handle_client(
     }
 
     eprintln!("[broker] {username} joined (cid={cid})");
+
+    // Track this user in the status map (empty status by default)
+    status_map.lock().await.insert(username.clone(), String::new());
 
     // Subscribe before sending history so we don't miss concurrent messages
     let mut rx = own_tx.subscribe();
@@ -120,7 +128,7 @@ async fn handle_client(
         return Ok(());
     }
 
-    // Wrap write half in Arc<Mutex> for the outbound task
+    // Wrap write half in Arc<Mutex> for shared use by outbound and inbound tasks
     let write_half = Arc::new(Mutex::new(write_half));
 
     // Outbound: receive from broadcast channel, forward to client socket
@@ -146,7 +154,9 @@ async fn handle_client(
     let username_in = username.clone();
     let room_id_in = room_id.clone();
     let clients_in = clients.clone();
+    let status_map_in = status_map.clone();
     let chat_path_in = chat_path.clone();
+    let write_half_in = write_half.clone();
     let inbound = tokio::spawn(async move {
         let mut line = String::new();
         loop {
@@ -160,6 +170,50 @@ async fn handle_client(
                     }
                     match parse_client_line(trimmed, &room_id_in, &username_in) {
                         Ok(msg) => {
+                            if let Message::Command { ref cmd, ref params, .. } = msg {
+                                if cmd == "set_status" {
+                                    let status = params.first().cloned().unwrap_or_default();
+                                    status_map_in.lock().await.insert(username_in.clone(), status.clone());
+                                    let display = if status.is_empty() {
+                                        format!("{username_in} cleared their status")
+                                    } else {
+                                        format!("{username_in} set status: {status}")
+                                    };
+                                    let sys = make_system(&room_id_in, "broker", display);
+                                    if let Err(e) = broadcast_and_persist(&sys, &clients_in, &chat_path_in).await {
+                                        eprintln!("[broker] persist error: {e:#}");
+                                    }
+                                    continue;
+                                } else if cmd == "who" {
+                                    let map = status_map_in.lock().await;
+                                    let mut entries: Vec<String> = map
+                                        .iter()
+                                        .map(|(u, s)| {
+                                            if s.is_empty() {
+                                                u.clone()
+                                            } else {
+                                                format!("{u}: {s}")
+                                            }
+                                        })
+                                        .collect();
+                                    entries.sort();
+                                    drop(map);
+                                    let content = if entries.is_empty() {
+                                        "no users online".to_owned()
+                                    } else {
+                                        format!("online — {}", entries.join(", "))
+                                    };
+                                    let sys = make_system(&room_id_in, "broker", content);
+                                    if let Ok(json) = serde_json::to_string(&sys) {
+                                        let _ = write_half_in
+                                            .lock()
+                                            .await
+                                            .write_all(format!("{json}\n").as_bytes())
+                                            .await;
+                                    }
+                                    continue;
+                                }
+                            }
                             if let Err(e) =
                                 broadcast_and_persist(&msg, &clients_in, &chat_path_in).await
                             {
@@ -178,6 +232,9 @@ async fn handle_client(
         _ = outbound => {},
         _ = inbound => {},
     }
+
+    // Remove user from status map on disconnect
+    status_map.lock().await.remove(&username);
 
     // Broadcast leave event
     let leave_msg = make_leave(room_id.as_str(), &username);
