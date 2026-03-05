@@ -1,6 +1,6 @@
 [package]
 name = "agentroom"
-version = "0.1.4"
+version = "0.2.0"
 edition = "2021"
 description = "Multi-user chat room for agent/human coordination over Unix domain sockets"
 license = "MIT"
