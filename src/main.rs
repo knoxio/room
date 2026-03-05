@@ -28,6 +28,17 @@ enum Cmd {
         #[arg(long)]
         since: Option<String>,
     },
+    /// Watch for new messages from other users, blocking until at least one
+    /// arrives. Polls the chat file on a configurable interval. Shares the
+    /// cursor file with `room poll` so no messages are re-delivered. Exits
+    /// after printing the first batch of foreign messages as NDJSON.
+    Watch {
+        room_id: String,
+        username: String,
+        /// Poll interval in seconds (default: 5)
+        #[arg(long, default_value_t = 5)]
+        interval: u64,
+    },
 }
 
 #[derive(Parser, Debug)]
@@ -84,6 +95,13 @@ async fn main() -> anyhow::Result<()> {
             since,
         }) => {
             oneshot::cmd_poll(&room_id, &username, since).await?;
+        }
+        Some(Cmd::Watch {
+            room_id,
+            username,
+            interval,
+        }) => {
+            oneshot::cmd_watch(&room_id, &username, interval).await?;
         }
         None => {
             let room_id = args.room_id.unwrap_or_else(|| {

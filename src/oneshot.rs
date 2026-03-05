@@ -100,6 +100,37 @@ pub async fn poll_messages(
     Ok(result)
 }
 
+/// Watch subcommand: poll in a loop until at least one foreign `Message` arrives.
+///
+/// Polls every `interval_secs` seconds. On each iteration, messages from the
+/// calling `username` and all non-`Message` variants (join/leave/system/command/DM)
+/// are filtered out. When foreign messages are found they are printed as NDJSON and
+/// the command exits. The cursor file is shared with `room poll` so the two
+/// subcommands never re-deliver the same message.
+pub async fn cmd_watch(room_id: &str, username: &str, interval_secs: u64) -> anyhow::Result<()> {
+    let meta_path = PathBuf::from(format!("/tmp/room-{room_id}.meta"));
+    let chat_path = chat_path_from_meta(room_id, &meta_path);
+    let cursor_path = PathBuf::from(format!("/tmp/room-{room_id}-{username}.cursor"));
+
+    loop {
+        let messages = poll_messages(&chat_path, &cursor_path, Some(username), None).await?;
+
+        let foreign: Vec<&Message> = messages
+            .iter()
+            .filter(|m| matches!(m, Message::Message { user, .. } if user != username))
+            .collect();
+
+        if !foreign.is_empty() {
+            for msg in foreign {
+                println!("{}", serde_json::to_string(msg)?);
+            }
+            return Ok(());
+        }
+
+        tokio::time::sleep(tokio::time::Duration::from_secs(interval_secs)).await;
+    }
+}
+
 /// One-shot poll subcommand: read messages since cursor, print as NDJSON, update cursor.
 pub async fn cmd_poll(room_id: &str, username: &str, since: Option<String>) -> anyhow::Result<()> {
     let meta_path = PathBuf::from(format!("/tmp/room-{room_id}.meta"));
