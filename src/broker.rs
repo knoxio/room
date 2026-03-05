@@ -164,13 +164,24 @@ async fn handle_client(
     // Subscribe before sending history so we don't miss concurrent messages
     let mut rx = own_tx.subscribe();
 
-    // Send chat history directly to this client's socket.
+    // Send chat history directly to this client's socket, filtering DMs the
+    // client is not party to (sender, recipient, or host).
     // If the client disconnects mid-replay, treat it as a clean exit.
+    let host_name = host_user.lock().await.clone();
+    let is_host = host_name.as_deref() == Some(username.as_str());
     let history = history::load(&chat_path).await.unwrap_or_default();
     for msg in &history {
-        let line = format!("{}\n", serde_json::to_string(msg)?);
-        if write_half.write_all(line.as_bytes()).await.is_err() {
-            return Ok(());
+        let visible = match msg {
+            Message::DirectMessage { user, to, .. } => {
+                is_host || user == &username || to == &username
+            }
+            _ => true,
+        };
+        if visible {
+            let line = format!("{}\n", serde_json::to_string(msg)?);
+            if write_half.write_all(line.as_bytes()).await.is_err() {
+                return Ok(());
+            }
         }
     }
 
