@@ -3,7 +3,6 @@ use std::{
     path::{Path, PathBuf},
 };
 
-
 use crate::message::Message;
 
 pub fn default_chat_path(room_id: &str) -> PathBuf {
@@ -141,7 +140,9 @@ mod tests {
         let path = tmp.path();
 
         for i in 0..5 {
-            append(path, &make_message("r", "u", format!("msg {i}"))).await.unwrap();
+            append(path, &make_message("r", "u", format!("msg {i}")))
+                .await
+                .unwrap();
         }
 
         let loaded = load(path).await.unwrap();

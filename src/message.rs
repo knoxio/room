@@ -211,11 +211,22 @@ pub fn parse_client_line(raw: &str, room: &str, user: &str) -> Result<Message, s
     #[derive(Deserialize)]
     #[serde(tag = "type", rename_all = "snake_case")]
     enum Envelope {
-        Message { content: String },
-        Reply { reply_to: String, content: String },
-        Command { cmd: String, params: Vec<String> },
+        Message {
+            content: String,
+        },
+        Reply {
+            reply_to: String,
+            content: String,
+        },
+        Command {
+            cmd: String,
+            params: Vec<String>,
+        },
         #[serde(rename = "dm")]
-        Dm { to: String, content: String },
+        Dm {
+            to: String,
+            content: String,
+        },
     }
 
     if raw.starts_with('{') {
@@ -347,7 +358,10 @@ mod tests {
         assert_eq!(v["type"], "join");
         assert_eq!(v["user"], "alice");
         assert_eq!(v["room"], "r");
-        assert!(v.get("content").is_none(), "join should not have content field");
+        assert!(
+            v.get("content").is_none(),
+            "join should not have content field"
+        );
     }
 
     #[test]
@@ -383,7 +397,9 @@ mod tests {
     fn deserialize_command_with_empty_params() {
         let raw = r#"{"type":"command","id":"x","room":"r","user":"u","ts":"2026-03-05T10:00:00Z","cmd":"status","params":[]}"#;
         let msg: Message = serde_json::from_str(raw).unwrap();
-        assert!(matches!(&msg, Message::Command { cmd, params, .. } if cmd == "status" && params.is_empty()));
+        assert!(
+            matches!(&msg, Message::Command { cmd, params, .. } if cmd == "status" && params.is_empty())
+        );
     }
 
     // ── parse_client_line tests ───────────────────────────────────────────────

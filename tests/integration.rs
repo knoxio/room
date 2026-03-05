@@ -65,7 +65,9 @@ impl TestClient {
             .await
             .expect("client could not connect to broker socket");
         let (r, mut w) = stream.into_split();
-        w.write_all(format!("{username}\n").as_bytes()).await.unwrap();
+        w.write_all(format!("{username}\n").as_bytes())
+            .await
+            .unwrap();
         Self {
             reader: BufReader::new(r),
             writer: w,
@@ -144,13 +146,18 @@ async fn message_is_broadcast_to_all_clients() {
 
     let mut alice = TestClient::connect(&broker.socket_path, "alice").await;
     // drain alice's join
-    alice.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "alice")).await;
+    alice
+        .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "alice"))
+        .await;
 
     let mut bob = TestClient::connect(&broker.socket_path, "bob").await;
     // drain alice's perspective: bob's join
-    alice.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "bob")).await;
+    alice
+        .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "bob"))
+        .await;
     // drain bob's perspective: his own join
-    bob.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "bob")).await;
+    bob.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "bob"))
+        .await;
 
     // Alice sends a message
     alice.send_text("hey bob").await;
@@ -174,7 +181,9 @@ async fn message_is_broadcast_to_all_clients() {
 async fn messages_are_persisted_to_chat_file() {
     let broker = TestBroker::start("t_persist").await;
     let mut alice = TestClient::connect(&broker.socket_path, "alice").await;
-    alice.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "alice")).await;
+    alice
+        .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "alice"))
+        .await;
 
     alice.send_text("persist me").await;
     // wait for echo confirming broker processed it
@@ -207,7 +216,9 @@ async fn messages_are_persisted_to_chat_file() {
 async fn join_event_is_persisted() {
     let broker = TestBroker::start("t_join_persist").await;
     let mut alice = TestClient::connect(&broker.socket_path, "alice").await;
-    alice.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "alice")).await;
+    alice
+        .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "alice"))
+        .await;
 
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -227,11 +238,15 @@ async fn history_is_replayed_on_join() {
 
     // Alice sends 5 messages
     let mut alice = TestClient::connect(&broker.socket_path, "alice").await;
-    alice.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "alice")).await;
+    alice
+        .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "alice"))
+        .await;
     for i in 0..5usize {
         alice.send_text(&format!("msg {i}")).await;
         alice
-            .recv_until(|m| matches!(m, Message::Message { content, .. } if content == &format!("msg {i}")))
+            .recv_until(
+                |m| matches!(m, Message::Message { content, .. } if content == &format!("msg {i}")),
+            )
             .await;
     }
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -273,11 +288,16 @@ async fn json_command_envelope_is_broadcast() {
     let broker = TestBroker::start("t_cmd").await;
 
     let mut alice = TestClient::connect(&broker.socket_path, "alice").await;
-    alice.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "alice")).await;
+    alice
+        .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "alice"))
+        .await;
 
     let mut bob = TestClient::connect(&broker.socket_path, "bob").await;
-    alice.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "bob")).await;
-    bob.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "bob")).await;
+    alice
+        .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "bob"))
+        .await;
+    bob.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "bob"))
+        .await;
 
     alice
         .send_json(r#"{"type":"command","cmd":"claim","params":["task-42"]}"#)
@@ -298,10 +318,15 @@ async fn json_reply_envelope_is_broadcast() {
     let broker = TestBroker::start("t_reply").await;
 
     let mut alice = TestClient::connect(&broker.socket_path, "alice").await;
-    alice.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "alice")).await;
+    alice
+        .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "alice"))
+        .await;
     let mut bob = TestClient::connect(&broker.socket_path, "bob").await;
-    alice.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "bob")).await;
-    bob.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "bob")).await;
+    alice
+        .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "bob"))
+        .await;
+    bob.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "bob"))
+        .await;
 
     alice
         .send_json(r#"{"type":"reply","reply_to":"dead1234","content":"got it"}"#)
@@ -321,11 +346,16 @@ async fn disconnect_sends_leave_event() {
     let broker = TestBroker::start("t_leave").await;
 
     let mut alice = TestClient::connect(&broker.socket_path, "alice").await;
-    alice.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "alice")).await;
+    alice
+        .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "alice"))
+        .await;
 
     let mut bob = TestClient::connect(&broker.socket_path, "bob").await;
-    alice.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "bob")).await;
-    bob.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "bob")).await;
+    alice
+        .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "bob"))
+        .await;
+    bob.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "bob"))
+        .await;
 
     // Drop alice to simulate disconnect
     drop(alice);
@@ -340,7 +370,9 @@ async fn disconnect_sends_leave_event() {
 async fn messages_have_unique_ids() {
     let broker = TestBroker::start("t_ids").await;
     let mut alice = TestClient::connect(&broker.socket_path, "alice").await;
-    alice.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "alice")).await;
+    alice
+        .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "alice"))
+        .await;
 
     alice.send_text("one").await;
     let m1 = alice
@@ -375,7 +407,8 @@ async fn second_connection_is_client_not_broker() {
     let broker = TestBroker::start("t_two_clients").await;
 
     let mut c1 = TestClient::connect(&broker.socket_path, "user1").await;
-    c1.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "user1")).await;
+    c1.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "user1"))
+        .await;
 
     let mut c2 = TestClient::connect(&broker.socket_path, "user2").await;
     // If c2 accidentally became a broker, c1 would not receive user2's join
@@ -471,26 +504,43 @@ async fn dm_delivered_to_sender_recipient_and_host() {
 
     // alice connects first → she becomes the host
     let mut alice = TestClient::connect(&broker.socket_path, "alice").await;
-    alice.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "alice")).await;
+    alice
+        .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "alice"))
+        .await;
 
     let mut bob = TestClient::connect(&broker.socket_path, "bob").await;
-    alice.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "bob")).await;
-    bob.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "bob")).await;
+    alice
+        .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "bob"))
+        .await;
+    bob.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "bob"))
+        .await;
 
     let mut carol = TestClient::connect(&broker.socket_path, "carol").await;
-    alice.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "carol")).await;
-    bob.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "carol")).await;
-    carol.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "carol")).await;
+    alice
+        .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "carol"))
+        .await;
+    bob.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "carol"))
+        .await;
+    carol
+        .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "carol"))
+        .await;
 
     // dan is a bystander — not sender, recipient, or host
     let mut dan = TestClient::connect(&broker.socket_path, "dan").await;
-    alice.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "dan")).await;
-    bob.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "dan")).await;
-    carol.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "dan")).await;
-    dan.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "dan")).await;
+    alice
+        .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "dan"))
+        .await;
+    bob.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "dan"))
+        .await;
+    carol
+        .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "dan"))
+        .await;
+    dan.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "dan"))
+        .await;
 
     // bob sends a DM to carol
-    bob.send_json(r#"{"type":"dm","to":"carol","content":"psst"}"#).await;
+    bob.send_json(r#"{"type":"dm","to":"carol","content":"psst"}"#)
+        .await;
 
     // carol (recipient) receives it
     let msg = carol
@@ -538,11 +588,16 @@ async fn dm_is_persisted_to_history() {
     let broker = TestBroker::start("t_dm_persist").await;
 
     let mut alice = TestClient::connect(&broker.socket_path, "alice").await;
-    alice.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "alice")).await;
+    alice
+        .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "alice"))
+        .await;
 
     let mut bob = TestClient::connect(&broker.socket_path, "bob").await;
-    alice.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "bob")).await;
-    bob.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "bob")).await;
+    alice
+        .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "bob"))
+        .await;
+    bob.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "bob"))
+        .await;
 
     alice
         .send_json(r#"{"type":"dm","to":"bob","content":"private"}"#)
@@ -570,11 +625,16 @@ async fn dm_from_host_is_delivered_to_recipient() {
 
     // alice is host (first connect)
     let mut alice = TestClient::connect(&broker.socket_path, "alice").await;
-    alice.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "alice")).await;
+    alice
+        .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "alice"))
+        .await;
 
     let mut bob = TestClient::connect(&broker.socket_path, "bob").await;
-    alice.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "bob")).await;
-    bob.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "bob")).await;
+    alice
+        .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "bob"))
+        .await;
+    bob.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "bob"))
+        .await;
 
     alice
         .send_json(r#"{"type":"dm","to":"bob","content":"host dm"}"#)
@@ -596,7 +656,9 @@ async fn dm_to_offline_user_is_persisted() {
     let broker = TestBroker::start("t_dm_offline").await;
 
     let mut alice = TestClient::connect(&broker.socket_path, "alice").await;
-    alice.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "alice")).await;
+    alice
+        .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "alice"))
+        .await;
 
     // ghost is not connected
     alice
@@ -605,7 +667,9 @@ async fn dm_to_offline_user_is_persisted() {
 
     // alice (sender = host) gets the echo
     alice
-        .recv_until(|m| matches!(m, Message::DirectMessage { content, .. } if content == "nobody home"))
+        .recv_until(
+            |m| matches!(m, Message::DirectMessage { content, .. } if content == "nobody home"),
+        )
         .await;
 
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -637,11 +701,16 @@ async fn set_status_broadcasts_system_message_to_all() {
     let broker = TestBroker::start("t_set_status").await;
 
     let mut alice = TestClient::connect(&broker.socket_path, "alice").await;
-    alice.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "alice")).await;
+    alice
+        .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "alice"))
+        .await;
 
     let mut bob = TestClient::connect(&broker.socket_path, "bob").await;
-    alice.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "bob")).await;
-    bob.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "bob")).await;
+    alice
+        .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "bob"))
+        .await;
+    bob.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "bob"))
+        .await;
 
     alice
         .send_json(r#"{"type":"command","cmd":"set_status","params":["working on auth"]}"#)
@@ -649,12 +718,16 @@ async fn set_status_broadcasts_system_message_to_all() {
 
     // Both alice and bob should receive the system broadcast
     let alice_notice = alice
-        .recv_until(|m| matches!(m, Message::System { content, .. } if content.contains("working on auth")))
+        .recv_until(
+            |m| matches!(m, Message::System { content, .. } if content.contains("working on auth")),
+        )
         .await;
     assert!(alice_notice.user() == "broker");
 
     let bob_notice = bob
-        .recv_until(|m| matches!(m, Message::System { content, .. } if content.contains("working on auth")))
+        .recv_until(
+            |m| matches!(m, Message::System { content, .. } if content.contains("working on auth")),
+        )
         .await;
     assert!(bob_notice.user() == "broker");
 
@@ -674,18 +747,26 @@ async fn who_responds_only_to_requester() {
     let broker = TestBroker::start("t_who").await;
 
     let mut alice = TestClient::connect(&broker.socket_path, "alice").await;
-    alice.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "alice")).await;
+    alice
+        .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "alice"))
+        .await;
 
     let mut bob = TestClient::connect(&broker.socket_path, "bob").await;
-    alice.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "bob")).await;
-    bob.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "bob")).await;
+    alice
+        .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "bob"))
+        .await;
+    bob.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "bob"))
+        .await;
 
     // Bob sets a status so alice can verify it appears in who output
     bob.send_json(r#"{"type":"command","cmd":"set_status","params":["idle"]}"#)
         .await;
     // Drain the system broadcast on both sides
-    alice.recv_until(|m| matches!(m, Message::System { content, .. } if content.contains("idle"))).await;
-    bob.recv_until(|m| matches!(m, Message::System { content, .. } if content.contains("idle"))).await;
+    alice
+        .recv_until(|m| matches!(m, Message::System { content, .. } if content.contains("idle")))
+        .await;
+    bob.recv_until(|m| matches!(m, Message::System { content, .. } if content.contains("idle")))
+        .await;
 
     // Alice sends /who
     alice
@@ -705,7 +786,10 @@ async fn who_responds_only_to_requester() {
     // Bob should NOT receive the who response — it's private to alice.
     // We verify by checking that bob's next message (if any within 200ms) is not a System "online" response.
     let bob_got_who = timeout(Duration::from_millis(200), async {
-        bob.recv_until(|m| matches!(m, Message::System { content, .. } if content.contains("online"))).await
+        bob.recv_until(
+            |m| matches!(m, Message::System { content, .. } if content.contains("online")),
+        )
+        .await
     })
     .await;
     assert!(
@@ -795,10 +879,9 @@ async fn poll_returns_messages_since_id() {
     let dir = tempfile::tempdir().unwrap();
     let cursor_path = dir.path().join("test.cursor");
 
-    let msgs =
-        room::oneshot::poll_messages(&broker.chat_path, &cursor_path, Some(m1.id()))
-            .await
-            .unwrap();
+    let msgs = room::oneshot::poll_messages(&broker.chat_path, &cursor_path, Some(m1.id()))
+        .await
+        .unwrap();
 
     let contents: Vec<&str> = msgs
         .iter()
@@ -829,9 +912,7 @@ async fn poll_updates_cursor_file() {
 
     alice.send_text("cursor test").await;
     alice
-        .recv_until(
-            |m| matches!(m, Message::Message { content, .. } if content == "cursor test"),
-        )
+        .recv_until(|m| matches!(m, Message::Message { content, .. } if content == "cursor test"))
         .await;
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -843,7 +924,10 @@ async fn poll_updates_cursor_file() {
         .await
         .unwrap();
     assert!(!msgs.is_empty(), "first poll should return messages");
-    assert!(cursor_path.exists(), "cursor file must be written after poll");
+    assert!(
+        cursor_path.exists(),
+        "cursor file must be written after poll"
+    );
 
     // Second poll: cursor is up to date, nothing new
     let msgs2 = room::oneshot::poll_messages(&broker.chat_path, &cursor_path, None)
@@ -870,9 +954,7 @@ async fn poll_with_no_broker_reads_file_directly() {
         .unwrap();
 
     assert_eq!(msgs.len(), 1);
-    assert!(
-        matches!(&msgs[0], Message::Message { content, .. } if content == "written directly")
-    );
+    assert!(matches!(&msgs[0], Message::Message { content, .. } if content == "written directly"));
 }
 
 /// `send_message` returns an error when no broker socket exists.
@@ -882,7 +964,10 @@ async fn send_fails_when_no_broker() {
     let socket_path = dir.path().join("nonexistent.sock");
 
     let result = room::oneshot::send_message(&socket_path, "bot", "hello").await;
-    assert!(result.is_err(), "send should fail when no broker is running");
+    assert!(
+        result.is_err(),
+        "send should fail when no broker is running"
+    );
 }
 
 /// Users removed from status map on disconnect do not appear in subsequent who responses.
@@ -891,15 +976,22 @@ async fn who_excludes_disconnected_users() {
     let broker = TestBroker::start("t_who_disconnect").await;
 
     let mut alice = TestClient::connect(&broker.socket_path, "alice").await;
-    alice.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "alice")).await;
+    alice
+        .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "alice"))
+        .await;
 
     let mut bob = TestClient::connect(&broker.socket_path, "bob").await;
-    alice.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "bob")).await;
-    bob.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "bob")).await;
+    alice
+        .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "bob"))
+        .await;
+    bob.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "bob"))
+        .await;
 
     // Bob disconnects
     drop(bob);
-    alice.recv_until(|m| matches!(m, Message::Leave { user, .. } if user == "bob")).await;
+    alice
+        .recv_until(|m| matches!(m, Message::Leave { user, .. } if user == "bob"))
+        .await;
 
     // Alice queries who — bob should not appear
     alice
@@ -910,7 +1002,13 @@ async fn who_excludes_disconnected_users() {
         .recv_until(|m| matches!(m, Message::System { content, .. } if content.contains("online")))
         .await;
     if let Message::System { content, .. } = &response {
-        assert!(!content.contains("bob"), "disconnected user should not appear in who list");
-        assert!(content.contains("alice"), "alice should still be in who list");
+        assert!(
+            !content.contains("bob"),
+            "disconnected user should not appear in who list"
+        );
+        assert!(
+            content.contains("alice"),
+            "alice should still be in who list"
+        );
     }
 }

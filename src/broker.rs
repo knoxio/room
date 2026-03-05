@@ -69,7 +69,10 @@ impl Broker {
 
             let (tx, _) = broadcast::channel::<String>(256);
             // Insert with empty username; handle_client updates it after handshake.
-            clients.lock().await.insert(cid, (String::new(), tx.clone()));
+            clients
+                .lock()
+                .await
+                .insert(cid, (String::new(), tx.clone()));
 
             let clients_clone = clients.clone();
             let status_map_clone = status_map.clone();
@@ -152,7 +155,10 @@ async fn handle_client(
     eprintln!("[broker] {username} joined (cid={cid})");
 
     // Track this user in the status map (empty status by default)
-    status_map.lock().await.insert(username.clone(), String::new());
+    status_map
+        .lock()
+        .await
+        .insert(username.clone(), String::new());
 
     // Subscribe before sending history so we don't miss concurrent messages
     let mut rx = own_tx.subscribe();
@@ -218,17 +224,28 @@ async fn handle_client(
                     match parse_client_line(trimmed, &room_id_in, &username_in) {
                         Ok(msg) => {
                             // Handle status commands privately (no broadcast of the Command itself)
-                            if let Message::Command { ref cmd, ref params, .. } = msg {
+                            if let Message::Command {
+                                ref cmd,
+                                ref params,
+                                ..
+                            } = msg
+                            {
                                 if cmd == "set_status" {
                                     let status = params.first().cloned().unwrap_or_default();
-                                    status_map_in.lock().await.insert(username_in.clone(), status.clone());
+                                    status_map_in
+                                        .lock()
+                                        .await
+                                        .insert(username_in.clone(), status.clone());
                                     let display = if status.is_empty() {
                                         format!("{username_in} cleared their status")
                                     } else {
                                         format!("{username_in} set status: {status}")
                                     };
                                     let sys = make_system(&room_id_in, "broker", display);
-                                    if let Err(e) = broadcast_and_persist(&sys, &clients_in, &chat_path_in).await {
+                                    if let Err(e) =
+                                        broadcast_and_persist(&sys, &clients_in, &chat_path_in)
+                                            .await
+                                    {
                                         eprintln!("[broker] persist error: {e:#}");
                                     }
                                     continue;
@@ -362,10 +379,7 @@ async fn dm_and_persist(
     let host_name = host.as_deref();
     let map = clients.lock().await;
     for (username, tx) in map.values() {
-        if username == sender
-            || username == recipient
-            || host_name == Some(username.as_str())
-        {
+        if username == sender || username == recipient || host_name == Some(username.as_str()) {
             let _ = tx.send(line.clone());
         }
     }

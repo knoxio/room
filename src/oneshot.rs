@@ -73,11 +73,7 @@ pub async fn poll_messages(
 }
 
 /// One-shot poll subcommand: read messages since cursor, print as NDJSON, update cursor.
-pub async fn cmd_poll(
-    room_id: &str,
-    username: &str,
-    since: Option<String>,
-) -> anyhow::Result<()> {
+pub async fn cmd_poll(room_id: &str, username: &str, since: Option<String>) -> anyhow::Result<()> {
     let meta_path = PathBuf::from(format!("/tmp/room-{room_id}.meta"));
     let chat_path = chat_path_from_meta(room_id, &meta_path);
     let cursor_path = PathBuf::from(format!("/tmp/room-{room_id}-{username}.cursor"));

@@ -28,7 +28,10 @@ enum Cmd {
 }
 
 #[derive(Parser, Debug)]
-#[command(name = "room", about = "Multi-user chat room for agent/human coordination")]
+#[command(
+    name = "room",
+    about = "Multi-user chat room for agent/human coordination"
+)]
 struct Args {
     /// Room identifier (required when no subcommand is given)
     room_id: Option<String>,
@@ -173,11 +176,7 @@ async fn run_join(
     Ok(())
 }
 
-fn resolve_chat_path(
-    chat_file: &Option<PathBuf>,
-    meta_path: &PathBuf,
-    room_id: &str,
-) -> PathBuf {
+fn resolve_chat_path(chat_file: &Option<PathBuf>, meta_path: &PathBuf, room_id: &str) -> PathBuf {
     if let Some(ref p) = chat_file {
         return p.clone();
     }

@@ -91,7 +91,10 @@ pub async fn run(
             messages.push(msg);
         }
 
-        let msg_items: Vec<ListItem> = messages.iter().map(|m| ListItem::new(format_message(m))).collect();
+        let msg_items: Vec<ListItem> = messages
+            .iter()
+            .map(|m| ListItem::new(format_message(m)))
+            .collect();
 
         terminal.draw(|f| {
             let chunks = Layout::default()
@@ -193,7 +196,9 @@ fn format_message(msg: &Message) -> Line<'static> {
                 Span::styled(format!("[{ts_str}] "), Style::default().fg(Color::DarkGray)),
                 Span::styled(
                     format!("{user} joined"),
-                    Style::default().fg(Color::Green).add_modifier(Modifier::ITALIC),
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::ITALIC),
                 ),
             ])
         }
@@ -203,29 +208,43 @@ fn format_message(msg: &Message) -> Line<'static> {
                 Span::styled(format!("[{ts_str}] "), Style::default().fg(Color::DarkGray)),
                 Span::styled(
                     format!("{user} left"),
-                    Style::default().fg(Color::Red).add_modifier(Modifier::ITALIC),
+                    Style::default()
+                        .fg(Color::Red)
+                        .add_modifier(Modifier::ITALIC),
                 ),
             ])
         }
-        Message::Message { ts, user, content, .. } => {
+        Message::Message {
+            ts, user, content, ..
+        } => {
             let ts_str = ts.format("%H:%M:%S").to_string();
             Line::from(vec![
                 Span::styled(format!("[{ts_str}] "), Style::default().fg(Color::DarkGray)),
                 Span::styled(
                     format!("{user}: "),
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
                 ),
                 Span::raw(content.clone()),
             ])
         }
-        Message::Reply { ts, user, reply_to, content, .. } => {
+        Message::Reply {
+            ts,
+            user,
+            reply_to,
+            content,
+            ..
+        } => {
             let ts_str = ts.format("%H:%M:%S").to_string();
             let short_id = &reply_to[..reply_to.len().min(8)];
             Line::from(vec![
                 Span::styled(format!("[{ts_str}] "), Style::default().fg(Color::DarkGray)),
                 Span::styled(
                     format!("{user}: "),
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
                     format!("(re:{short_id}) "),
@@ -234,13 +253,21 @@ fn format_message(msg: &Message) -> Line<'static> {
                 Span::raw(content.clone()),
             ])
         }
-        Message::Command { ts, user, cmd, params, .. } => {
+        Message::Command {
+            ts,
+            user,
+            cmd,
+            params,
+            ..
+        } => {
             let ts_str = ts.format("%H:%M:%S").to_string();
             Line::from(vec![
                 Span::styled(format!("[{ts_str}] "), Style::default().fg(Color::DarkGray)),
                 Span::styled(
                     format!("{user}: "),
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
                     format!("/{cmd} {}", params.join(" ")),
@@ -258,13 +285,21 @@ fn format_message(msg: &Message) -> Line<'static> {
                 ),
             ])
         }
-        Message::DirectMessage { ts, user, to, content, .. } => {
+        Message::DirectMessage {
+            ts,
+            user,
+            to,
+            content,
+            ..
+        } => {
             let ts_str = ts.format("%H:%M:%S").to_string();
             Line::from(vec![
                 Span::styled(format!("[{ts_str}] "), Style::default().fg(Color::DarkGray)),
                 Span::styled(
                     format!("[dm] {user}→{to}: "),
-                    Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::Magenta)
+                        .add_modifier(Modifier::BOLD),
                 ),
                 Span::raw(content.clone()),
             ])
