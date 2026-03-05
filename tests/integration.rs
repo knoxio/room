@@ -1583,6 +1583,10 @@ async fn pull_messages_empty_history_returns_empty() {
 }
 
 /// `pull_messages` does not update the poll cursor.
+///
+/// Establishes a cursor via `poll_messages`, sends a second message, then calls
+/// `pull_messages`. A subsequent `poll_messages` must still return the second
+/// message -- proving that `pull_messages` did not advance the cursor.
 #[tokio::test]
 async fn pull_messages_does_not_update_cursor() {
     let broker = TestBroker::start("t_pull_no_cursor").await;
@@ -1591,26 +1595,46 @@ async fn pull_messages_does_not_update_cursor() {
         .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "alice"))
         .await;
 
-    alice.send_text("hello").await;
+    alice.send_text("first").await;
     alice
-        .recv_until(|m| matches!(m, Message::Message { content, .. } if content == "hello"))
+        .recv_until(|m| matches!(m, Message::Message { content, .. } if content == "first"))
         .await;
 
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    let cursor_path = broker.chat_path.with_extension("cursor");
+    // Cursor path local to this test -- not a real /tmp path.
+    let cursor_path = broker.chat_path.with_extension("test.cursor");
+
+    // Advance the cursor past "first" so the next poll starts after it.
+    let initial = room::oneshot::poll_messages(&broker.chat_path, &cursor_path, None, None)
+        .await
+        .unwrap();
     assert!(
-        !cursor_path.exists(),
-        "no cursor file should exist before pull"
+        !initial.is_empty(),
+        "first poll should return at least one message"
     );
 
+    // Send a second message after the cursor position.
+    alice.send_text("second").await;
+    alice
+        .recv_until(|m| matches!(m, Message::Message { content, .. } if content == "second"))
+        .await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Pull -- must not advance the cursor.
     room::oneshot::pull_messages(&broker.chat_path, 5, None)
         .await
         .unwrap();
 
+    // Poll must still return "second" -- if pull had moved the cursor this would be empty.
+    let after_pull = room::oneshot::poll_messages(&broker.chat_path, &cursor_path, None, None)
+        .await
+        .unwrap();
     assert!(
-        !cursor_path.exists(),
-        "pull_messages must not create or modify the cursor file"
+        after_pull
+            .iter()
+            .any(|m| matches!(m, Message::Message { content, .. } if content == "second")),
+        "poll after pull must still return 'second' -- cursor must not be advanced by pull_messages"
     );
 }
 
