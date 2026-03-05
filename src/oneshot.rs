@@ -246,7 +246,8 @@ pub async fn pull_messages(
     n: usize,
     viewer: Option<&str>,
 ) -> anyhow::Result<Vec<Message>> {
-    let all = history::load(chat_path).await?;
+    let clamped = n.min(200);
+    let all = history::tail(chat_path, clamped).await?;
     let visible: Vec<Message> = all
         .into_iter()
         .filter(|m| match m {
@@ -256,8 +257,7 @@ pub async fn pull_messages(
             _ => true,
         })
         .collect();
-    let start = visible.len().saturating_sub(n);
-    Ok(visible[start..].to_vec())
+    Ok(visible)
 }
 
 /// One-shot pull subcommand: print the last N messages from history as NDJSON.
