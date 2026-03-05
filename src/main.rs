@@ -19,6 +19,9 @@ enum Cmd {
     /// `room join`. Prints the broadcast message JSON and exits.
     Send {
         room_id: String,
+        /// Select token by username (required when multiple sessions share this machine)
+        #[arg(long)]
+        user: Option<String>,
         /// Recipient username for a direct message
         #[arg(long)]
         to: Option<String>,
@@ -32,6 +35,9 @@ enum Cmd {
     /// per-user cursor file so subsequent calls return only unseen messages.
     Poll {
         room_id: String,
+        /// Select token by username (required when multiple sessions share this machine)
+        #[arg(long)]
+        user: Option<String>,
         /// Return only messages after this message ID (overrides stored cursor)
         #[arg(long)]
         since: Option<String>,
@@ -44,6 +50,9 @@ enum Cmd {
     /// Reads the caller's identity from the session token file.
     Watch {
         room_id: String,
+        /// Select token by username (required when multiple sessions share this machine)
+        #[arg(long)]
+        user: Option<String>,
         /// Poll interval in seconds (default: 5)
         #[arg(long, default_value_t = 5)]
         interval: u64,
@@ -94,17 +103,26 @@ async fn main() -> anyhow::Result<()> {
         }
         Some(Cmd::Send {
             room_id,
+            user,
             to,
             message,
         }) => {
             let content = message.join(" ");
-            oneshot::cmd_send(&room_id, to.as_deref(), &content).await?;
+            oneshot::cmd_send(&room_id, user.as_deref(), to.as_deref(), &content).await?;
         }
-        Some(Cmd::Poll { room_id, since }) => {
-            oneshot::cmd_poll(&room_id, since).await?;
+        Some(Cmd::Poll {
+            room_id,
+            user,
+            since,
+        }) => {
+            oneshot::cmd_poll(&room_id, user.as_deref(), since).await?;
         }
-        Some(Cmd::Watch { room_id, interval }) => {
-            oneshot::cmd_watch(&room_id, interval).await?;
+        Some(Cmd::Watch {
+            room_id,
+            user,
+            interval,
+        }) => {
+            oneshot::cmd_watch(&room_id, user.as_deref(), interval).await?;
         }
         None => {
             let room_id = args.room_id.unwrap_or_else(|| {
