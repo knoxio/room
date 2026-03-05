@@ -372,6 +372,10 @@ pub async fn run(
                             // Shift+Enter: insert a newline at the cursor.
                             input.insert(cursor_pos, '\n');
                             cursor_pos += 1;
+                        } else if let Some(new_pos) = apply_backslash_enter(&mut input, cursor_pos)
+                        {
+                            // Backslash + Enter: strip the trailing '\' and insert a newline.
+                            cursor_pos = new_pos;
                         } else if !input.is_empty() {
                             let payload = build_payload(&input);
                             input.clear();
@@ -1152,6 +1156,83 @@ mod tests {
         // "abcde" exactly fills width 5, no following content.
         // Cursor at end → (0, 5), not (1, 0).
         assert_eq!(cursor_display_pos("abcde", 5, 5), (0, 5));
+    }
+
+    // ── apply_backslash_enter ───────────────────────────────────────────────
+
+    #[test]
+    fn backslash_enter_at_end_replaces_backslash_with_newline() {
+        let mut buf = String::from("hello\\");
+        let pos = apply_backslash_enter(&mut buf, 6);
+        assert_eq!(pos, Some(6));
+        assert_eq!(buf, "hello\n");
+    }
+
+    #[test]
+    fn backslash_enter_mid_buffer_replaces_at_cursor() {
+        // Buffer: "foo\bar" with cursor after '\' (byte 4).
+        let mut buf = String::from("foo\\bar");
+        let pos = apply_backslash_enter(&mut buf, 4);
+        assert_eq!(pos, Some(4));
+        assert_eq!(buf, "foo\nbar");
+    }
+
+    #[test]
+    fn backslash_enter_no_preceding_backslash_returns_none() {
+        let mut buf = String::from("hello");
+        let pos = apply_backslash_enter(&mut buf, 5);
+        assert_eq!(pos, None);
+        assert_eq!(buf, "hello"); // unchanged
+    }
+
+    #[test]
+    fn backslash_enter_cursor_at_start_returns_none() {
+        let mut buf = String::from("\\hello");
+        let pos = apply_backslash_enter(&mut buf, 0);
+        assert_eq!(pos, None);
+        assert_eq!(buf, "\\hello"); // unchanged
+    }
+
+    #[test]
+    fn backslash_enter_empty_buffer_returns_none() {
+        let mut buf = String::new();
+        let pos = apply_backslash_enter(&mut buf, 0);
+        assert_eq!(pos, None);
+    }
+
+    #[test]
+    fn backslash_enter_cursor_not_at_backslash_returns_none() {
+        // Buffer "a\\b", cursor after 'a' (byte 1) — backslash is not before cursor.
+        let mut buf = String::from("a\\b");
+        let pos = apply_backslash_enter(&mut buf, 1);
+        assert_eq!(pos, None);
+        assert_eq!(buf, "a\\b"); // unchanged
+    }
+
+    #[test]
+    fn backslash_enter_double_backslash_replaces_last_one() {
+        // "foo\\\\" — two backslashes. Cursor at byte 5 (end).
+        // Only the immediately preceding '\' is replaced.
+        let mut buf = String::from("foo\\\\");
+        let pos = apply_backslash_enter(&mut buf, 5);
+        assert_eq!(pos, Some(5));
+        assert_eq!(buf, "foo\\\n");
+    }
+}
+
+/// If the char immediately before `cursor_pos` in `buf` is `\`, removes it
+/// and inserts `\n`, returning the new cursor position. Returns `None` if the
+/// precondition is not met (no preceding backslash or cursor at start).
+///
+/// This mirrors the backslash+Enter key binding in the TUI event loop.
+fn apply_backslash_enter(buf: &mut String, cursor_pos: usize) -> Option<usize> {
+    if cursor_pos > 0 && buf[..cursor_pos].ends_with('\\') {
+        let bs_pos = cursor_pos - 1; // '\\' is ASCII (1 byte)
+        buf.remove(bs_pos);
+        buf.insert(bs_pos, '\n');
+        Some(bs_pos + 1)
+    } else {
+        None
     }
 }
 
