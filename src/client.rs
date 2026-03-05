@@ -30,7 +30,14 @@ impl Client {
         if self.agent_mode {
             run_agent(reader, write_half, &self.username, self.history_lines).await
         } else {
-            tui::run(reader, write_half, &self.room_id, &self.username, self.history_lines).await
+            tui::run(
+                reader,
+                write_half,
+                &self.room_id,
+                &self.username,
+                self.history_lines,
+            )
+            .await
         }
     }
 }
