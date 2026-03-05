@@ -9,16 +9,108 @@ use crossterm::{
 };
 use ratatui::{
     backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout},
+    layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, List, ListItem, Paragraph},
+    widgets::{Block, Borders, Clear, List, ListItem, Paragraph},
     Terminal,
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     sync::mpsc,
 };
+
+// ── Command palette ───────────────────────────────────────────────────────────
+
+struct PaletteItem {
+    cmd: &'static str,
+    usage: &'static str,
+    description: &'static str,
+}
+
+const PALETTE_COMMANDS: &[PaletteItem] = &[
+    PaletteItem {
+        cmd: "dm",
+        usage: "/dm <user> <message>",
+        description: "Send a private message",
+    },
+    PaletteItem {
+        cmd: "claim",
+        usage: "/claim <task>",
+        description: "Claim a task",
+    },
+    PaletteItem {
+        cmd: "reply",
+        usage: "/reply <id> <message>",
+        description: "Reply to a message",
+    },
+    PaletteItem {
+        cmd: "who",
+        usage: "/who",
+        description: "List users in the room",
+    },
+];
+
+struct CommandPalette {
+    active: bool,
+    selected: usize,
+    /// Indices into `PALETTE_COMMANDS` that match the current query.
+    filtered: Vec<usize>,
+}
+
+impl CommandPalette {
+    fn new() -> Self {
+        Self {
+            active: false,
+            selected: 0,
+            filtered: (0..PALETTE_COMMANDS.len()).collect(),
+        }
+    }
+
+    fn activate(&mut self) {
+        self.active = true;
+        self.selected = 0;
+        self.filtered = (0..PALETTE_COMMANDS.len()).collect();
+    }
+
+    fn deactivate(&mut self) {
+        self.active = false;
+    }
+
+    /// Update the filtered list based on text typed after the leading `/`.
+    fn update_filter(&mut self, query: &str) {
+        let q = query.to_ascii_lowercase();
+        self.filtered = PALETTE_COMMANDS
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| {
+                item.cmd.starts_with(q.as_str())
+                    || item.description.to_ascii_lowercase().contains(q.as_str())
+            })
+            .map(|(i, _)| i)
+            .collect();
+        if self.selected >= self.filtered.len() {
+            self.selected = self.filtered.len().saturating_sub(1);
+        }
+    }
+
+    fn move_up(&mut self) {
+        self.selected = self.selected.saturating_sub(1);
+    }
+
+    fn move_down(&mut self) {
+        if !self.filtered.is_empty() {
+            self.selected = (self.selected + 1).min(self.filtered.len() - 1);
+        }
+    }
+
+    /// The full usage string (including leading `/`) of the selected entry.
+    fn selected_usage(&self) -> Option<&'static str> {
+        self.filtered
+            .get(self.selected)
+            .map(|&i| PALETTE_COMMANDS[i].usage)
+    }
+}
 
 use crate::message::Message;
 
@@ -91,6 +183,7 @@ pub async fn run(
     let mut cursor_pos: usize = 0; // byte index into `input`, always on a char boundary
     let mut input_row_scroll: usize = 0; // vertical scroll within the input box
     let mut scroll_offset: usize = 0;
+    let mut palette = CommandPalette::new();
     let mut result: anyhow::Result<()> = Ok(());
 
     'main: loop {
@@ -195,13 +288,87 @@ pub async fn run(
             let cursor_x = chunks[1].x + 1 + cursor_col as u16;
             let cursor_y = chunks[1].y + 1 + visible_cursor_row as u16;
             f.set_cursor_position((cursor_x, cursor_y));
+
+            // Render the command palette popup above the input box when active.
+            if palette.active && !palette.filtered.is_empty() {
+                let palette_items: Vec<ListItem> = palette
+                    .filtered
+                    .iter()
+                    .enumerate()
+                    .map(|(row, &idx)| {
+                        let item = &PALETTE_COMMANDS[idx];
+                        let style = if row == palette.selected {
+                            Style::default()
+                                .fg(Color::Black)
+                                .bg(Color::Cyan)
+                                .add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default().fg(Color::White)
+                        };
+                        ListItem::new(Line::from(vec![
+                            Span::styled(
+                                format!("{:<16}", item.usage),
+                                style.add_modifier(Modifier::BOLD),
+                            ),
+                            Span::styled(
+                                format!("  {}", item.description),
+                                if row == palette.selected {
+                                    Style::default().fg(Color::Black).bg(Color::Cyan)
+                                } else {
+                                    Style::default().fg(Color::DarkGray)
+                                },
+                            ),
+                        ]))
+                    })
+                    .collect();
+
+                let popup_height = (palette.filtered.len() as u16 + 2).min(chunks[0].height);
+                let popup_y = chunks[1].y.saturating_sub(popup_height);
+                let popup_rect = Rect {
+                    x: chunks[1].x,
+                    y: popup_y,
+                    width: chunks[1].width,
+                    height: popup_height,
+                };
+
+                f.render_widget(Clear, popup_rect);
+                let palette_list = List::new(palette_items).block(
+                    Block::default()
+                        .title(" commands ")
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(Color::Cyan)),
+                );
+                f.render_widget(palette_list, popup_rect);
+            }
         })?;
 
         if event::poll(std::time::Duration::from_millis(50))? {
             match event::read()? {
                 Event::Key(key) => match key.code {
+                    KeyCode::Esc => {
+                        if palette.active {
+                            palette.deactivate();
+                        }
+                    }
+                    KeyCode::Tab if palette.active => {
+                        // Complete with selected command usage, replacing input.
+                        if let Some(usage) = palette.selected_usage() {
+                            input = usage.to_owned();
+                            cursor_pos = input.len();
+                            input_row_scroll = 0;
+                        }
+                        palette.deactivate();
+                    }
                     KeyCode::Enter => {
-                        if key.modifiers.contains(KeyModifiers::SHIFT) {
+                        if palette.active {
+                            // Complete and deactivate — user presses Enter to confirm selection.
+                            if let Some(usage) = palette.selected_usage() {
+                                input = usage.to_owned();
+                                cursor_pos = input.len();
+                                input_row_scroll = 0;
+                            }
+                            palette.deactivate();
+                        } else if key.modifiers.contains(KeyModifiers::SHIFT) {
                             // Shift+Enter: insert a newline at the cursor.
                             input.insert(cursor_pos, '\n');
                             cursor_pos += 1;
@@ -220,12 +387,40 @@ pub async fn run(
                             }
                         }
                     }
+                    KeyCode::Up => {
+                        if palette.active {
+                            palette.move_up();
+                        } else {
+                            scroll_offset = scroll_offset.saturating_add(1);
+                        }
+                    }
+                    KeyCode::Down => {
+                        if palette.active {
+                            palette.move_down();
+                        } else {
+                            scroll_offset = scroll_offset.saturating_sub(1);
+                        }
+                    }
                     KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         break 'main;
                     }
                     KeyCode::Char(c) => {
                         input.insert(cursor_pos, c);
                         cursor_pos += c.len_utf8();
+                        // Activate palette when `/` is typed at the start of an otherwise empty input.
+                        if c == '/' && input == "/" {
+                            palette.activate();
+                        } else if palette.active {
+                            // Update autocomplete filter: query is everything after the leading `/`.
+                            if let Some(query) = input.strip_prefix('/') {
+                                palette.update_filter(query);
+                                if palette.filtered.is_empty() {
+                                    palette.deactivate();
+                                }
+                            } else {
+                                palette.deactivate();
+                            }
+                        }
                     }
                     KeyCode::Backspace => {
                         if cursor_pos > 0 {
@@ -236,6 +431,19 @@ pub async fn run(
                                 .unwrap_or(0);
                             input.remove(prev);
                             cursor_pos = prev;
+                            // Sync palette state after deletion.
+                            if palette.active {
+                                if input.is_empty() {
+                                    palette.deactivate();
+                                } else if let Some(query) = input.strip_prefix('/') {
+                                    palette.update_filter(query);
+                                    if palette.filtered.is_empty() {
+                                        palette.deactivate();
+                                    }
+                                } else {
+                                    palette.deactivate();
+                                }
+                            }
                         }
                     }
                     KeyCode::Left => {
@@ -258,12 +466,6 @@ pub async fn run(
                     }
                     KeyCode::End => {
                         cursor_pos = input.len();
-                    }
-                    KeyCode::Up => {
-                        scroll_offset = scroll_offset.saturating_add(1);
-                    }
-                    KeyCode::Down => {
-                        scroll_offset = scroll_offset.saturating_sub(1);
                     }
                     KeyCode::PageUp => {
                         scroll_offset = scroll_offset.saturating_add(visible_count);
@@ -635,33 +837,184 @@ fn user_color(username: &str) -> Color {
     PALETTE[hash % PALETTE.len()]
 }
 
-/// Convert TUI input to a JSON envelope for the broker.
-fn build_payload(input: &str) -> String {
-    // `/dm <user> <message>` — preserve spaces in the message body.
-    if let Some(rest) = input.strip_prefix("/dm ") {
-        let mut parts = rest.splitn(2, ' ');
-        let to = parts.next().unwrap_or("").to_owned();
-        let content = parts.next().unwrap_or("").to_owned();
-        return serde_json::json!({ "type": "dm", "to": to, "content": content }).to_string();
-    }
-    if let Some(rest) = input.strip_prefix('/') {
-        let mut parts = rest.splitn(2, ' ');
-        let cmd = parts.next().unwrap_or("").to_owned();
-        let params: Vec<String> = parts
-            .next()
-            .unwrap_or("")
-            .split_whitespace()
-            .map(str::to_owned)
-            .collect();
-        serde_json::json!({ "type": "command", "cmd": cmd, "params": params }).to_string()
-    } else {
-        serde_json::json!({ "type": "message", "content": input }).to_string()
-    }
-}
+// ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
-    use super::{cursor_display_pos, wrap_input_display};
+    use super::*;
+
+    // ── CommandPalette unit tests ─────────────────────────────────────────────
+
+    #[test]
+    fn palette_starts_inactive() {
+        let p = CommandPalette::new();
+        assert!(!p.active);
+        assert_eq!(p.filtered.len(), PALETTE_COMMANDS.len());
+    }
+
+    #[test]
+    fn palette_activate_resets_state() {
+        let mut p = CommandPalette::new();
+        p.selected = 2;
+        p.filtered = vec![1];
+        p.activate();
+        assert!(p.active);
+        assert_eq!(p.selected, 0);
+        assert_eq!(p.filtered.len(), PALETTE_COMMANDS.len());
+    }
+
+    #[test]
+    fn palette_deactivate_clears_active() {
+        let mut p = CommandPalette::new();
+        p.activate();
+        p.deactivate();
+        assert!(!p.active);
+    }
+
+    #[test]
+    fn palette_filter_by_cmd_prefix() {
+        let mut p = CommandPalette::new();
+        p.update_filter("d");
+        assert!(!p.filtered.is_empty());
+        // All filtered entries must start with "d"
+        for &i in &p.filtered {
+            assert!(PALETTE_COMMANDS[i].cmd.starts_with('d'));
+        }
+    }
+
+    #[test]
+    fn palette_filter_dm_exact() {
+        let mut p = CommandPalette::new();
+        p.update_filter("dm");
+        assert_eq!(p.filtered.len(), 1);
+        assert_eq!(PALETTE_COMMANDS[p.filtered[0]].cmd, "dm");
+    }
+
+    #[test]
+    fn palette_filter_empty_query_shows_all() {
+        let mut p = CommandPalette::new();
+        p.update_filter("");
+        assert_eq!(p.filtered.len(), PALETTE_COMMANDS.len());
+    }
+
+    #[test]
+    fn palette_filter_no_match_returns_empty() {
+        let mut p = CommandPalette::new();
+        p.update_filter("zzz_no_match");
+        assert!(p.filtered.is_empty());
+    }
+
+    #[test]
+    fn palette_filter_by_description_keyword() {
+        let mut p = CommandPalette::new();
+        p.update_filter("private");
+        // Should match "dm" whose description is "Send a private message"
+        assert!(p.filtered.iter().any(|&i| PALETTE_COMMANDS[i].cmd == "dm"));
+    }
+
+    #[test]
+    fn palette_move_up_clamps_at_zero() {
+        let mut p = CommandPalette::new();
+        p.activate();
+        p.move_up();
+        assert_eq!(p.selected, 0);
+    }
+
+    #[test]
+    fn palette_move_down_clamps_at_end() {
+        let mut p = CommandPalette::new();
+        p.activate();
+        for _ in 0..100 {
+            p.move_down();
+        }
+        assert_eq!(p.selected, PALETTE_COMMANDS.len() - 1);
+    }
+
+    #[test]
+    fn palette_move_up_down_navigate() {
+        let mut p = CommandPalette::new();
+        p.activate();
+        p.move_down();
+        p.move_down();
+        assert_eq!(p.selected, 2);
+        p.move_up();
+        assert_eq!(p.selected, 1);
+    }
+
+    #[test]
+    fn palette_selected_usage_returns_usage_string() {
+        let mut p = CommandPalette::new();
+        p.activate();
+        // First entry in unfiltered list
+        let usage = p.selected_usage().unwrap();
+        assert!(usage.starts_with('/'));
+    }
+
+    #[test]
+    fn palette_selected_usage_empty_when_no_filtered() {
+        let mut p = CommandPalette::new();
+        p.filtered.clear();
+        assert!(p.selected_usage().is_none());
+    }
+
+    #[test]
+    fn palette_selected_clamps_after_filter_narrows() {
+        let mut p = CommandPalette::new();
+        p.activate();
+        // Navigate to last entry
+        for _ in 0..100 {
+            p.move_down();
+        }
+        assert_eq!(p.selected, PALETTE_COMMANDS.len() - 1);
+        // Now narrow filter so fewer entries remain
+        p.update_filter("dm");
+        assert_eq!(p.filtered.len(), 1);
+        assert_eq!(p.selected, 0); // clamped
+    }
+
+    // ── build_payload tests ───────────────────────────────────────────────────
+
+    #[test]
+    fn build_payload_plain_text_is_message_type() {
+        let payload = build_payload("hello world");
+        let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(v["type"], "message");
+        assert_eq!(v["content"], "hello world");
+    }
+
+    #[test]
+    fn build_payload_dm_command() {
+        let payload = build_payload("/dm alice hey there");
+        let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(v["type"], "dm");
+        assert_eq!(v["to"], "alice");
+        assert_eq!(v["content"], "hey there");
+    }
+
+    #[test]
+    fn build_payload_slash_command_becomes_command_type() {
+        let payload = build_payload("/claim issue #42");
+        let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(v["type"], "command");
+        assert_eq!(v["cmd"], "claim");
+    }
+
+    #[test]
+    fn build_payload_who_command() {
+        let payload = build_payload("/who");
+        let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(v["type"], "command");
+        assert_eq!(v["cmd"], "who");
+    }
+
+    #[test]
+    fn build_payload_dm_preserves_spaces_in_content() {
+        let payload = build_payload("/dm bob hello   world");
+        let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(v["content"], "hello   world");
+    }
+
+    // ── wrap_input_display and cursor_display_pos tests (from #17) ─────────
 
     // ── wrap_input_display ──────────────────────────────────────────────────
 
@@ -799,5 +1152,29 @@ mod tests {
         // "abcde" exactly fills width 5, no following content.
         // Cursor at end → (0, 5), not (1, 0).
         assert_eq!(cursor_display_pos("abcde", 5, 5), (0, 5));
+    }
+}
+
+/// Convert TUI input to a JSON envelope for the broker.
+fn build_payload(input: &str) -> String {
+    // `/dm <user> <message>` — preserve spaces in the message body.
+    if let Some(rest) = input.strip_prefix("/dm ") {
+        let mut parts = rest.splitn(2, ' ');
+        let to = parts.next().unwrap_or("").to_owned();
+        let content = parts.next().unwrap_or("").to_owned();
+        return serde_json::json!({ "type": "dm", "to": to, "content": content }).to_string();
+    }
+    if let Some(rest) = input.strip_prefix('/') {
+        let mut parts = rest.splitn(2, ' ');
+        let cmd = parts.next().unwrap_or("").to_owned();
+        let params: Vec<String> = parts
+            .next()
+            .unwrap_or("")
+            .split_whitespace()
+            .map(str::to_owned)
+            .collect();
+        serde_json::json!({ "type": "command", "cmd": cmd, "params": params }).to_string()
+    } else {
+        serde_json::json!({ "type": "message", "content": input }).to_string()
     }
 }
