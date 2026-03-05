@@ -23,6 +23,7 @@ use crate::message::Message;
 pub async fn run(
     reader: BufReader<tokio::net::unix::OwnedReadHalf>,
     mut write_half: tokio::net::unix::OwnedWriteHalf,
+    room_id: &str,
     username: &str,
     history_lines: usize,
 ) -> anyhow::Result<()> {
@@ -113,7 +114,7 @@ pub async fn run(
 
             let msg_list = List::new(visible).block(
                 Block::default()
-                    .title(" room ")
+                    .title(format!(" {room_id} "))
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(Color::DarkGray)),
             );

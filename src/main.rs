@@ -151,6 +151,7 @@ async fn run_join(
 
         let client = Client {
             socket_path,
+            room_id: room_id.clone(),
             username,
             agent_mode: agent,
             history_lines,
@@ -166,6 +167,7 @@ async fn run_join(
         eprintln!("[room] connecting to existing room '{room_id}'");
         let client = Client {
             socket_path,
+            room_id,
             username,
             agent_mode: agent,
             history_lines,
