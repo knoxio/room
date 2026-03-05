@@ -1,0 +1,6 @@
+sign-commit = false
+sign-tag = false
+push = true
+publish = false  # CI handles publish via crates.io token
+pre-release-commit-message = "chore: release {{version}}"
+tag-message = ""
