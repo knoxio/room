@@ -9,6 +9,10 @@ readme = "README.md"
 keywords = ["cli", "chat", "agents", "coordination", "tui"]
 categories = ["command-line-utilities", "asynchronous"]
 
+[lib]
+name = "room"
+path = "src/lib.rs"
+
 [[bin]]
 name = "room"
 path = "src/main.rs"
