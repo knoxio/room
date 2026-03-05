@@ -237,6 +237,45 @@ pub async fn poll_messages(
     Ok(result)
 }
 
+/// Return the last `n` messages from history without updating the poll cursor.
+///
+/// DM entries are filtered so that `viewer` only sees messages where they are
+/// the sender or the recipient. Pass `None` to skip DM filtering.
+pub async fn pull_messages(
+    chat_path: &Path,
+    n: usize,
+    viewer: Option<&str>,
+) -> anyhow::Result<Vec<Message>> {
+    let all = history::load(chat_path).await?;
+    let visible: Vec<Message> = all
+        .into_iter()
+        .filter(|m| match m {
+            Message::DirectMessage { user, to, .. } => viewer
+                .map(|v| v == user.as_str() || v == to.as_str())
+                .unwrap_or(true),
+            _ => true,
+        })
+        .collect();
+    let start = visible.len().saturating_sub(n);
+    Ok(visible[start..].to_vec())
+}
+
+/// One-shot pull subcommand: print the last N messages from history as NDJSON.
+///
+/// Reads from the chat file directly (no broker connection required).
+/// Does **not** update the poll cursor.
+pub async fn cmd_pull(room_id: &str, token: &str, n: usize) -> anyhow::Result<()> {
+    let username = username_from_token(room_id, token)?;
+    let meta_path = PathBuf::from(format!("/tmp/room-{room_id}.meta"));
+    let chat_path = chat_path_from_meta(room_id, &meta_path);
+
+    let messages = pull_messages(&chat_path, n, Some(&username)).await?;
+    for msg in &messages {
+        println!("{}", serde_json::to_string(msg)?);
+    }
+    Ok(())
+}
+
 /// Watch subcommand: poll in a loop until at least one foreign `Message` arrives.
 ///
 /// Reads the caller's username from the session token file. Polls every

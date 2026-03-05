@@ -33,6 +33,16 @@ pub async fn load(path: &Path) -> anyhow::Result<Vec<Message>> {
     Ok(messages)
 }
 
+/// Return the last `n` messages from the NDJSON file, skipping malformed lines.
+///
+/// Returns all messages when the file has fewer than `n` entries.
+/// Returns an empty vec if the file does not exist.
+pub async fn tail(path: &Path, n: usize) -> anyhow::Result<Vec<Message>> {
+    let all = load(path).await?;
+    let start = all.len().saturating_sub(n);
+    Ok(all[start..].to_vec())
+}
+
 /// Append a single message as a JSON line to the NDJSON file.
 ///
 /// Uses `spawn_blocking` + `std::fs::OpenOptions` directly to avoid the

@@ -41,6 +41,19 @@ enum Cmd {
         #[arg(long)]
         since: Option<String>,
     },
+    /// Fetch the last N messages from history without updating the poll cursor.
+    ///
+    /// Reads the NDJSON chat file directly — no broker connection required.
+    /// Useful for agents that need to re-read recent context after a context reset.
+    Pull {
+        room_id: String,
+        /// Session token from `room join` (required)
+        #[arg(short = 't', long)]
+        token: String,
+        /// Number of messages to return (default: 20, max: 200)
+        #[arg(short = 'n', default_value_t = 20)]
+        count: usize,
+    },
     /// Watch for new messages from other users, blocking until at least one arrives.
     ///
     /// Polls the chat file on a configurable interval. Shares the cursor file with
@@ -114,6 +127,13 @@ async fn main() -> anyhow::Result<()> {
             since,
         }) => {
             oneshot::cmd_poll(&room_id, &token, since).await?;
+        }
+        Some(Cmd::Pull {
+            room_id,
+            token,
+            count,
+        }) => {
+            oneshot::cmd_pull(&room_id, &token, count).await?;
         }
         Some(Cmd::Watch {
             room_id,

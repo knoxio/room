@@ -1503,3 +1503,171 @@ async fn admin_exit_shuts_down_broker() {
         "broker should have stopped accepting connections after \\exit"
     );
 }
+
+// ── pull_messages tests ────────────────────────────────────────────────────────
+
+/// `pull_messages` returns the last N messages from history.
+#[tokio::test]
+async fn pull_messages_returns_last_n() {
+    let broker = TestBroker::start("t_pull_last_n").await;
+    let mut alice = TestClient::connect(&broker.socket_path, "alice").await;
+    alice
+        .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "alice"))
+        .await;
+
+    for i in 0..5 {
+        alice.send_text(&format!("msg {i}")).await;
+        alice
+            .recv_until(
+                |m| matches!(m, Message::Message { content, .. } if content == &format!("msg {i}")),
+            )
+            .await;
+    }
+
+    // Give broker time to flush writes
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let msgs = room::oneshot::pull_messages(&broker.chat_path, 3, None)
+        .await
+        .unwrap();
+    // Last 3 of 5 messages sent
+    let contents: Vec<&str> = msgs
+        .iter()
+        .filter_map(|m| {
+            if let Message::Message { content, .. } = m {
+                Some(content.as_str())
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert_eq!(contents, ["msg 2", "msg 3", "msg 4"]);
+}
+
+/// `pull_messages` returns all messages when history is shorter than N.
+#[tokio::test]
+async fn pull_messages_returns_all_when_fewer_than_n() {
+    let broker = TestBroker::start("t_pull_short").await;
+    let mut alice = TestClient::connect(&broker.socket_path, "alice").await;
+    alice
+        .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "alice"))
+        .await;
+
+    alice.send_text("only message").await;
+    alice
+        .recv_until(|m| matches!(m, Message::Message { content, .. } if content == "only message"))
+        .await;
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let msgs = room::oneshot::pull_messages(&broker.chat_path, 100, None)
+        .await
+        .unwrap();
+    assert!(
+        msgs.iter()
+            .any(|m| matches!(m, Message::Message { content, .. } if content == "only message")),
+        "expected the single message to be returned"
+    );
+}
+
+/// `pull_messages` returns an empty vec for an empty history file.
+#[tokio::test]
+async fn pull_messages_empty_history_returns_empty() {
+    let dir = tempfile::tempdir().unwrap();
+    let chat_path = dir.path().join("empty.chat");
+    // file does not exist yet
+    let msgs = room::oneshot::pull_messages(&chat_path, 20, None)
+        .await
+        .unwrap();
+    assert!(msgs.is_empty());
+}
+
+/// `pull_messages` does not update the poll cursor.
+#[tokio::test]
+async fn pull_messages_does_not_update_cursor() {
+    let broker = TestBroker::start("t_pull_no_cursor").await;
+    let mut alice = TestClient::connect(&broker.socket_path, "alice").await;
+    alice
+        .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "alice"))
+        .await;
+
+    alice.send_text("hello").await;
+    alice
+        .recv_until(|m| matches!(m, Message::Message { content, .. } if content == "hello"))
+        .await;
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let cursor_path = broker.chat_path.with_extension("cursor");
+    assert!(
+        !cursor_path.exists(),
+        "no cursor file should exist before pull"
+    );
+
+    room::oneshot::pull_messages(&broker.chat_path, 5, None)
+        .await
+        .unwrap();
+
+    assert!(
+        !cursor_path.exists(),
+        "pull_messages must not create or modify the cursor file"
+    );
+}
+
+/// `pull_messages` with a viewer filters out DMs the viewer is not party to.
+#[tokio::test]
+async fn pull_messages_filters_dms_for_viewer() {
+    let broker = TestBroker::start("t_pull_dm_filter").await;
+
+    // alice connects (becomes host)
+    let mut alice = TestClient::connect(&broker.socket_path, "alice").await;
+    alice
+        .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "alice"))
+        .await;
+
+    // bob connects
+    let mut bob = TestClient::connect(&broker.socket_path, "bob").await;
+    alice
+        .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "bob"))
+        .await;
+    bob.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "bob"))
+        .await;
+
+    // alice sends a plain message
+    alice.send_text("hi all").await;
+    alice
+        .recv_until(|m| matches!(m, Message::Message { content, .. } if content == "hi all"))
+        .await;
+    bob.recv_until(|m| matches!(m, Message::Message { content, .. } if content == "hi all"))
+        .await;
+
+    // bob DMs alice (only alice/bob/host should see it)
+    let dm = serde_json::json!({"type": "dm", "to": "alice", "content": "secret"}).to_string();
+    bob.send_json(&dm).await;
+    bob.recv_until(|m| matches!(m, Message::DirectMessage { content, .. } if content == "secret"))
+        .await;
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // carol (a third party) pulls history — should not see the DM
+    let carol_msgs = room::oneshot::pull_messages(&broker.chat_path, 50, Some("carol"))
+        .await
+        .unwrap();
+    assert!(
+        !carol_msgs
+            .iter()
+            .any(|m| matches!(m, Message::DirectMessage { content, .. } if content == "secret")),
+        "carol should not see the DM between alice and bob"
+    );
+
+    // alice pulls — should see the DM
+    let alice_msgs = room::oneshot::pull_messages(&broker.chat_path, 50, Some("alice"))
+        .await
+        .unwrap();
+    assert!(
+        alice_msgs
+            .iter()
+            .any(|m| matches!(m, Message::DirectMessage { content, .. } if content == "secret")),
+        "alice should see the DM addressed to her"
+    );
+}
