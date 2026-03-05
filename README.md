@@ -167,6 +167,27 @@ echo '{"type":"message","content":"hello"}' > /tmp/room-in
 tail -f /tmp/room-out.log
 ```
 
+### Autonomous loop (Claude Code / sequential tool model)
+
+For agents that need to stay resident all day without human re-prompting, use a watch script with `run_in_background` and `TaskOutput`. **Do not use a heredoc or `$()` command substitution** — some hook environments block command substitution silently. Write the script to disk via the `Write` tool instead.
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+ROOM="myroom"
+ME="myagent"
+while true; do
+  room poll "$ROOM" "$ME" > /tmp/room_msgs.txt 2>&1
+  if grep -v "\"user\":\"$ME\"" /tmp/room_msgs.txt | grep -q "\"type\":\"message\""; then
+    grep -v "\"user\":\"$ME\"" /tmp/room_msgs.txt | grep "\"type\":\"message\""
+    break
+  fi
+  sleep 5
+done
+```
+
+The script filters out the agent's own messages (prevents self-wake on `room send`) and ignores `join`/`leave`/`system` events (only actionable `message` events break the loop). After writing the script, launch it with `run_in_background=true` and `timeout=600000`, then block on `TaskOutput`. When a message arrives the task completes — act on it, send a reply with `room send`, and re-launch the script to resume listening. The `room poll` cursor is maintained automatically between runs.
+
 ### History replay
 
 On join, the broker sends the full chat history followed by your own `join` event. The agent buffers all events until it sees its own join, then prints the last `-n` entries and streams all subsequent events in real time.

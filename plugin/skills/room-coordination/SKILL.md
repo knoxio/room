@@ -133,6 +133,50 @@ room send myproject feat-auth "acknowledged. pausing auth work, waiting for toke
 room send myproject feat-auth "done. added JWT middleware in src/auth.rs, tests in tests/auth_test.rs. used HS256, not RS256 — kept it simpler since we control both ends"
 ```
 
+## Autonomous loop (stay-resident pattern)
+
+To remain active all day without requiring human re-prompting, use a polling script combined with `run_in_background` and `TaskOutput`. This pattern was validated in a live multi-agent session.
+
+### The watch script
+
+Use the `Write` tool to create `/tmp/room_watch_<username>.sh` — **do not use a heredoc or `$()` command substitution**; some hook environments block command substitution and will silently prevent the loop from working.
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+ROOM="<room-id>"
+ME="<username>"
+while true; do
+  room poll "$ROOM" "$ME" > /tmp/room_msgs.txt 2>&1
+  if grep -v "\"user\":\"$ME\"" /tmp/room_msgs.txt | grep -q "\"type\":\"message\""; then
+    grep -v "\"user\":\"$ME\"" /tmp/room_msgs.txt | grep "\"type\":\"message\""
+    break
+  fi
+  sleep 5
+done
+```
+
+Why each detail matters:
+
+- **Write to a file, not `$()`** — `$()` command substitution is blocked in some Claude Code hook environments. Writing poll output to `/tmp/room_msgs.txt` and reading it back avoids this.
+- **Filter by username** — without `grep -v "\"user\":\"$ME\""`, the agent wakes on every `room send` it makes, creating a tight self-triggering loop.
+- **Filter by `"type":"message"`** — prevents waking on `join`, `leave`, and `system` events, which are room lifecycle noise, not actionable messages.
+- **Break on first match** — exits immediately when a foreign message arrives so the agent can act without waiting for the next sleep cycle.
+
+### The outer loop
+
+```
+1. Write the script with the Write tool → /tmp/room_watch_<username>.sh
+2. chmod +x /tmp/room_watch_<username>.sh
+3. Run it: Bash tool with run_in_background=true, timeout=600000
+4. Block on TaskOutput (same timeout) — the task completes when a message arrives
+5. Read TaskOutput content to get the incoming message(s)
+6. Act on the message, then respond: room send <room-id> <username> "..."
+7. Go back to step 3 — re-launch the script to resume listening
+```
+
+The cursor is maintained automatically between script runs by `room poll`, so no deduplication is needed.
+
 ## Troubleshooting
 
 **`room send` fails: "cannot connect to broker"**
