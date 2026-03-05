@@ -347,6 +347,15 @@ fn cursor_display_pos(input: &str, cursor_pos: usize, width: usize) -> (usize, u
             col += w;
         }
     }
+    // If col == width and there is remaining content that is not a newline,
+    // the next character would start on a new row — advance the cursor there
+    // so it doesn't render past the right border of the input box.
+    if width > 0 && col == width && cursor_pos < input.len() {
+        if !input[cursor_pos..].starts_with('\n') {
+            row += 1;
+            col = 0;
+        }
+    }
     (row, col)
 }
 
@@ -645,5 +654,148 @@ fn build_payload(input: &str) -> String {
         serde_json::json!({ "type": "command", "cmd": cmd, "params": params }).to_string()
     } else {
         serde_json::json!({ "type": "message", "content": input }).to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{cursor_display_pos, wrap_input_display};
+
+    // ── wrap_input_display ──────────────────────────────────────────────────
+
+    #[test]
+    fn wrap_empty_string_returns_one_empty_row() {
+        assert_eq!(wrap_input_display("", 10), vec![""]);
+    }
+
+    #[test]
+    fn wrap_fits_on_one_line() {
+        assert_eq!(wrap_input_display("hello", 10), vec!["hello"]);
+    }
+
+    #[test]
+    fn wrap_exactly_at_boundary_stays_one_line() {
+        // "abcde" is exactly 5 chars, width 5 — no wrap needed.
+        assert_eq!(wrap_input_display("abcde", 5), vec!["abcde"]);
+    }
+
+    #[test]
+    fn wrap_one_char_over_splits_to_two_rows() {
+        assert_eq!(wrap_input_display("abcdef", 5), vec!["abcde", "f"]);
+    }
+
+    #[test]
+    fn wrap_explicit_newline_splits_logical_lines() {
+        assert_eq!(
+            wrap_input_display("hello\nworld", 20),
+            vec!["hello", "world"]
+        );
+    }
+
+    #[test]
+    fn wrap_explicit_newline_at_end_gives_trailing_empty_row() {
+        assert_eq!(wrap_input_display("hi\n", 20), vec!["hi", ""]);
+    }
+
+    #[test]
+    fn wrap_combines_explicit_newlines_and_width_wrapping() {
+        // "abcde\nfghij" with width 3 → each logical line wraps independently.
+        assert_eq!(wrap_input_display("abcde\nfg", 3), vec!["abc", "de", "fg"]);
+    }
+
+    #[test]
+    fn wrap_width_zero_returns_lines_unsplit() {
+        assert_eq!(
+            wrap_input_display("a very long line", 0),
+            vec!["a very long line"]
+        );
+    }
+
+    #[test]
+    fn wrap_width_zero_with_newlines_splits_on_newlines_only() {
+        assert_eq!(wrap_input_display("foo\nbar", 0), vec!["foo", "bar"]);
+    }
+
+    #[test]
+    fn wrap_wide_chars_counted_by_display_width() {
+        // '中' has display width 2. With width 4, "中中中" should split after
+        // the second character (col would reach 4 exactly), third starts new row.
+        let rows = wrap_input_display("中中中", 4);
+        assert_eq!(rows, vec!["中中", "中"]);
+    }
+
+    // ── cursor_display_pos ──────────────────────────────────────────────────
+
+    #[test]
+    fn cursor_at_start_of_empty_input() {
+        assert_eq!(cursor_display_pos("", 0, 10), (0, 0));
+    }
+
+    #[test]
+    fn cursor_at_end_of_single_line() {
+        // "hello" fits in width 10; cursor at byte 5 → col 5 row 0.
+        assert_eq!(cursor_display_pos("hello", 5, 10), (0, 5));
+    }
+
+    #[test]
+    fn cursor_mid_single_line() {
+        assert_eq!(cursor_display_pos("hello", 2, 10), (0, 2));
+    }
+
+    #[test]
+    fn cursor_wraps_to_second_row() {
+        // "abcdef" width 5: 'f' is on row 1 col 0.
+        assert_eq!(cursor_display_pos("abcdef", 5, 5), (1, 0));
+    }
+
+    #[test]
+    fn cursor_after_explicit_newline() {
+        // "hi\n" — cursor after the '\n' is at (1, 0).
+        assert_eq!(cursor_display_pos("hi\n", 3, 20), (1, 0));
+    }
+
+    #[test]
+    fn cursor_on_second_explicit_line() {
+        // "foo\nbar" with width 10: cursor at byte 7 (end) is (1, 3).
+        assert_eq!(cursor_display_pos("foo\nbar", 7, 10), (1, 3));
+    }
+
+    #[test]
+    fn cursor_explicit_newline_combined_with_wrap() {
+        // "abc\ndefgh" width 3: "abc" → row 0, "def" → row 1, "gh" → row 2.
+        // cursor at byte 9 (end, 'h') → (2, 2).
+        let s = "abc\ndefgh";
+        assert_eq!(cursor_display_pos(s, s.len(), 3), (2, 2));
+    }
+
+    #[test]
+    fn cursor_width_zero_no_wrapping() {
+        // width=0 disables wrapping; col just accumulates.
+        assert_eq!(cursor_display_pos("hello world", 5, 0), (0, 5));
+    }
+
+    #[test]
+    fn cursor_wide_char_advances_by_display_width() {
+        // '中' = 3 bytes, display width 2. "中中" with width 4 fits on one row.
+        // cursor between the two chars (byte 3) → (0, 2).
+        let s = "中中";
+        assert_eq!(cursor_display_pos(s, 3, 4), (0, 2));
+        // cursor at end (byte 6): no more content → stays at (0, 4).
+        assert_eq!(cursor_display_pos(s, 6, 4), (0, 4));
+    }
+
+    #[test]
+    fn cursor_wide_char_at_boundary_with_more_content() {
+        // "中中中" width 4: rows ["中中", "中"].
+        // cursor between 2nd and 3rd '中' (byte 6) → start of row 1.
+        let s = "中中中";
+        assert_eq!(cursor_display_pos(s, 6, 4), (1, 0));
+    }
+
+    #[test]
+    fn cursor_at_exact_line_boundary_no_more_content() {
+        // "abcde" exactly fills width 5, no following content.
+        // Cursor at end → (0, 5), not (1, 0).
+        assert_eq!(cursor_display_pos("abcde", 5, 5), (0, 5));
     }
 }
