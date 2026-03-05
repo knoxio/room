@@ -142,10 +142,24 @@ Key invariants to preserve:
 - **`src/lib.rs` must export any new modules** so integration tests can import them.
 - **All tests must pass** before committing: `cargo test`.
 
+## Pre-push checklist
+
+Run all three in order before every `git push`. CI enforces all of them and will fail if any step is skipped.
+
+```bash
+cargo fmt
+cargo clippy -- -D warnings
+cargo test
+```
+
+- `cargo fmt` — reformats code; commit the result if it changed anything.
+- `cargo clippy -- -D warnings` — treats all warnings as errors; fix the root cause, never suppress.
+- `cargo test` — all tests must pass.
+
 ## Running tests
 
 ```bash
 cargo test
 ```
 
-All 54 tests must remain green. Add tests for any new behaviour.
+All tests must remain green. Add tests for any new behaviour.
