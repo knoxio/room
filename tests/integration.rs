@@ -970,6 +970,88 @@ async fn send_fails_when_no_broker() {
     );
 }
 
+/// `cmd_send --to <recipient>` routes the DM selectively: recipient and host receive it,
+/// bystanders do not.
+#[tokio::test]
+async fn oneshot_send_dm_is_routed_privately() {
+    let broker = TestBroker::start("t_oneshot_dm").await;
+
+    // alice connects first → she becomes the host
+    let mut alice = TestClient::connect(&broker.socket_path, "alice").await;
+    alice
+        .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "alice"))
+        .await;
+
+    let mut bob = TestClient::connect(&broker.socket_path, "bob").await;
+    alice
+        .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "bob"))
+        .await;
+    bob.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "bob"))
+        .await;
+
+    let mut carol = TestClient::connect(&broker.socket_path, "carol").await;
+    alice
+        .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "carol"))
+        .await;
+    bob.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "carol"))
+        .await;
+    carol
+        .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "carol"))
+        .await;
+
+    // "agent" sends a one-shot DM to bob
+    let wire =
+        serde_json::json!({"type": "dm", "to": "bob", "content": "secret"}).to_string();
+    room::oneshot::send_message(&broker.socket_path, "agent", &wire)
+        .await
+        .unwrap();
+
+    // bob (recipient) receives the DM
+    let msg = bob
+        .recv_until(|m| matches!(m, Message::DirectMessage { content, .. } if content == "secret"))
+        .await;
+    assert_eq!(msg.user(), "agent");
+    if let Message::DirectMessage { to, .. } = &msg {
+        assert_eq!(to, "bob");
+    }
+
+    // alice (host) receives the DM
+    alice
+        .recv_until(|m| matches!(m, Message::DirectMessage { content, .. } if content == "secret"))
+        .await;
+
+    // carol (bystander) must NOT receive it
+    let carol_got_dm = timeout(Duration::from_millis(300), async {
+        let mut line = String::new();
+        loop {
+            line.clear();
+            if carol.reader.read_line(&mut line).await.unwrap_or(0) == 0 {
+                break false;
+            }
+            if let Ok(msg) = serde_json::from_str::<Message>(line.trim()) {
+                if matches!(&msg, Message::DirectMessage { content, .. } if content == "secret") {
+                    break true;
+                }
+            }
+        }
+    })
+    .await;
+    assert!(
+        carol_got_dm.is_err() || !carol_got_dm.unwrap(),
+        "carol should not receive the one-shot DM"
+    );
+
+    // DM is persisted to history
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let history = history::load(&broker.chat_path).await.unwrap();
+    assert!(
+        history
+            .iter()
+            .any(|m| matches!(m, Message::DirectMessage { content, .. } if content == "secret")),
+        "one-shot DM not found in history"
+    );
+}
+
 /// Users removed from status map on disconnect do not appear in subsequent who responses.
 #[tokio::test]
 async fn who_excludes_disconnected_users() {

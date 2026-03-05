@@ -125,6 +125,7 @@ async fn handle_client(
             reader,
             write_half,
             &clients,
+            &host_user,
             &chat_path,
             &room_id,
         )
@@ -322,13 +323,15 @@ async fn handle_client(
     Ok(())
 }
 
-/// Handle a one-shot SEND connection: read one message line, broadcast it, echo it back, close.
+/// Handle a one-shot SEND connection: read one message line, route it, echo it back, close.
 /// The sender is never registered in ClientMap/StatusMap and generates no join/leave events.
+/// DM envelopes are routed via `dm_and_persist`; all other messages are broadcast.
 async fn handle_oneshot_send(
     username: String,
     mut reader: BufReader<OwnedReadHalf>,
     mut write_half: OwnedWriteHalf,
     clients: &ClientMap,
+    host_user: &HostUser,
     chat_path: &Arc<PathBuf>,
     room_id: &Arc<String>,
 ) -> anyhow::Result<()> {
@@ -339,7 +342,13 @@ async fn handle_oneshot_send(
         return Ok(());
     }
     let msg = parse_client_line(trimmed, room_id, &username)?;
-    broadcast_and_persist(&msg, clients, chat_path).await?;
+    let result = match &msg {
+        Message::DirectMessage { to, .. } => {
+            dm_and_persist(&msg, &username, to, host_user, clients, chat_path).await
+        }
+        _ => broadcast_and_persist(&msg, clients, chat_path).await,
+    };
+    result?;
     let echo = format!("{}\n", serde_json::to_string(&msg)?);
     write_half.write_all(echo.as_bytes()).await?;
     Ok(())

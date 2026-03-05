@@ -30,9 +30,23 @@ pub async fn send_message(
 }
 
 /// One-shot send subcommand: connect, send, print echo JSON to stdout, exit.
-pub async fn cmd_send(room_id: &str, username: &str, content: &str) -> anyhow::Result<()> {
+///
+/// When `to` is `Some(recipient)`, the message is sent as a DM envelope so the
+/// broker routes it only to the sender, recipient, and host.
+pub async fn cmd_send(
+    room_id: &str,
+    username: &str,
+    to: Option<&str>,
+    content: &str,
+) -> anyhow::Result<()> {
     let socket_path = PathBuf::from(format!("/tmp/room-{room_id}.sock"));
-    let msg = send_message(&socket_path, username, content).await?;
+    let wire = match to {
+        Some(recipient) => {
+            serde_json::json!({"type": "dm", "to": recipient, "content": content}).to_string()
+        }
+        None => content.to_owned(),
+    };
+    let msg = send_message(&socket_path, username, &wire).await?;
     println!("{}", serde_json::to_string(&msg)?);
     Ok(())
 }
