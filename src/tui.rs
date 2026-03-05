@@ -83,6 +83,8 @@ pub async fn run(
 
     let mut messages: Vec<Message> = Vec::new();
     let mut input = String::new();
+    let mut cursor_pos: usize = 0; // byte index into `input`, always on a char boundary
+    let mut input_scroll: usize = 0; // char-count offset for horizontal scrolling
     let mut scroll_offset: usize = 0;
     let mut result: anyhow::Result<()> = Ok(());
 
@@ -123,7 +125,24 @@ pub async fn run(
             );
             f.render_widget(msg_list, chunks[0]);
 
-            let input_widget = Paragraph::new(input.as_str())
+            let input_content_width = chunks[1].width.saturating_sub(2) as usize;
+            let cursor_char = input[..cursor_pos].chars().count();
+
+            // Adjust horizontal scroll to keep cursor visible
+            if cursor_char < input_scroll {
+                input_scroll = cursor_char;
+            }
+            if input_content_width > 0 && cursor_char >= input_scroll + input_content_width {
+                input_scroll = cursor_char - input_content_width + 1;
+            }
+
+            let scroll_byte = input
+                .char_indices()
+                .nth(input_scroll)
+                .map(|(i, _)| i)
+                .unwrap_or(input.len());
+
+            let input_widget = Paragraph::new(&input[scroll_byte..])
                 .block(
                     Block::default()
                         .title(format!(" {username} "))
@@ -132,6 +151,11 @@ pub async fn run(
                 )
                 .style(Style::default().fg(Color::White));
             f.render_widget(input_widget, chunks[1]);
+
+            // Place terminal cursor inside the input box
+            let cursor_x = chunks[1].x + 1 + (cursor_char - input_scroll) as u16;
+            let cursor_y = chunks[1].y + 1;
+            f.set_cursor_position((cursor_x, cursor_y));
         })?;
 
         if event::poll(std::time::Duration::from_millis(50))? {
@@ -141,6 +165,8 @@ pub async fn run(
                         if !input.is_empty() {
                             let payload = build_payload(&input);
                             input.clear();
+                            cursor_pos = 0;
+                            input_scroll = 0;
                             scroll_offset = 0;
                             if let Err(e) = write_half
                                 .write_all(format!("{payload}\n").as_bytes())
@@ -155,10 +181,40 @@ pub async fn run(
                         break 'main;
                     }
                     KeyCode::Char(c) => {
-                        input.push(c);
+                        input.insert(cursor_pos, c);
+                        cursor_pos += c.len_utf8();
                     }
                     KeyCode::Backspace => {
-                        input.pop();
+                        if cursor_pos > 0 {
+                            let prev = input[..cursor_pos]
+                                .char_indices()
+                                .next_back()
+                                .map(|(i, _)| i)
+                                .unwrap_or(0);
+                            input.remove(prev);
+                            cursor_pos = prev;
+                        }
+                    }
+                    KeyCode::Left => {
+                        if cursor_pos > 0 {
+                            cursor_pos = input[..cursor_pos]
+                                .char_indices()
+                                .next_back()
+                                .map(|(i, _)| i)
+                                .unwrap_or(0);
+                        }
+                    }
+                    KeyCode::Right => {
+                        if cursor_pos < input.len() {
+                            let ch = input[cursor_pos..].chars().next().unwrap();
+                            cursor_pos += ch.len_utf8();
+                        }
+                    }
+                    KeyCode::Home => {
+                        cursor_pos = 0;
+                    }
+                    KeyCode::End => {
+                        cursor_pos = input.len();
                     }
                     KeyCode::Up => {
                         scroll_offset = scroll_offset.saturating_add(1);
