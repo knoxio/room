@@ -489,9 +489,11 @@ async fn handle_admin_cmd(
             }
             let target = arg.to_owned();
             let mut map = token_map.lock().await;
-            // Remove all existing tokens for this username, then insert the sentinel.
+            // Remove all existing tokens for this username, then insert a per-user sentinel
+            // so the username stays reserved. Using KICKED:<username> as the key ensures
+            // kicking multiple users does not overwrite each other's sentinel entries.
             map.retain(|_, u| u != &target);
-            map.insert("INVALID_TOKEN".to_owned(), target.clone());
+            map.insert(format!("KICKED:{target}"), target.clone());
             drop(map);
             let content = format!("{issuer} kicked {target} (token invalidated)");
             let msg = make_system(room_id, "broker", content);

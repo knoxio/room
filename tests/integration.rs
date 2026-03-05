@@ -1336,6 +1336,29 @@ async fn admin_kick_invalidates_token() {
     );
 }
 
+/// Kicking two users must not unblock the first when the second is kicked.
+#[tokio::test]
+async fn admin_kick_two_users_both_blocked() {
+    let broker = TestBroker::start("t_kick2").await;
+    let mut admin = TestClient::connect(&broker.socket_path, "admin").await;
+    admin.recv_until(|m| matches!(m, Message::Join { .. })).await;
+
+    let (_, tok_a) = room::oneshot::join_session(&broker.socket_path, "alice").await.unwrap();
+    let (_, tok_b) = room::oneshot::join_session(&broker.socket_path, "bob").await.unwrap();
+
+    admin.send_text(r"\kick alice").await;
+    admin.recv_until(|m| matches!(m, Message::System { .. })).await;
+
+    admin.send_text(r"\kick bob").await;
+    admin.recv_until(|m| matches!(m, Message::System { .. })).await;
+
+    let wire = serde_json::json!({"type": "message", "content": "x"}).to_string();
+    for (user, tok) in [("alice", &tok_a), ("bob", &tok_b)] {
+        let result = room::oneshot::send_message_with_token(&broker.socket_path, tok, &wire).await;
+        assert!(result.is_err(), "{user} should still be blocked after two kicks");
+    }
+}
+
 /// `\reauth <username>` removes the token so the user can rejoin.
 #[tokio::test]
 async fn admin_reauth_allows_rejoin() {
