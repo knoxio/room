@@ -15,8 +15,16 @@ use crate::{
     message::{make_join, make_leave, make_system, parse_client_line, Message},
 };
 
-type ClientMap = Arc<Mutex<HashMap<u64, broadcast::Sender<String>>>>;
+/// Maps client ID → (username, broadcast sender).
+/// Username is set after the handshake completes.
+type ClientMap = Arc<Mutex<HashMap<u64, (String, broadcast::Sender<String>)>>>;
+
+/// Maps username → status string. Status is ephemeral; cleared on disconnect.
 type StatusMap = Arc<Mutex<HashMap<String, String>>>;
+
+/// The username of the first client to complete the handshake.
+/// The host receives all DMs regardless of sender/recipient.
+type HostUser = Arc<Mutex<Option<String>>>;
 
 pub struct Broker {
     room_id: String,
@@ -46,6 +54,7 @@ impl Broker {
 
         let clients: ClientMap = Arc::new(Mutex::new(HashMap::new()));
         let status_map: StatusMap = Arc::new(Mutex::new(HashMap::new()));
+        let host_user: HostUser = Arc::new(Mutex::new(None));
         let chat_path = Arc::new(self.chat_path.clone());
         let room_id = Arc::new(self.room_id.clone());
         let mut next_id: u64 = 0;
@@ -56,10 +65,12 @@ impl Broker {
             let cid = next_id;
 
             let (tx, _) = broadcast::channel::<String>(256);
-            clients.lock().await.insert(cid, tx.clone());
+            // Insert with empty username; handle_client updates it after handshake.
+            clients.lock().await.insert(cid, (String::new(), tx.clone()));
 
             let clients_clone = clients.clone();
             let status_map_clone = status_map.clone();
+            let host_user_clone = host_user.clone();
             let chat_path_clone = chat_path.clone();
             let room_id_clone = room_id.clone();
 
@@ -70,6 +81,7 @@ impl Broker {
                     tx,
                     clients_clone.clone(),
                     status_map_clone,
+                    host_user_clone,
                     chat_path_clone,
                     room_id_clone,
                 )
@@ -89,6 +101,7 @@ async fn handle_client(
     own_tx: broadcast::Sender<String>,
     clients: ClientMap,
     status_map: StatusMap,
+    host_user: HostUser,
     chat_path: Arc<PathBuf>,
     room_id: Arc<String>,
 ) -> anyhow::Result<()> {
@@ -101,6 +114,22 @@ async fn handle_client(
     let username = username.trim().to_owned();
     if username.is_empty() {
         return Ok(());
+    }
+
+    // Register username in the client map
+    {
+        let mut map = clients.lock().await;
+        if let Some(entry) = map.get_mut(&cid) {
+            entry.0 = username.clone();
+        }
+    }
+
+    // Register as host if no host has been set yet (first to complete handshake)
+    {
+        let mut host = host_user.lock().await;
+        if host.is_none() {
+            *host = Some(username.clone());
+        }
     }
 
     eprintln!("[broker] {username} joined (cid={cid})");
@@ -155,6 +184,7 @@ async fn handle_client(
     let room_id_in = room_id.clone();
     let clients_in = clients.clone();
     let status_map_in = status_map.clone();
+    let host_user_in = host_user.clone();
     let chat_path_in = chat_path.clone();
     let write_half_in = write_half.clone();
     let inbound = tokio::spawn(async move {
@@ -170,6 +200,7 @@ async fn handle_client(
                     }
                     match parse_client_line(trimmed, &room_id_in, &username_in) {
                         Ok(msg) => {
+                            // Handle status commands privately (no broadcast of the Command itself)
                             if let Message::Command { ref cmd, ref params, .. } = msg {
                                 if cmd == "set_status" {
                                     let status = params.first().cloned().unwrap_or_default();
@@ -214,9 +245,22 @@ async fn handle_client(
                                     continue;
                                 }
                             }
-                            if let Err(e) =
-                                broadcast_and_persist(&msg, &clients_in, &chat_path_in).await
-                            {
+                            // Route DMs to sender + recipient + host only; broadcast everything else
+                            let result = match &msg {
+                                Message::DirectMessage { to, .. } => {
+                                    dm_and_persist(
+                                        &msg,
+                                        &username_in,
+                                        to,
+                                        &host_user_in,
+                                        &clients_in,
+                                        &chat_path_in,
+                                    )
+                                    .await
+                                }
+                                _ => broadcast_and_persist(&msg, &clients_in, &chat_path_in).await,
+                            };
+                            if let Err(e) = result {
                                 eprintln!("[broker] persist error: {e:#}");
                             }
                         }
@@ -244,6 +288,7 @@ async fn handle_client(
     Ok(())
 }
 
+/// Persist a message and fan it out to all connected clients.
 async fn broadcast_and_persist(
     msg: &Message,
     clients: &ClientMap,
@@ -253,8 +298,36 @@ async fn broadcast_and_persist(
 
     let line = format!("{}\n", serde_json::to_string(msg)?);
     let map = clients.lock().await;
-    for tx in map.values() {
+    for (_, tx) in map.values() {
         let _ = tx.send(line.clone());
+    }
+    Ok(())
+}
+
+/// Persist a DM and deliver it only to the sender, the recipient, and the host.
+/// If the recipient is offline the message is still persisted and the sender
+/// receives their own echo; no error is returned.
+async fn dm_and_persist(
+    msg: &Message,
+    sender: &str,
+    recipient: &str,
+    host_user: &HostUser,
+    clients: &ClientMap,
+    chat_path: &Path,
+) -> anyhow::Result<()> {
+    history::append(chat_path, msg).await?;
+
+    let line = format!("{}\n", serde_json::to_string(msg)?);
+    let host = host_user.lock().await;
+    let host_name = host.as_deref();
+    let map = clients.lock().await;
+    for (username, tx) in map.values() {
+        if username == sender
+            || username == recipient
+            || host_name == Some(username.as_str())
+        {
+            let _ = tx.send(line.clone());
+        }
     }
     Ok(())
 }

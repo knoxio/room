@@ -52,6 +52,19 @@ pub enum Message {
         ts: DateTime<Utc>,
         content: String,
     },
+    /// A private direct message. Delivered only to sender, recipient, and the
+    /// broker host. Always written to the chat history file.
+    #[serde(rename = "dm")]
+    DirectMessage {
+        id: String,
+        room: String,
+        /// Sender username (set by the broker).
+        user: String,
+        ts: DateTime<Utc>,
+        /// Recipient username.
+        to: String,
+        content: String,
+    },
 }
 
 impl Message {
@@ -62,7 +75,8 @@ impl Message {
             | Self::Message { id, .. }
             | Self::Reply { id, .. }
             | Self::Command { id, .. }
-            | Self::System { id, .. } => id,
+            | Self::System { id, .. }
+            | Self::DirectMessage { id, .. } => id,
         }
     }
 
@@ -73,7 +87,8 @@ impl Message {
             | Self::Message { room, .. }
             | Self::Reply { room, .. }
             | Self::Command { room, .. }
-            | Self::System { room, .. } => room,
+            | Self::System { room, .. }
+            | Self::DirectMessage { room, .. } => room,
         }
     }
 
@@ -84,7 +99,8 @@ impl Message {
             | Self::Message { user, .. }
             | Self::Reply { user, .. }
             | Self::Command { user, .. }
-            | Self::System { user, .. } => user,
+            | Self::System { user, .. }
+            | Self::DirectMessage { user, .. } => user,
         }
     }
 
@@ -95,7 +111,8 @@ impl Message {
             | Self::Message { ts, .. }
             | Self::Reply { ts, .. }
             | Self::Command { ts, .. }
-            | Self::System { ts, .. } => ts,
+            | Self::System { ts, .. }
+            | Self::DirectMessage { ts, .. } => ts,
         }
     }
 }
@@ -176,6 +193,17 @@ pub fn make_system(room: &str, user: &str, content: impl Into<String>) -> Messag
     }
 }
 
+pub fn make_dm(room: &str, user: &str, to: &str, content: impl Into<String>) -> Message {
+    Message::DirectMessage {
+        id: new_id(),
+        room: room.to_owned(),
+        user: user.to_owned(),
+        ts: Utc::now(),
+        to: to.to_owned(),
+        content: content.into(),
+    }
+}
+
 /// Parse a raw line from a client socket.
 /// JSON envelope → Message with broker-assigned id/room/ts.
 /// Plain text → Message::Message with broker-assigned metadata.
@@ -186,6 +214,8 @@ pub fn parse_client_line(raw: &str, room: &str, user: &str) -> Result<Message, s
         Message { content: String },
         Reply { reply_to: String, content: String },
         Command { cmd: String, params: Vec<String> },
+        #[serde(rename = "dm")]
+        Dm { to: String, content: String },
     }
 
     if raw.starts_with('{') {
@@ -194,6 +224,7 @@ pub fn parse_client_line(raw: &str, room: &str, user: &str) -> Result<Message, s
             Envelope::Message { content } => make_message(room, user, content),
             Envelope::Reply { reply_to, content } => make_reply(room, user, reply_to, content),
             Envelope::Command { cmd, params } => make_command(room, user, cmd, params),
+            Envelope::Dm { to, content } => make_dm(room, user, &to, content),
         };
         Ok(msg)
     } else {
@@ -394,6 +425,47 @@ mod tests {
     fn parse_invalid_json_errors() {
         let result = parse_client_line(r#"{"type":"unknown_type"}"#, "r", "u");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_dm_envelope() {
+        let raw = r#"{"type":"dm","to":"bob","content":"hey bob"}"#;
+        let msg = parse_client_line(raw, "r", "alice").unwrap();
+        assert!(
+            matches!(&msg, Message::DirectMessage { to, content, .. } if to == "bob" && content == "hey bob")
+        );
+        assert_eq!(msg.user(), "alice");
+    }
+
+    #[test]
+    fn dm_round_trips() {
+        let msg = Message::DirectMessage {
+            id: fixed_id(),
+            room: "r".into(),
+            user: "alice".into(),
+            ts: fixed_ts(),
+            to: "bob".into(),
+            content: "secret".into(),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let back: Message = serde_json::from_str(&json).unwrap();
+        assert_eq!(msg, back);
+    }
+
+    #[test]
+    fn dm_json_has_type_dm() {
+        let msg = Message::DirectMessage {
+            id: fixed_id(),
+            room: "r".into(),
+            user: "alice".into(),
+            ts: fixed_ts(),
+            to: "bob".into(),
+            content: "hi".into(),
+        };
+        let v: serde_json::Value = serde_json::to_value(&msg).unwrap();
+        assert_eq!(v["type"], "dm");
+        assert_eq!(v["to"], "bob");
+        assert_eq!(v["content"], "hi");
     }
 
     // ── Accessor tests ────────────────────────────────────────────────────────
