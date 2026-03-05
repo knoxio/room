@@ -350,11 +350,9 @@ fn cursor_display_pos(input: &str, cursor_pos: usize, width: usize) -> (usize, u
     // If col == width and there is remaining content that is not a newline,
     // the next character would start on a new row — advance the cursor there
     // so it doesn't render past the right border of the input box.
-    if width > 0 && col == width && cursor_pos < input.len() {
-        if !input[cursor_pos..].starts_with('\n') {
-            row += 1;
-            col = 0;
-        }
+    if width > 0 && col == width && cursor_pos < input.len() && !input[cursor_pos..].starts_with('\n') {
+        row += 1;
+        col = 0;
     }
     (row, col)
 }
