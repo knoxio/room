@@ -15,13 +15,13 @@ enum Cmd {
     Join { room_id: String, username: String },
     /// One-shot send a message to a room (requires a running broker).
     ///
-    /// Reads the caller's identity from the session token file created by
-    /// `room join`. Prints the broadcast message JSON and exits.
+    /// The broker resolves the sender's identity from the token issued by `room join`.
+    /// Prints the broadcast message JSON and exits.
     Send {
         room_id: String,
-        /// Select token by username (required when multiple sessions share this machine)
-        #[arg(long)]
-        user: Option<String>,
+        /// Session token from `room join` (required)
+        #[arg(short = 't', long)]
+        token: String,
         /// Recipient username for a direct message
         #[arg(long)]
         to: Option<String>,
@@ -31,28 +31,26 @@ enum Cmd {
     },
     /// Poll for new messages, printing NDJSON to stdout.
     ///
-    /// Reads the caller's identity from the session token file. Updates a
-    /// per-user cursor file so subsequent calls return only unseen messages.
+    /// Updates a per-user cursor file so subsequent calls return only unseen messages.
     Poll {
         room_id: String,
-        /// Select token by username (required when multiple sessions share this machine)
-        #[arg(long)]
-        user: Option<String>,
+        /// Session token from `room join` (required)
+        #[arg(short = 't', long)]
+        token: String,
         /// Return only messages after this message ID (overrides stored cursor)
         #[arg(long)]
         since: Option<String>,
     },
-    /// Watch for new messages from other users, blocking until at least one
-    /// arrives. Polls the chat file on a configurable interval. Shares the
-    /// cursor file with `room poll` so no messages are re-delivered. Exits
-    /// after printing the first batch of foreign messages as NDJSON.
+    /// Watch for new messages from other users, blocking until at least one arrives.
     ///
-    /// Reads the caller's identity from the session token file.
+    /// Polls the chat file on a configurable interval. Shares the cursor file with
+    /// `room poll` so no messages are re-delivered. Exits after printing the first
+    /// batch of foreign messages as NDJSON.
     Watch {
         room_id: String,
-        /// Select token by username (required when multiple sessions share this machine)
-        #[arg(long)]
-        user: Option<String>,
+        /// Session token from `room join` (required)
+        #[arg(short = 't', long)]
+        token: String,
         /// Poll interval in seconds (default: 5)
         #[arg(long, default_value_t = 5)]
         interval: u64,
@@ -103,26 +101,26 @@ async fn main() -> anyhow::Result<()> {
         }
         Some(Cmd::Send {
             room_id,
-            user,
+            token,
             to,
             message,
         }) => {
             let content = message.join(" ");
-            oneshot::cmd_send(&room_id, user.as_deref(), to.as_deref(), &content).await?;
+            oneshot::cmd_send(&room_id, &token, to.as_deref(), &content).await?;
         }
         Some(Cmd::Poll {
             room_id,
-            user,
+            token,
             since,
         }) => {
-            oneshot::cmd_poll(&room_id, user.as_deref(), since).await?;
+            oneshot::cmd_poll(&room_id, &token, since).await?;
         }
         Some(Cmd::Watch {
             room_id,
-            user,
+            token,
             interval,
         }) => {
-            oneshot::cmd_watch(&room_id, user.as_deref(), interval).await?;
+            oneshot::cmd_watch(&room_id, &token, interval).await?;
         }
         None => {
             let room_id = args.room_id.unwrap_or_else(|| {
