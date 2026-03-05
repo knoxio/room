@@ -879,7 +879,7 @@ async fn poll_returns_messages_since_id() {
     let dir = tempfile::tempdir().unwrap();
     let cursor_path = dir.path().join("test.cursor");
 
-    let msgs = room::oneshot::poll_messages(&broker.chat_path, &cursor_path, Some(m1.id()))
+    let msgs = room::oneshot::poll_messages(&broker.chat_path, &cursor_path, None, Some(m1.id()))
         .await
         .unwrap();
 
@@ -920,7 +920,7 @@ async fn poll_updates_cursor_file() {
     let cursor_path = dir.path().join("alice.cursor");
 
     // First poll: returns messages, writes cursor
-    let msgs = room::oneshot::poll_messages(&broker.chat_path, &cursor_path, None)
+    let msgs = room::oneshot::poll_messages(&broker.chat_path, &cursor_path, None, None)
         .await
         .unwrap();
     assert!(!msgs.is_empty(), "first poll should return messages");
@@ -930,7 +930,7 @@ async fn poll_updates_cursor_file() {
     );
 
     // Second poll: cursor is up to date, nothing new
-    let msgs2 = room::oneshot::poll_messages(&broker.chat_path, &cursor_path, None)
+    let msgs2 = room::oneshot::poll_messages(&broker.chat_path, &cursor_path, None, None)
         .await
         .unwrap();
     assert!(
@@ -949,7 +949,7 @@ async fn poll_with_no_broker_reads_file_directly() {
     let msg = room::message::make_message("offline", "ghost", "written directly");
     room::history::append(&chat_path, &msg).await.unwrap();
 
-    let msgs = room::oneshot::poll_messages(&chat_path, &cursor_path, None)
+    let msgs = room::oneshot::poll_messages(&chat_path, &cursor_path, None, None)
         .await
         .unwrap();
 
@@ -967,6 +967,182 @@ async fn send_fails_when_no_broker() {
     assert!(
         result.is_err(),
         "send should fail when no broker is running"
+    );
+}
+
+/// One-shot SEND with a DM envelope routes the message selectively: recipient and host
+/// receive it, bystanders do not. Also verifies the DM is persisted to history.
+/// (Tests broker routing of a `{"type":"dm",...}` envelope over the one-shot SEND path;
+/// see `cmd_send` in `oneshot.rs` for the CLI layer that builds this envelope from `--to`.)
+#[tokio::test]
+async fn oneshot_send_dm_is_routed_privately() {
+    let broker = TestBroker::start("t_oneshot_dm").await;
+
+    // alice connects first → she becomes the host
+    let mut alice = TestClient::connect(&broker.socket_path, "alice").await;
+    alice
+        .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "alice"))
+        .await;
+
+    let mut bob = TestClient::connect(&broker.socket_path, "bob").await;
+    alice
+        .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "bob"))
+        .await;
+    bob.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "bob"))
+        .await;
+
+    let mut carol = TestClient::connect(&broker.socket_path, "carol").await;
+    alice
+        .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "carol"))
+        .await;
+    bob.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "carol"))
+        .await;
+    carol
+        .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "carol"))
+        .await;
+
+    // "agent" sends a one-shot DM to bob
+    let wire = serde_json::json!({"type": "dm", "to": "bob", "content": "secret"}).to_string();
+    room::oneshot::send_message(&broker.socket_path, "agent", &wire)
+        .await
+        .unwrap();
+
+    // bob (recipient) receives the DM
+    let msg = bob
+        .recv_until(|m| matches!(m, Message::DirectMessage { content, .. } if content == "secret"))
+        .await;
+    assert_eq!(msg.user(), "agent");
+    if let Message::DirectMessage { to, .. } = &msg {
+        assert_eq!(to, "bob");
+    }
+
+    // alice (host) receives the DM
+    alice
+        .recv_until(|m| matches!(m, Message::DirectMessage { content, .. } if content == "secret"))
+        .await;
+
+    // carol (bystander) must NOT receive it
+    let carol_got_dm = timeout(Duration::from_millis(300), async {
+        let mut line = String::new();
+        loop {
+            line.clear();
+            if carol.reader.read_line(&mut line).await.unwrap_or(0) == 0 {
+                break false;
+            }
+            if let Ok(msg) = serde_json::from_str::<Message>(line.trim()) {
+                if matches!(&msg, Message::DirectMessage { content, .. } if content == "secret") {
+                    break true;
+                }
+            }
+        }
+    })
+    .await;
+    assert!(
+        carol_got_dm.is_err() || !carol_got_dm.unwrap(),
+        "carol should not receive the one-shot DM"
+    );
+
+    // DM is persisted to history. No sleep needed: send_message awaits the broker echo,
+    // and the echo is only written after dm_and_persist (which awaits history::append) returns.
+    let history = history::load(&broker.chat_path).await.unwrap();
+    assert!(
+        history
+            .iter()
+            .any(|m| matches!(m, Message::DirectMessage { content, .. } if content == "secret")),
+        "one-shot DM not found in history"
+    );
+}
+
+/// `poll_messages` with a viewer username filters out DMs the viewer is not party to.
+#[tokio::test]
+async fn poll_filters_dm_for_non_party_viewer() {
+    let dir = tempfile::tempdir().unwrap();
+    let chat_path = dir.path().join("poll_dm_filter.chat");
+    let cursor_path = dir.path().join("carol.cursor");
+
+    // Write a DM between alice and bob directly into the chat file
+    let dm = room::message::make_dm("r", "alice", "bob", "eyes only");
+    room::history::append(&chat_path, &dm).await.unwrap();
+
+    // carol is not party to the DM — she should see nothing
+    let msgs = room::oneshot::poll_messages(&chat_path, &cursor_path, Some("carol"), None)
+        .await
+        .unwrap();
+    assert!(
+        msgs.is_empty(),
+        "carol should not see a DM she is not party to"
+    );
+
+    // alice (sender) should see it
+    let alice_cursor = dir.path().join("alice.cursor");
+    let msgs = room::oneshot::poll_messages(&chat_path, &alice_cursor, Some("alice"), None)
+        .await
+        .unwrap();
+    assert_eq!(msgs.len(), 1, "alice should see the DM she sent");
+
+    // bob (recipient) should see it
+    let bob_cursor = dir.path().join("bob.cursor");
+    let msgs = room::oneshot::poll_messages(&chat_path, &bob_cursor, Some("bob"), None)
+        .await
+        .unwrap();
+    assert_eq!(msgs.len(), 1, "bob should see the DM addressed to him");
+}
+
+/// DMs in history are not replayed to clients who are not the sender, recipient, or host.
+#[tokio::test]
+async fn history_replay_filters_dm_for_non_party() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket_path = dir.path().join("replay_dm.sock");
+    let chat_path = dir.path().join("replay_dm.chat");
+
+    // Pre-seed history with a DM between bob and carol (alice will be host later)
+    let dm = room::message::make_dm("replay_dm", "bob", "carol", "for bob and carol only");
+    room::history::append(&chat_path, &dm).await.unwrap();
+
+    let broker = Broker::new("replay_dm", chat_path, socket_path.clone());
+    tokio::spawn(async move { broker.run().await.ok() });
+    for _ in 0..100 {
+        if socket_path.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    // alice connects first → becomes host; she should receive the DM in history replay
+    let mut alice = TestClient::connect(&socket_path, "alice").await;
+    let mut pre_join_alice: Vec<Message> = Vec::new();
+    loop {
+        let msg = alice.recv().await;
+        if matches!(&msg, Message::Join { user, .. } if user == "alice") {
+            break;
+        }
+        pre_join_alice.push(msg);
+    }
+    assert!(
+        pre_join_alice
+            .iter()
+            .any(|m| matches!(m, Message::DirectMessage { content, .. } if content == "for bob and carol only")),
+        "host alice should receive the DM in history replay"
+    );
+
+    // dan is a bystander — should NOT receive the DM in history replay
+    let mut dan = TestClient::connect(&socket_path, "dan").await;
+    alice
+        .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "dan"))
+        .await;
+    let mut pre_join_dan: Vec<Message> = Vec::new();
+    loop {
+        let msg = dan.recv().await;
+        if matches!(&msg, Message::Join { user, .. } if user == "dan") {
+            break;
+        }
+        pre_join_dan.push(msg);
+    }
+    assert!(
+        !pre_join_dan.iter().any(
+            |m| matches!(m, Message::DirectMessage { content, .. } if content == "for bob and carol only")
+        ),
+        "bystander dan should not receive the DM in history replay"
     );
 }
 
