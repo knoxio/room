@@ -258,11 +258,29 @@ fn format_message(msg: &Message) -> Line<'static> {
                 ),
             ])
         }
+        Message::DirectMessage { ts, user, to, content, .. } => {
+            let ts_str = ts.format("%H:%M:%S").to_string();
+            Line::from(vec![
+                Span::styled(format!("[{ts_str}] "), Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!("[dm] {user}→{to}: "),
+                    Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(content.clone()),
+            ])
+        }
     }
 }
 
 /// Convert TUI input to a JSON envelope for the broker.
 fn build_payload(input: &str) -> String {
+    // `/dm <user> <message>` — preserve spaces in the message body.
+    if let Some(rest) = input.strip_prefix("/dm ") {
+        let mut parts = rest.splitn(2, ' ');
+        let to = parts.next().unwrap_or("").to_owned();
+        let content = parts.next().unwrap_or("").to_owned();
+        return serde_json::json!({ "type": "dm", "to": to, "content": content }).to_string();
+    }
     if let Some(rest) = input.strip_prefix('/') {
         let mut parts = rest.splitn(2, ' ');
         let cmd = parts.next().unwrap_or("").to_owned();
