@@ -1188,3 +1188,111 @@ async fn who_excludes_disconnected_users() {
         );
     }
 }
+
+// ── Token auth tests ──────────────────────────────────────────────────────────
+
+/// `join_session` returns a non-empty token and the correct username on success.
+#[tokio::test]
+async fn join_session_returns_token() {
+    let broker = TestBroker::start("t_join_token").await;
+    let (username, token) = room::oneshot::join_session(&broker.socket_path, "agent1")
+        .await
+        .expect("join_session failed");
+    assert_eq!(username, "agent1");
+    assert!(!token.is_empty(), "token must be non-empty");
+}
+
+/// A second `join_session` for the same username is rejected with a clear error.
+#[tokio::test]
+async fn join_session_rejects_duplicate_username() {
+    let broker = TestBroker::start("t_join_dup").await;
+    room::oneshot::join_session(&broker.socket_path, "bot")
+        .await
+        .expect("first join failed");
+    let err = room::oneshot::join_session(&broker.socket_path, "bot")
+        .await
+        .expect_err("second join should have failed");
+    assert!(
+        err.to_string().contains("already in use"),
+        "error should mention 'already in use': {err}"
+    );
+}
+
+/// Two distinct usernames can both register in the same room.
+#[tokio::test]
+async fn join_session_allows_different_usernames() {
+    let broker = TestBroker::start("t_join_two").await;
+    let (_, tok1) = room::oneshot::join_session(&broker.socket_path, "alice")
+        .await
+        .expect("alice join failed");
+    let (_, tok2) = room::oneshot::join_session(&broker.socket_path, "bob")
+        .await
+        .expect("bob join failed");
+    assert_ne!(tok1, tok2, "each user must receive a distinct token");
+}
+
+/// `send_message_with_token` delivers a message and returns the broadcast echo.
+#[tokio::test]
+async fn send_with_token_delivers_message() {
+    let broker = TestBroker::start("t_send_token").await;
+
+    let mut watcher = TestClient::connect(&broker.socket_path, "watcher").await;
+    watcher
+        .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "watcher"))
+        .await;
+
+    let (_, token) = room::oneshot::join_session(&broker.socket_path, "agent")
+        .await
+        .expect("join_session failed");
+
+    let wire = serde_json::json!({"type": "message", "content": "hello from token"}).to_string();
+    let msg = room::oneshot::send_message_with_token(&broker.socket_path, &token, &wire)
+        .await
+        .expect("send_message_with_token failed");
+
+    assert!(
+        matches!(&msg, Message::Message { user, content, .. }
+            if user == "agent" && content == "hello from token"),
+        "unexpected message: {msg:?}"
+    );
+
+    let received = watcher
+        .recv_until(|m| matches!(m, Message::Message { user, .. } if user == "agent"))
+        .await;
+    assert!(
+        matches!(&received, Message::Message { content, .. } if content == "hello from token"),
+        "watcher got unexpected message: {received:?}"
+    );
+}
+
+/// An invalid (unknown) token returns a clear error from the broker.
+#[tokio::test]
+async fn send_with_invalid_token_returns_error() {
+    let broker = TestBroker::start("t_invalid_token").await;
+    let wire = serde_json::json!({"type": "message", "content": "hi"}).to_string();
+    let err =
+        room::oneshot::send_message_with_token(&broker.socket_path, "not-a-real-token", &wire)
+            .await
+            .expect_err("should have failed with invalid token");
+    assert!(
+        err.to_string().contains("invalid token"),
+        "error should mention 'invalid token': {err}"
+    );
+}
+
+/// After a `join_session` the token can be used from two sequential sends.
+#[tokio::test]
+async fn token_is_reusable_across_sends() {
+    let broker = TestBroker::start("t_token_reuse").await;
+    let (_, token) = room::oneshot::join_session(&broker.socket_path, "agent")
+        .await
+        .expect("join_session failed");
+
+    for i in 0..2u8 {
+        let wire =
+            serde_json::json!({"type": "message", "content": format!("msg {i}")}).to_string();
+        room::oneshot::send_message_with_token(&broker.socket_path, &token, &wire)
+            .await
+            .unwrap_or_else(|e| panic!("send {i} failed: {e}"));
+    }
+}

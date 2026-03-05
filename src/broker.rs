@@ -12,6 +12,7 @@ use tokio::{
     },
     sync::{broadcast, Mutex},
 };
+use uuid::Uuid;
 
 use crate::{
     history,
@@ -29,11 +30,16 @@ type StatusMap = Arc<Mutex<HashMap<String, String>>>;
 /// The host receives all DMs regardless of sender/recipient.
 type HostUser = Arc<Mutex<Option<String>>>;
 
+/// Maps token UUID → username. Populated by one-shot JOIN requests.
+/// Cleared when the broker process exits; token files on disk survive restarts.
+type TokenMap = Arc<Mutex<HashMap<String, String>>>;
+
 /// Shared broker state passed to every client handler.
 struct RoomState {
     clients: ClientMap,
     status_map: StatusMap,
     host_user: HostUser,
+    token_map: TokenMap,
     chat_path: Arc<PathBuf>,
     room_id: Arc<String>,
 }
@@ -68,6 +74,7 @@ impl Broker {
             clients: Arc::new(Mutex::new(HashMap::new())),
             status_map: Arc::new(Mutex::new(HashMap::new())),
             host_user: Arc::new(Mutex::new(None)),
+            token_map: Arc::new(Mutex::new(HashMap::new())),
             chat_path: Arc::new(self.chat_path.clone()),
             room_id: Arc::new(self.room_id.clone()),
         });
@@ -108,16 +115,20 @@ async fn handle_client(
     let clients = state.clients.clone();
     let status_map = state.status_map.clone();
     let host_user = state.host_user.clone();
+    let token_map = state.token_map.clone();
     let chat_path = state.chat_path.clone();
     let room_id = state.room_id.clone();
 
     let (read_half, mut write_half) = stream.into_split();
     let mut reader = BufReader::new(read_half);
 
-    // First line: username handshake (or SEND:<username> for one-shot sends)
-    let mut username = String::new();
-    reader.read_line(&mut username).await?;
-    let first_line = username.trim();
+    // First line: username handshake, or one of the one-shot prefixes:
+    //   SEND:<username>  — legacy one-shot send
+    //   TOKEN:<uuid>     — token-authenticated one-shot send
+    //   JOIN:<username>  — register username, receive a session token
+    let mut first = String::new();
+    reader.read_line(&mut first).await?;
+    let first_line = first.trim();
 
     if let Some(send_user) = first_line.strip_prefix("SEND:") {
         return handle_oneshot_send(
@@ -132,6 +143,30 @@ async fn handle_client(
         .await;
     }
 
+    if let Some(token) = first_line.strip_prefix("TOKEN:") {
+        let username = token_map.lock().await.get(token).cloned();
+        return match username {
+            Some(u) => {
+                handle_oneshot_send(
+                    u, reader, write_half, &clients, &host_user, &chat_path, &room_id,
+                )
+                .await
+            }
+            None => {
+                let err = serde_json::json!({"type":"error","code":"invalid_token"});
+                write_half
+                    .write_all(format!("{err}\n").as_bytes())
+                    .await
+                    .map_err(Into::into)
+            }
+        };
+    }
+
+    if let Some(join_user) = first_line.strip_prefix("JOIN:") {
+        return handle_oneshot_join(join_user.to_owned(), write_half, &token_map).await;
+    }
+
+    // Remaining path: full interactive join — first_line is the username.
     let username = first_line.to_owned();
     if username.is_empty() {
         return Ok(());
@@ -362,6 +397,30 @@ async fn handle_oneshot_send(
     result?;
     let echo = format!("{}\n", serde_json::to_string(&msg)?);
     write_half.write_all(echo.as_bytes()).await?;
+    Ok(())
+}
+
+/// Handle a one-shot JOIN request: register a username, issue a UUID session token.
+///
+/// If the username is already registered the broker returns an error envelope and
+/// closes the connection without issuing a token. The token is held in-memory for
+/// the lifetime of the broker process; token files on disk are managed by the CLI.
+async fn handle_oneshot_join(
+    username: String,
+    mut write_half: OwnedWriteHalf,
+    token_map: &TokenMap,
+) -> anyhow::Result<()> {
+    let mut map = token_map.lock().await;
+    if map.values().any(|u| u == &username) {
+        let err = serde_json::json!({"type":"error","code":"username_taken","username": username});
+        write_half.write_all(format!("{err}\n").as_bytes()).await?;
+        return Ok(());
+    }
+    let token = Uuid::new_v4().to_string();
+    map.insert(token.clone(), username.clone());
+    drop(map);
+    let resp = serde_json::json!({"type":"token","token": token,"username": username});
+    write_half.write_all(format!("{resp}\n").as_bytes()).await?;
     Ok(())
 }
 

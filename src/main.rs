@@ -6,11 +6,19 @@ use tokio::net::UnixStream;
 
 #[derive(Subcommand, Debug)]
 enum Cmd {
+    /// Register a username with the broker and receive a session token.
+    ///
+    /// Writes the token to `/tmp/room-<room_id>.token`. Subsequent `send`,
+    /// `poll`, and `watch` calls read the username and token from that file —
+    /// no username argument required. Returns an error if the username is
+    /// already in use in the room.
+    Join { room_id: String, username: String },
     /// One-shot send a message to a room (requires a running broker).
-    /// Prints the broadcast message JSON and exits.
+    ///
+    /// Reads the caller's identity from the session token file created by
+    /// `room join`. Prints the broadcast message JSON and exits.
     Send {
         room_id: String,
-        username: String,
         /// Recipient username for a direct message
         #[arg(long)]
         to: Option<String>,
@@ -18,12 +26,12 @@ enum Cmd {
         #[arg(trailing_var_arg = true, num_args = 1..)]
         message: Vec<String>,
     },
-    /// Poll for new messages, printing NDJSON to stdout. Reads the chat file
-    /// directly — no broker required. Updates a per-user cursor file so
-    /// subsequent calls return only unseen messages.
+    /// Poll for new messages, printing NDJSON to stdout.
+    ///
+    /// Reads the caller's identity from the session token file. Updates a
+    /// per-user cursor file so subsequent calls return only unseen messages.
     Poll {
         room_id: String,
-        username: String,
         /// Return only messages after this message ID (overrides stored cursor)
         #[arg(long)]
         since: Option<String>,
@@ -32,9 +40,10 @@ enum Cmd {
     /// arrives. Polls the chat file on a configurable interval. Shares the
     /// cursor file with `room poll` so no messages are re-delivered. Exits
     /// after printing the first batch of foreign messages as NDJSON.
+    ///
+    /// Reads the caller's identity from the session token file.
     Watch {
         room_id: String,
-        username: String,
         /// Poll interval in seconds (default: 5)
         #[arg(long, default_value_t = 5)]
         interval: u64,
@@ -80,28 +89,22 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
     match args.command {
+        Some(Cmd::Join { room_id, username }) => {
+            oneshot::cmd_join(&room_id, &username).await?;
+        }
         Some(Cmd::Send {
             room_id,
-            username,
             to,
             message,
         }) => {
             let content = message.join(" ");
-            oneshot::cmd_send(&room_id, &username, to.as_deref(), &content).await?;
+            oneshot::cmd_send(&room_id, to.as_deref(), &content).await?;
         }
-        Some(Cmd::Poll {
-            room_id,
-            username,
-            since,
-        }) => {
-            oneshot::cmd_poll(&room_id, &username, since).await?;
+        Some(Cmd::Poll { room_id, since }) => {
+            oneshot::cmd_poll(&room_id, since).await?;
         }
-        Some(Cmd::Watch {
-            room_id,
-            username,
-            interval,
-        }) => {
-            oneshot::cmd_watch(&room_id, &username, interval).await?;
+        Some(Cmd::Watch { room_id, interval }) => {
+            oneshot::cmd_watch(&room_id, interval).await?;
         }
         None => {
             let room_id = args.room_id.unwrap_or_else(|| {
