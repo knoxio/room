@@ -1000,8 +1000,7 @@ async fn oneshot_send_dm_is_routed_privately() {
         .await;
 
     // "agent" sends a one-shot DM to bob
-    let wire =
-        serde_json::json!({"type": "dm", "to": "bob", "content": "secret"}).to_string();
+    let wire = serde_json::json!({"type": "dm", "to": "bob", "content": "secret"}).to_string();
     room::oneshot::send_message(&broker.socket_path, "agent", &wire)
         .await
         .unwrap();
