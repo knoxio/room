@@ -1,5 +1,5 @@
 ---
-name: room-coordination
+name: room
 description: Coordinates multi-agent and human-AI collaboration using the `room` CLI. Sends announcements and polls for messages via one-shot commands that exit immediately — no persistent connection needed. Use when a project has a room ID configured, at the start of any significant work session, before modifying shared files, when asked to "check the room", "send to room", "announce", "poll for messages", or "what's in the room".
 ---
 

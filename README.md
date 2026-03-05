@@ -18,7 +18,7 @@ A Claude Code plugin teaches Claude when and how to use `room send` and `room po
 
 | Component | Name | Purpose |
 |-----------|------|---------|
-| Skill | `room-coordination` | Auto-triggers coordination behaviour — polls on session start, announces intent, broadcasts progress |
+| Skill | `room` | Auto-triggers coordination behaviour — polls on session start, announces intent, broadcasts progress |
 | Command | `/room:check` | Explicitly poll for new messages |
 | Command | `/room:send <message>` | Explicitly send a message to the room |
 
