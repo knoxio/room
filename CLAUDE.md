@@ -7,20 +7,53 @@ Unix domain sockets. It is the coordination layer for this project. When you are
 on a feature, you are expected to join the shared room and stay connected for the duration
 of your work.
 
-## Joining
+## Communicating from Claude Code (sequential tool model)
+
+Claude Code cannot block on a persistent socket connection. Use the one-shot subcommands:
+
+```bash
+# Send a message — prints the broadcast JSON and exits
+room send <room-id> <your-username> your message here
+
+# Check for new messages since last poll — prints NDJSON and exits
+room poll <room-id> <your-username>
+
+# Check messages since a specific ID (overrides stored cursor)
+room poll <room-id> <your-username> --since <message-id>
+```
+
+The cursor is stored at `/tmp/room-<id>-<username>.cursor`. A second `room poll` with no `--since` returns only messages that arrived after the first call.
+
+### Typical loop
+
+```bash
+# On starting work — announce yourself
+room send myroom feat-myfeature "starting work on X"
+
+# After any significant step — broadcast progress
+room send myroom feat-myfeature "finished Y, moving on to Z"
+
+# Before touching a shared file — check for conflicts
+room poll myroom feat-myfeature
+room send myroom feat-myfeature "about to modify src/broker.rs"
+
+# On completion
+room send myroom feat-myfeature "done. modified: src/broker.rs, tests/integration.rs"
+```
+
+## Persistent agent mode (long-lived processes only)
+
+If your process can maintain a blocking connection (scripts, daemons), use `--agent`:
 
 ```bash
 room <room-id> <your-username> --agent -n 20
 ```
 
-- `<room-id>` — shared identifier for the session (you will be told this)
-- `<your-username>` — use your branch name (e.g. `feat-status`, `feat-pm`, `feat-readme`)
-- `--agent` — non-interactive JSON mode; messages arrive on stdout, send via stdin
-- `-n 20` — replay the last 20 messages on join so you have context
+Every event from the broker arrives as a JSON line on stdout. Send messages by writing JSON to stdin. This mode is **not suitable for Claude Code** — use `send`/`poll` instead.
 
 ## Wire format
 
-Every line on stdout is a JSON object:
+Every message is a JSON object with a `type` field:
 
 ```json
 {"type":"join","id":"...","room":"...","user":"alice","ts":"..."}
@@ -30,44 +63,23 @@ Every line on stdout is a JSON object:
 {"type":"reply","id":"...","room":"...","user":"bob","ts":"...","reply_to":"<msg-id>","content":"ack"}
 ```
 
-To send a plain message, write a JSON line to stdin:
-
-```json
-{"type":"message","content":"your message here"}
-```
-
-To send a reply to a specific message (use the `id` field from the received message):
-
-```json
-{"type":"reply","reply_to":"<message-id>","content":"your reply"}
-```
-
-To send a structured command:
-
-```json
-{"type":"command","cmd":"claim","params":["describe what you are claiming"]}
-```
-
-Plain text (non-JSON) is also accepted and treated as a message.
+To send structured input via `--agent` stdin or `room send`, plain text is also accepted.
 
 ## Expected behaviour
 
-### On join
-1. Read the replayed history to understand what has already been discussed or decided.
+### On starting work
+1. Poll for recent history: `room poll <room-id> <username>`
 2. Announce yourself: who you are, what branch you are on, and what you intend to work on.
 3. Wait briefly for acknowledgement or objections before starting work.
 
 ### During work
 - **Announce intent before touching shared code.** If you are about to modify a file that
   another agent might also need to change, say so and wait for a reply.
-- **Use `/claim <description>`** (as a command message) to declare ownership of a task or
-  file. Others will see this and avoid conflicts.
-- **Broadcast blockers.** If you are stuck or need a decision from another agent or the
-  human, say so clearly. Do not silently stall.
-- **Reply to specific messages** using the `reply` type with the original message's `id`.
-  This keeps threads readable.
-- **Check in periodically** — a short status update every few minutes is better than
-  silence.
+- **Claim tasks before starting them**: `room send <room-id> <username> /claim <description>`
+- **Broadcast blockers.** If you are stuck or need a decision, say so clearly. Do not silently stall.
+- **Poll before significant steps** to catch instructions or conflicts you may have missed:
+  `room poll <room-id> <username>`
+- **Check in periodically** — a short status update every few steps is better than silence.
 
 ### Coordination rules
 - **One agent per file at a time.** If you need to modify a file that another agent has
@@ -88,15 +100,16 @@ Plain text (non-JSON) is also accepted and treated as a message.
 
 ```
 src/
-  main.rs      — CLI parsing, broker/client detection
+  main.rs      — CLI parsing, subcommand dispatch (join / send / poll)
   broker.rs    — Unix socket server, message fanout, persistence
   client.rs    — Connects to broker, runs TUI or agent mode
   tui.rs       — ratatui split-pane interface
   message.rs   — Wire format enum, constructors, parse_client_line
   history.rs   — NDJSON load/append
+  oneshot.rs   — send_message / poll_messages (no persistent connection)
   lib.rs       — Re-exports all modules (required for integration tests)
 tests/
-  integration.rs — 14 integration tests against a live broker
+  integration.rs — 27 integration tests against a live broker
 ```
 
 Key invariants to preserve:
@@ -114,4 +127,4 @@ Key invariants to preserve:
 cargo test
 ```
 
-All 38 tests must remain green. Add tests for any new behaviour.
+All 54 tests must remain green. Add tests for any new behaviour.

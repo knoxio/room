@@ -1,0 +1,21 @@
+{
+  "name": "room",
+  "owner": {
+    "name": "joaopcmiranda"
+  },
+  "metadata": {
+    "description": "Claude Code plugins for the room multi-agent coordination CLI"
+  },
+  "plugins": [
+    {
+      "name": "room",
+      "source": "./plugin",
+      "description": "Multi-agent coordination via the room CLI. Teaches Claude when to announce intent, poll for messages, and follow the coordination protocol in projects with parallel agent work.",
+      "version": "0.1.0",
+      "license": "MIT",
+      "repository": "https://github.com/joaopcmiranda/room",
+      "homepage": "https://github.com/joaopcmiranda/room#readme",
+      "keywords": ["coordination", "multi-agent", "agents", "chat"]
+    }
+  ]
+}

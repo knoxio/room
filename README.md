@@ -14,6 +14,35 @@ Or from a published crate (once released):
 cargo install room
 ```
 
+## Claude Code plugin
+
+A Claude Code plugin is included in `plugin/`. It teaches Claude when and how to use `room send` and `room poll` automatically, and adds two explicit slash commands.
+
+**Plugin contents:**
+
+| Component | Name | Purpose |
+|-----------|------|---------|
+| Skill | `room-coordination` | Auto-triggers coordination behaviour — polls on session start, announces intent, broadcasts progress |
+| Command | `/room:check` | Explicitly poll for new messages |
+| Command | `/room:send <message>` | Explicitly send a message to the room |
+
+**Install from the marketplace** (recommended):
+
+```
+/plugin marketplace add joaopcmiranda/room
+/plugin install room@room
+```
+
+**Test locally without installing:**
+
+```bash
+claude --plugin-dir ./plugin
+```
+
+**Install on Claude.ai:** Settings → Capabilities → Skills → Upload skill → select the `plugin/` folder (zipped).
+
+Once installed, Claude will automatically follow the coordination protocol in any project whose `CLAUDE.md` documents a room ID.
+
 ## Quick start
 
 The first invocation of `room <room-id> <username>` in a given room starts the broker automatically. Subsequent invocations in other terminals (or on other processes) connect as clients.
@@ -28,6 +57,8 @@ room myroom bob
 
 ## CLI reference
 
+### Join a room (default)
+
 ```
 room <room-id> <username> [OPTIONS]
 ```
@@ -39,6 +70,46 @@ room <room-id> <username> [OPTIONS]
 | `-n <N>` | Number of history messages to replay on join. Default: `20`. |
 | `-f <path>` | Path to the chat file. Only used when creating a new room; ignored by clients that connect to an existing broker. |
 | `--agent` | Non-interactive agent mode. Reads JSON from stdin, writes JSON to stdout. See [Agent mode](#agent-mode). |
+
+### One-shot send
+
+```
+room send <room-id> <username> <message...>
+```
+
+Connects to a running broker, delivers one message, prints the broadcast JSON to stdout, and exits. All tokens after `<username>` are joined into the message content. Requires a broker to be running.
+
+```bash
+room send myroom bot "hello from a script"
+# {"type":"message","id":"...","room":"myroom","user":"bot","ts":"...","content":"hello from a script"}
+```
+
+The printed JSON is the authoritative broadcast record — use its `id` as a `--since` cursor for `room poll`.
+
+### Poll for new messages
+
+```
+room poll <room-id> <username> [--since <id>]
+```
+
+Reads the chat file directly (no socket, no broker required) and prints unseen messages as NDJSON to stdout, then exits. A per-user cursor file at `/tmp/room-<id>-<username>.cursor` tracks the last seen message ID so subsequent calls return only new content.
+
+| Flag | Description |
+|---|---|
+| `--since <id>` | Return only messages after this message ID. Overrides the stored cursor for this call. |
+
+```bash
+# First call: prints all messages, writes cursor
+room poll myroom bot
+
+# Second call: prints only messages since the cursor (nothing if up to date)
+room poll myroom bot
+
+# Jump to a specific position
+room poll myroom bot --since "b5b6becb-..."
+```
+
+The cursor file is at `/tmp/room-<id>-<username>.cursor`. Delete it to reset to the beginning of history.
 
 ## TUI
 
@@ -82,7 +153,9 @@ The command and its arguments are sent as a `command` message (see [Wire format]
 
 ## Agent mode
 
-Pass `--agent` to run without a TUI. This is designed for use by automated processes, scripts, and AI agents.
+> **For agents that cannot block on a persistent connection** (e.g. Claude Code, which uses sequential tool calls), use [`room send`](#one-shot-send) and [`room poll`](#poll-for-new-messages) instead. They are stateless, exit immediately, and compose cleanly with tool-calling workflows.
+
+Pass `--agent` to run without a TUI. This is designed for long-lived automated processes that can maintain a persistent socket connection.
 
 - **Stdout:** every event from the broker is printed as a JSON object, one per line.
 - **Stdin:** send messages by writing JSON objects (or plain text) to stdin, one per line.
@@ -220,15 +293,29 @@ The broker is the **sole writer** to the chat file. Clients must never write to 
 ## Architecture
 
 ```
-room <room-id> <username>
+room <room-id> <username>           # join
   |
   +-- no socket found?  --> start Broker  --> listen on /tmp/room-<id>.sock
   |                                            append to /tmp/<id>.chat
   |
-  +-- socket found?     --> connect as Client
+  +-- socket found?     --> connect as Client (TUI or --agent)
+
+room send <room-id> <username> …    # one-shot send
+  |
+  +-- connect to socket --> SEND: handshake --> broker broadcasts & persists
+                        <-- echo JSON (the broadcast record)
+                        --> disconnect
+
+room poll <room-id> <username>      # one-shot poll (no socket)
+  |
+  +-- read /tmp/<id>.chat directly
+  +-- filter by cursor / --since
+  +-- print NDJSON, update cursor
 ```
 
 The broker accepts connections over a Unix domain socket. Each client gets a dedicated broadcast receiver. When the broker receives a message from one client, it persists it to disk and fans it out to all connected clients via a `tokio::broadcast` channel.
+
+`room send` uses a lightweight handshake (`SEND:<username>`) that bypasses the full join flow — no join/leave events are emitted, and the sender is never registered in the broker's online-user list. `room poll` is entirely broker-free and safe to call from multiple processes simultaneously.
 
 ## User status
 

@@ -6,7 +6,10 @@ use std::{
 
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    net::{UnixListener, UnixStream},
+    net::{
+        unix::{OwnedReadHalf, OwnedWriteHalf},
+        UnixListener, UnixStream,
+    },
     sync::{broadcast, Mutex},
 };
 
@@ -108,10 +111,24 @@ async fn handle_client(
     let (read_half, mut write_half) = stream.into_split();
     let mut reader = BufReader::new(read_half);
 
-    // First line: username handshake
+    // First line: username handshake (or SEND:<username> for one-shot sends)
     let mut username = String::new();
     reader.read_line(&mut username).await?;
-    let username = username.trim().to_owned();
+    let first_line = username.trim();
+
+    if let Some(send_user) = first_line.strip_prefix("SEND:") {
+        return handle_oneshot_send(
+            send_user.to_owned(),
+            reader,
+            write_half,
+            &clients,
+            &chat_path,
+            &room_id,
+        )
+        .await;
+    }
+
+    let username = first_line.to_owned();
     if username.is_empty() {
         return Ok(());
     }
@@ -285,6 +302,29 @@ async fn handle_client(
     let _ = broadcast_and_persist(&leave_msg, &clients, &chat_path).await;
     eprintln!("[broker] {username} left (cid={cid})");
 
+    Ok(())
+}
+
+/// Handle a one-shot SEND connection: read one message line, broadcast it, echo it back, close.
+/// The sender is never registered in ClientMap/StatusMap and generates no join/leave events.
+async fn handle_oneshot_send(
+    username: String,
+    mut reader: BufReader<OwnedReadHalf>,
+    mut write_half: OwnedWriteHalf,
+    clients: &ClientMap,
+    chat_path: &Arc<PathBuf>,
+    room_id: &Arc<String>,
+) -> anyhow::Result<()> {
+    let mut line = String::new();
+    reader.read_line(&mut line).await?;
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return Ok(());
+    }
+    let msg = parse_client_line(trimmed, room_id, &username)?;
+    broadcast_and_persist(&msg, clients, chat_path).await?;
+    let echo = format!("{}\n", serde_json::to_string(&msg)?);
+    write_half.write_all(echo.as_bytes()).await?;
     Ok(())
 }
 

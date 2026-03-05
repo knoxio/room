@@ -1,17 +1,40 @@
 use std::path::PathBuf;
 
-use clap::Parser;
-use room::{broker::Broker, client::Client, history::default_chat_path};
+use clap::{Parser, Subcommand};
+use room::{broker::Broker, client::Client, history::default_chat_path, oneshot};
 use tokio::net::UnixStream;
+
+#[derive(Subcommand, Debug)]
+enum Cmd {
+    /// One-shot send a message to a room (requires a running broker).
+    /// Prints the broadcast message JSON and exits.
+    Send {
+        room_id: String,
+        username: String,
+        /// Message content; all remaining tokens are joined with spaces
+        #[arg(trailing_var_arg = true, num_args = 1..)]
+        message: Vec<String>,
+    },
+    /// Poll for new messages, printing NDJSON to stdout. Reads the chat file
+    /// directly — no broker required. Updates a per-user cursor file so
+    /// subsequent calls return only unseen messages.
+    Poll {
+        room_id: String,
+        username: String,
+        /// Return only messages after this message ID (overrides stored cursor)
+        #[arg(long)]
+        since: Option<String>,
+    },
+}
 
 #[derive(Parser, Debug)]
 #[command(name = "room", about = "Multi-user chat room for agent/human coordination")]
 struct Args {
-    /// Room identifier
-    room_id: String,
+    /// Room identifier (required when no subcommand is given)
+    room_id: Option<String>,
 
-    /// Your username
-    username: String,
+    /// Your username (required when no subcommand is given)
+    username: Option<String>,
 
     /// Number of history messages to replay on join
     #[arg(short = 'n', default_value_t = 20)]
@@ -24,14 +47,63 @@ struct Args {
     /// Non-interactive agent mode: read JSON from stdin, write JSON to stdout
     #[arg(long)]
     agent: bool,
+
+    #[command(subcommand)]
+    command: Option<Cmd>,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
-    let socket_path = PathBuf::from(format!("/tmp/room-{}.sock", args.room_id));
-    let meta_path = PathBuf::from(format!("/tmp/room-{}.meta", args.room_id));
+    match args.command {
+        Some(Cmd::Send {
+            room_id,
+            username,
+            message,
+        }) => {
+            let content = message.join(" ");
+            oneshot::cmd_send(&room_id, &username, &content).await?;
+        }
+        Some(Cmd::Poll {
+            room_id,
+            username,
+            since,
+        }) => {
+            oneshot::cmd_poll(&room_id, &username, since).await?;
+        }
+        None => {
+            let room_id = args.room_id.unwrap_or_else(|| {
+                eprintln!("error: room_id is required when no subcommand is given");
+                std::process::exit(1);
+            });
+            let username = args.username.unwrap_or_else(|| {
+                eprintln!("error: username is required when no subcommand is given");
+                std::process::exit(1);
+            });
+            run_join(
+                room_id,
+                username,
+                args.history_lines,
+                args.chat_file,
+                args.agent,
+            )
+            .await?;
+        }
+    }
+
+    Ok(())
+}
+
+async fn run_join(
+    room_id: String,
+    username: String,
+    history_lines: usize,
+    chat_file: Option<PathBuf>,
+    agent: bool,
+) -> anyhow::Result<()> {
+    let socket_path = PathBuf::from(format!("/tmp/room-{}.sock", room_id));
+    let meta_path = PathBuf::from(format!("/tmp/room-{}.meta", room_id));
 
     let become_broker = match UnixStream::connect(&socket_path).await {
         Ok(_) => false,
@@ -47,18 +119,18 @@ async fn main() -> anyhow::Result<()> {
     };
 
     if become_broker {
-        let chat_path = resolve_chat_path(&args, &meta_path);
+        let resolved_chat_path = resolve_chat_path(&chat_file, &meta_path, &room_id);
 
-        let meta = serde_json::json!({ "chat_path": chat_path.to_string_lossy() });
+        let meta = serde_json::json!({ "chat_path": resolved_chat_path.to_string_lossy() });
         let _ = std::fs::write(&meta_path, format!("{meta}\n"));
 
         eprintln!(
             "[room] starting broker for '{}', chat: {}",
-            args.room_id,
-            chat_path.display()
+            room_id,
+            resolved_chat_path.display()
         );
 
-        let broker = Broker::new(&args.room_id, chat_path, socket_path.clone());
+        let broker = Broker::new(&room_id, resolved_chat_path, socket_path.clone());
 
         tokio::spawn(async move {
             if let Err(e) = broker.run().await {
@@ -76,9 +148,9 @@ async fn main() -> anyhow::Result<()> {
 
         let client = Client {
             socket_path,
-            username: args.username,
-            agent_mode: args.agent,
-            history_lines: args.history_lines,
+            username,
+            agent_mode: agent,
+            history_lines,
         };
         client.run().await?;
 
@@ -88,12 +160,12 @@ async fn main() -> anyhow::Result<()> {
         // (e.g. file writes).
         tokio::signal::ctrl_c().await.ok();
     } else {
-        eprintln!("[room] connecting to existing room '{}'", args.room_id);
+        eprintln!("[room] connecting to existing room '{room_id}'");
         let client = Client {
             socket_path,
-            username: args.username,
-            agent_mode: args.agent,
-            history_lines: args.history_lines,
+            username,
+            agent_mode: agent,
+            history_lines,
         };
         client.run().await?;
     }
@@ -101,8 +173,12 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn resolve_chat_path(args: &Args, meta_path: &PathBuf) -> PathBuf {
-    if let Some(ref p) = args.chat_file {
+fn resolve_chat_path(
+    chat_file: &Option<PathBuf>,
+    meta_path: &PathBuf,
+    room_id: &str,
+) -> PathBuf {
+    if let Some(ref p) = chat_file {
         return p.clone();
     }
     if meta_path.exists() {
@@ -114,5 +190,5 @@ fn resolve_chat_path(args: &Args, meta_path: &PathBuf) -> PathBuf {
             }
         }
     }
-    default_chat_path(&args.room_id)
+    default_chat_path(room_id)
 }

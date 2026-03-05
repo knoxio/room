@@ -714,6 +714,177 @@ async fn who_responds_only_to_requester() {
     );
 }
 
+// ── send / poll tests ─────────────────────────────────────────────────────────
+
+/// `send_message` delivers a message to connected clients without generating
+/// join or leave events for the sender.
+#[tokio::test]
+async fn send_delivers_message_without_join_leave() {
+    let broker = TestBroker::start("t_send_no_join").await;
+
+    let mut alice = TestClient::connect(&broker.socket_path, "alice").await;
+    alice
+        .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "alice"))
+        .await;
+
+    room::oneshot::send_message(&broker.socket_path, "bot", "hello from bot")
+        .await
+        .unwrap();
+
+    // Alice receives the message content
+    let msg = alice
+        .recv_until(
+            |m| matches!(m, Message::Message { content, .. } if content == "hello from bot"),
+        )
+        .await;
+    assert_eq!(msg.user(), "bot");
+
+    // No join event for "bot" should arrive
+    let bot_join = timeout(Duration::from_millis(200), async {
+        alice
+            .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "bot"))
+            .await
+    })
+    .await;
+    assert!(bot_join.is_err(), "bot should not generate a join event");
+}
+
+/// `send_message` returns a fully-populated Message with the correct fields.
+#[tokio::test]
+async fn send_returns_echo_json() {
+    let broker = TestBroker::start("t_send_echo").await;
+
+    let msg = room::oneshot::send_message(&broker.socket_path, "bot", "test echo")
+        .await
+        .unwrap();
+
+    assert!(
+        matches!(&msg, Message::Message { content, .. } if content == "test echo"),
+        "expected Message variant with correct content"
+    );
+    assert_eq!(msg.user(), "bot");
+    assert_eq!(msg.room(), "t_send_echo");
+    assert!(!msg.id().is_empty(), "message must have a non-empty id");
+}
+
+/// `poll_messages` returns only messages that come after the given `since` ID.
+#[tokio::test]
+async fn poll_returns_messages_since_id() {
+    let broker = TestBroker::start("t_poll_since").await;
+
+    let mut alice = TestClient::connect(&broker.socket_path, "alice").await;
+    alice
+        .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "alice"))
+        .await;
+
+    alice.send_text("msg1").await;
+    let m1 = alice
+        .recv_until(|m| matches!(m, Message::Message { content, .. } if content == "msg1"))
+        .await;
+    alice.send_text("msg2").await;
+    alice
+        .recv_until(|m| matches!(m, Message::Message { content, .. } if content == "msg2"))
+        .await;
+    alice.send_text("msg3").await;
+    alice
+        .recv_until(|m| matches!(m, Message::Message { content, .. } if content == "msg3"))
+        .await;
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let cursor_path = dir.path().join("test.cursor");
+
+    let msgs =
+        room::oneshot::poll_messages(&broker.chat_path, &cursor_path, Some(m1.id()))
+            .await
+            .unwrap();
+
+    let contents: Vec<&str> = msgs
+        .iter()
+        .filter_map(|m| {
+            if let Message::Message { content, .. } = m {
+                Some(content.as_str())
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    assert!(contents.contains(&"msg2"), "expected msg2 in results");
+    assert!(contents.contains(&"msg3"), "expected msg3 in results");
+    assert!(!contents.contains(&"msg1"), "msg1 should be excluded");
+}
+
+/// After a poll the cursor file holds the last message ID; a subsequent poll
+/// with no explicit `since` returns nothing (already seen).
+#[tokio::test]
+async fn poll_updates_cursor_file() {
+    let broker = TestBroker::start("t_poll_cursor").await;
+
+    let mut alice = TestClient::connect(&broker.socket_path, "alice").await;
+    alice
+        .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "alice"))
+        .await;
+
+    alice.send_text("cursor test").await;
+    alice
+        .recv_until(
+            |m| matches!(m, Message::Message { content, .. } if content == "cursor test"),
+        )
+        .await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let cursor_path = dir.path().join("alice.cursor");
+
+    // First poll: returns messages, writes cursor
+    let msgs = room::oneshot::poll_messages(&broker.chat_path, &cursor_path, None)
+        .await
+        .unwrap();
+    assert!(!msgs.is_empty(), "first poll should return messages");
+    assert!(cursor_path.exists(), "cursor file must be written after poll");
+
+    // Second poll: cursor is up to date, nothing new
+    let msgs2 = room::oneshot::poll_messages(&broker.chat_path, &cursor_path, None)
+        .await
+        .unwrap();
+    assert!(
+        msgs2.is_empty(),
+        "second poll with current cursor should return nothing"
+    );
+}
+
+/// `poll_messages` works without a running broker — it reads the chat file directly.
+#[tokio::test]
+async fn poll_with_no_broker_reads_file_directly() {
+    let dir = tempfile::tempdir().unwrap();
+    let chat_path = dir.path().join("offline.chat");
+    let cursor_path = dir.path().join("offline.cursor");
+
+    let msg = room::message::make_message("offline", "ghost", "written directly");
+    room::history::append(&chat_path, &msg).await.unwrap();
+
+    let msgs = room::oneshot::poll_messages(&chat_path, &cursor_path, None)
+        .await
+        .unwrap();
+
+    assert_eq!(msgs.len(), 1);
+    assert!(
+        matches!(&msgs[0], Message::Message { content, .. } if content == "written directly")
+    );
+}
+
+/// `send_message` returns an error when no broker socket exists.
+#[tokio::test]
+async fn send_fails_when_no_broker() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket_path = dir.path().join("nonexistent.sock");
+
+    let result = room::oneshot::send_message(&socket_path, "bot", "hello").await;
+    assert!(result.is_err(), "send should fail when no broker is running");
+}
+
 /// Users removed from status map on disconnect do not appear in subsequent who responses.
 #[tokio::test]
 async fn who_excludes_disconnected_users() {
