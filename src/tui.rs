@@ -112,6 +112,66 @@ impl CommandPalette {
     }
 }
 
+// ── Mention picker ────────────────────────────────────────────────────────────
+
+/// Autocomplete popup for `@username` mentions.
+struct MentionPicker {
+    active: bool,
+    selected: usize,
+    /// Prefix-filtered list of matching online usernames.
+    filtered: Vec<String>,
+    /// Byte index of the `@` character in the input buffer that opened this picker.
+    at_byte: usize,
+}
+
+impl MentionPicker {
+    fn new() -> Self {
+        Self {
+            active: false,
+            selected: 0,
+            filtered: Vec::new(),
+            at_byte: 0,
+        }
+    }
+
+    fn activate(&mut self, at_byte: usize, online_users: &[String], query: &str) {
+        self.active = true;
+        self.selected = 0;
+        self.at_byte = at_byte;
+        self.update_filter(online_users, query);
+    }
+
+    fn deactivate(&mut self) {
+        self.active = false;
+    }
+
+    fn update_filter(&mut self, online_users: &[String], query: &str) {
+        let q = query.to_ascii_lowercase();
+        self.filtered = online_users
+            .iter()
+            .filter(|u| u.to_ascii_lowercase().starts_with(q.as_str()))
+            .cloned()
+            .collect();
+        if self.selected >= self.filtered.len() {
+            self.selected = self.filtered.len().saturating_sub(1);
+        }
+    }
+
+    fn move_up(&mut self) {
+        self.selected = self.selected.saturating_sub(1);
+    }
+
+    fn move_down(&mut self) {
+        if !self.filtered.is_empty() {
+            self.selected = (self.selected + 1).min(self.filtered.len() - 1);
+        }
+    }
+
+    fn selected_user(&self) -> Option<&str> {
+        self.filtered.get(self.selected).map(|s| s.as_str())
+    }
+}
+
 use crate::message::Message;
 
 /// Maximum visible content lines in the input box before it stops growing.
@@ -179,16 +239,27 @@ pub async fn run(
     let mut terminal = Terminal::new(backend)?;
 
     let mut messages: Vec<Message> = Vec::new();
+    let mut online_users: Vec<String> = Vec::new();
     let mut input = String::new();
     let mut cursor_pos: usize = 0; // byte index into `input`, always on a char boundary
     let mut input_row_scroll: usize = 0; // vertical scroll within the input box
     let mut scroll_offset: usize = 0;
     let mut palette = CommandPalette::new();
+    let mut mention = MentionPicker::new();
     let mut result: anyhow::Result<()> = Ok(());
 
     'main: loop {
         // Drain pending messages from the socket reader
         while let Ok(msg) = msg_rx.try_recv() {
+            match &msg {
+                Message::Join { user, .. } if !online_users.contains(user) => {
+                    online_users.push(user.clone());
+                }
+                Message::Leave { user, .. } => {
+                    online_users.retain(|u| u != user);
+                }
+                _ => {}
+            }
             messages.push(msg);
         }
 
@@ -340,15 +411,78 @@ pub async fn run(
                 );
                 f.render_widget(palette_list, popup_rect);
             }
+
+            // Render the mention picker popup above the cursor when active.
+            if mention.active && !mention.filtered.is_empty() {
+                let mention_items: Vec<ListItem> = mention
+                    .filtered
+                    .iter()
+                    .enumerate()
+                    .map(|(row, user)| {
+                        let style = if row == mention.selected {
+                            Style::default()
+                                .fg(Color::Black)
+                                .bg(user_color(user))
+                                .add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default().fg(user_color(user))
+                        };
+                        ListItem::new(Line::from(Span::styled(format!("@{user}"), style)))
+                    })
+                    .collect();
+
+                let popup_height = (mention.filtered.len() as u16 + 2).min(chunks[0].height);
+                let popup_y = chunks[1].y.saturating_sub(popup_height);
+                let max_width = mention
+                    .filtered
+                    .iter()
+                    .map(|u| u.len() + 1) // '@' + username
+                    .max()
+                    .unwrap_or(8) as u16
+                    + 4; // borders + padding
+                let popup_width = max_width.min(chunks[1].width / 2).max(8);
+                let popup_x = cursor_x
+                    .saturating_sub(1)
+                    .min(chunks[1].x + chunks[1].width.saturating_sub(popup_width));
+                let popup_rect = Rect {
+                    x: popup_x,
+                    y: popup_y,
+                    width: popup_width,
+                    height: popup_height,
+                };
+
+                f.render_widget(Clear, popup_rect);
+                let mention_list = List::new(mention_items).block(
+                    Block::default()
+                        .title(" @ ")
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(Color::Yellow)),
+                );
+                f.render_widget(mention_list, popup_rect);
+            }
         })?;
 
         if event::poll(std::time::Duration::from_millis(50))? {
             match event::read()? {
                 Event::Key(key) => match key.code {
                     KeyCode::Esc => {
-                        if palette.active {
+                        if mention.active {
+                            mention.deactivate();
+                        } else if palette.active {
                             palette.deactivate();
                         }
+                    }
+                    KeyCode::Tab if mention.active => {
+                        if let Some(user) = mention.selected_user() {
+                            let user = user.to_owned();
+                            let replacement = format!("@{user} ");
+                            let query_end = cursor_pos;
+                            let at_start = mention.at_byte;
+                            input.replace_range(at_start..query_end, &replacement);
+                            cursor_pos = at_start + replacement.len();
+                            input_row_scroll = 0;
+                        }
+                        mention.deactivate();
                     }
                     KeyCode::Tab if palette.active => {
                         // Complete with selected command usage, replacing input.
@@ -360,7 +494,18 @@ pub async fn run(
                         palette.deactivate();
                     }
                     KeyCode::Enter => {
-                        if palette.active {
+                        if mention.active {
+                            if let Some(user) = mention.selected_user() {
+                                let user = user.to_owned();
+                                let replacement = format!("@{user} ");
+                                let query_end = cursor_pos;
+                                let at_start = mention.at_byte;
+                                input.replace_range(at_start..query_end, &replacement);
+                                cursor_pos = at_start + replacement.len();
+                                input_row_scroll = 0;
+                            }
+                            mention.deactivate();
+                        } else if palette.active {
                             // Complete and deactivate — user presses Enter to confirm selection.
                             if let Some(usage) = palette.selected_usage() {
                                 input = usage.to_owned();
@@ -392,14 +537,18 @@ pub async fn run(
                         }
                     }
                     KeyCode::Up => {
-                        if palette.active {
+                        if mention.active {
+                            mention.move_up();
+                        } else if palette.active {
                             palette.move_up();
                         } else {
                             scroll_offset = scroll_offset.saturating_add(1);
                         }
                     }
                     KeyCode::Down => {
-                        if palette.active {
+                        if mention.active {
+                            mention.move_down();
+                        } else if palette.active {
                             palette.move_down();
                         } else {
                             scroll_offset = scroll_offset.saturating_sub(1);
@@ -411,6 +560,17 @@ pub async fn run(
                     KeyCode::Char(c) => {
                         input.insert(cursor_pos, c);
                         cursor_pos += c.len_utf8();
+                        // Update mention picker state.
+                        if let Some((at_byte, query)) = find_at_context(&input, cursor_pos) {
+                            if mention.active || c == '@' {
+                                mention.activate(at_byte, &online_users, query);
+                                if mention.filtered.is_empty() {
+                                    mention.deactivate();
+                                }
+                            }
+                        } else {
+                            mention.deactivate();
+                        }
                         // Activate palette when `/` is typed at the start of an otherwise empty input.
                         if c == '/' && input == "/" {
                             palette.activate();
@@ -435,6 +595,19 @@ pub async fn run(
                                 .unwrap_or(0);
                             input.remove(prev);
                             cursor_pos = prev;
+                            // Sync mention picker after deletion.
+                            if mention.active {
+                                if let Some((at_byte, query)) = find_at_context(&input, cursor_pos)
+                                {
+                                    mention.at_byte = at_byte;
+                                    mention.update_filter(&online_users, query);
+                                    if mention.filtered.is_empty() {
+                                        mention.deactivate();
+                                    }
+                                } else {
+                                    mention.deactivate();
+                                }
+                            }
                             // Sync palette state after deletion.
                             if palette.active {
                                 if input.is_empty() {
@@ -486,6 +659,15 @@ pub async fn run(
 
         // Drain any messages that arrived during the poll
         while let Ok(msg) = msg_rx.try_recv() {
+            match &msg {
+                Message::Join { user, .. } if !online_users.contains(user) => {
+                    online_users.push(user.clone());
+                }
+                Message::Leave { user, .. } => {
+                    online_users.retain(|u| u != user);
+                }
+                _ => {}
+            }
             messages.push(msg);
         }
     }
@@ -565,6 +747,43 @@ fn cursor_display_pos(input: &str, cursor_pos: usize, width: usize) -> (usize, u
         col = 0;
     }
     (row, col)
+}
+
+/// Split a message content string into styled spans, rendering `@username`
+/// tokens in the mentioned user's colour.
+fn render_content_with_mentions(content: &str) -> Vec<Span<'static>> {
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut remaining = content;
+    while let Some(at_pos) = remaining.find('@') {
+        if at_pos > 0 {
+            spans.push(Span::raw(remaining[..at_pos].to_string()));
+        }
+        let after_at = &remaining[at_pos + 1..];
+        let username_end = after_at
+            .find(|c: char| !c.is_alphanumeric() && c != '_' && c != '-')
+            .unwrap_or(after_at.len());
+        if username_end == 0 {
+            // Bare '@' with no username — treat as literal text.
+            spans.push(Span::raw("@".to_string()));
+            remaining = after_at;
+        } else {
+            let username = &after_at[..username_end];
+            spans.push(Span::styled(
+                format!("@{username}"),
+                Style::default()
+                    .fg(user_color(username))
+                    .add_modifier(Modifier::BOLD),
+            ));
+            remaining = &after_at[username_end..];
+        }
+    }
+    if !remaining.is_empty() {
+        spans.push(Span::raw(remaining.to_string()));
+    }
+    if spans.is_empty() {
+        spans.push(Span::raw(String::new()));
+    }
+    spans
 }
 
 /// Arrow glyph used in DM display (`→`).
@@ -656,7 +875,7 @@ fn format_message(msg: &Message, available_width: usize) -> Text<'static> {
             let mut lines: Vec<Line<'static>> = Vec::new();
             for (i, chunk) in chunks.into_iter().enumerate() {
                 if i == 0 {
-                    lines.push(Line::from(vec![
+                    let mut line_spans = vec![
                         Span::styled(format!("[{ts_str}] "), Style::default().fg(Color::DarkGray)),
                         Span::styled(
                             format!("{user}: "),
@@ -664,13 +883,13 @@ fn format_message(msg: &Message, available_width: usize) -> Text<'static> {
                                 .fg(user_color(user))
                                 .add_modifier(Modifier::BOLD),
                         ),
-                        Span::raw(chunk),
-                    ]));
+                    ];
+                    line_spans.extend(render_content_with_mentions(&chunk));
+                    lines.push(Line::from(line_spans));
                 } else {
-                    lines.push(Line::from(vec![
-                        Span::raw(indent.clone()),
-                        Span::raw(chunk),
-                    ]));
+                    let mut line_spans = vec![Span::raw(indent.clone())];
+                    line_spans.extend(render_content_with_mentions(&chunk));
+                    lines.push(Line::from(line_spans));
                 }
             }
             Text::from(lines)
@@ -692,7 +911,7 @@ fn format_message(msg: &Message, available_width: usize) -> Text<'static> {
             let mut lines: Vec<Line<'static>> = Vec::new();
             for (i, chunk) in chunks.into_iter().enumerate() {
                 if i == 0 {
-                    lines.push(Line::from(vec![
+                    let mut line_spans = vec![
                         Span::styled(format!("[{ts_str}] "), Style::default().fg(Color::DarkGray)),
                         Span::styled(
                             format!("{user}: "),
@@ -704,13 +923,13 @@ fn format_message(msg: &Message, available_width: usize) -> Text<'static> {
                             format!("(re:{short_id}) "),
                             Style::default().fg(Color::DarkGray),
                         ),
-                        Span::raw(chunk),
-                    ]));
+                    ];
+                    line_spans.extend(render_content_with_mentions(&chunk));
+                    lines.push(Line::from(line_spans));
                 } else {
-                    lines.push(Line::from(vec![
-                        Span::raw(indent.clone()),
-                        Span::raw(chunk),
-                    ]));
+                    let mut line_spans = vec![Span::raw(indent.clone())];
+                    line_spans.extend(render_content_with_mentions(&chunk));
+                    lines.push(Line::from(line_spans));
                 }
             }
             Text::from(lines)
@@ -1218,6 +1437,119 @@ mod tests {
         assert_eq!(pos, Some(5));
         assert_eq!(buf, "foo\\\n");
     }
+
+    // ── find_at_context ───────────────────────────────────────────────────────
+
+    #[test]
+    fn find_at_context_no_at_returns_none() {
+        assert!(find_at_context("hello world", 11).is_none());
+    }
+
+    #[test]
+    fn find_at_context_bare_at_returns_at_with_empty_query() {
+        // "say @" — cursor right after '@', query is ""
+        let input = "say @";
+        let result = find_at_context(input, input.len());
+        assert_eq!(result, Some((4, "")));
+    }
+
+    #[test]
+    fn find_at_context_partial_username() {
+        let input = "hello @ali";
+        let result = find_at_context(input, input.len());
+        assert_eq!(result, Some((6, "ali")));
+    }
+
+    #[test]
+    fn find_at_context_space_after_at_returns_none() {
+        let input = "@ alice";
+        assert!(find_at_context(input, input.len()).is_none());
+    }
+
+    #[test]
+    fn find_at_context_newline_in_query_returns_none() {
+        let input = "@ali\nce";
+        assert!(find_at_context(input, input.len()).is_none());
+    }
+
+    #[test]
+    fn find_at_context_cursor_before_at_returns_none() {
+        let input = "hello @ali";
+        // Cursor is before the '@'
+        assert!(find_at_context(input, 4).is_none());
+    }
+
+    #[test]
+    fn find_at_context_uses_last_at() {
+        let input = "@first @sec";
+        let result = find_at_context(input, input.len());
+        // Should match the second '@'
+        assert_eq!(result, Some((7, "sec")));
+    }
+
+    // ── render_content_with_mentions ─────────────────────────────────────────
+
+    #[test]
+    fn render_mentions_no_at_returns_single_raw_span() {
+        let spans = render_content_with_mentions("hello world");
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].content, "hello world");
+    }
+
+    #[test]
+    fn render_mentions_bare_at_no_username_is_literal() {
+        let spans = render_content_with_mentions("email@");
+        // '@' with no username after is treated as literal
+        let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text, "email@");
+    }
+
+    #[test]
+    fn render_mentions_single_mention() {
+        let spans = render_content_with_mentions("hey @alice!");
+        // "hey " + "@alice" + "!"
+        assert_eq!(spans.len(), 3);
+        assert_eq!(spans[0].content, "hey ");
+        assert_eq!(spans[1].content, "@alice");
+        assert_eq!(spans[2].content, "!");
+    }
+
+    #[test]
+    fn render_mentions_multiple_mentions() {
+        let spans = render_content_with_mentions("@alice and @bob");
+        // "@alice" + " and " + "@bob"
+        assert_eq!(spans.len(), 3);
+        assert_eq!(spans[0].content, "@alice");
+        assert_eq!(spans[1].content, " and ");
+        assert_eq!(spans[2].content, "@bob");
+    }
+
+    #[test]
+    fn render_mentions_mention_only() {
+        let spans = render_content_with_mentions("@r2d2");
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].content, "@r2d2");
+    }
+
+    #[test]
+    fn render_mentions_empty_content() {
+        let spans = render_content_with_mentions("");
+        // Should return at least one span (even if empty)
+        assert!(!spans.is_empty());
+    }
+}
+
+/// If the cursor is currently within a `@mention` context — i.e. there is an
+/// `@` before `cursor_pos` with no space or newline between them — return the
+/// byte index of the `@` and the query string typed after it.
+fn find_at_context(input: &str, cursor_pos: usize) -> Option<(usize, &str)> {
+    let before = &input[..cursor_pos];
+    let at_pos = before.rfind('@')?;
+    let query = &before[at_pos + 1..];
+    if query.contains([' ', '\n']) {
+        return None;
+    }
+    Some((at_pos, query))
 }
 
 /// If the char immediately before `cursor_pos` in `buf` is `\`, removes it
