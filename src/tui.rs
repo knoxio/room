@@ -92,32 +92,55 @@ pub async fn run(
             messages.push(msg);
         }
 
+        let term_area = terminal.size()?;
+        let content_width = term_area.width.saturating_sub(2) as usize;
+        let visible_count = term_area.height.saturating_sub(5) as usize; // 3 input + 2 borders
+
+        let msg_texts: Vec<Text<'static>> = messages
+            .iter()
+            .map(|m| format_message(m, content_width))
+            .collect();
+
+        let heights: Vec<usize> = msg_texts.iter().map(|t| t.lines.len().max(1)).collect();
+        let total_lines: usize = heights.iter().sum();
+
+        // Clamp scroll offset so it can't exceed scrollable range
+        scroll_offset = scroll_offset.min(total_lines.saturating_sub(visible_count));
+
         terminal.draw(|f| {
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([Constraint::Min(3), Constraint::Length(3)])
                 .split(f.area());
 
-            // Available content width inside the bordered message panel.
-            let content_width = chunks[0].width.saturating_sub(2) as usize;
+            // actual visible rows from layout (overrides approximation)
+            let actual_visible = chunks[0].height.saturating_sub(2) as usize;
 
-            let msg_items: Vec<ListItem> = messages
+            let view_bottom = total_lines.saturating_sub(scroll_offset);
+            let view_top = view_bottom.saturating_sub(actual_visible);
+
+            let (start_msg_idx, skip_first) = find_view_start(&heights, view_top);
+
+            let visible: Vec<ListItem> = msg_texts[start_msg_idx..]
                 .iter()
-                .map(|m| ListItem::new(format_message(m, content_width)))
+                .enumerate()
+                .map(|(i, text)| {
+                    if i == 0 && skip_first > 0 {
+                        ListItem::new(Text::from(text.lines[skip_first..].to_vec()))
+                    } else {
+                        ListItem::new(text.clone())
+                    }
+                })
                 .collect();
 
-            let visible_count = chunks[0].height.saturating_sub(2) as usize;
-            let total = msg_items.len();
-            let start = if scroll_offset < total {
-                total.saturating_sub(visible_count + scroll_offset)
+            let title = if scroll_offset > 0 {
+                format!(" {room_id} [↑ {scroll_offset} lines] ")
             } else {
-                0
+                format!(" {room_id} ")
             };
-            let visible: Vec<ListItem> = msg_items[start..].to_vec();
-
             let msg_list = List::new(visible).block(
                 Block::default()
-                    .title(format!(" {room_id} "))
+                    .title(title)
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(Color::DarkGray)),
             );
@@ -167,10 +190,10 @@ pub async fn run(
                         scroll_offset = scroll_offset.saturating_sub(1);
                     }
                     KeyCode::PageUp => {
-                        scroll_offset = scroll_offset.saturating_add(10);
+                        scroll_offset = scroll_offset.saturating_add(visible_count);
                     }
                     KeyCode::PageDown => {
-                        scroll_offset = scroll_offset.saturating_sub(10);
+                        scroll_offset = scroll_offset.saturating_sub(visible_count);
                     }
                     _ => {}
                 },
@@ -430,6 +453,20 @@ fn format_message(msg: &Message, available_width: usize) -> Text<'static> {
             Text::from(lines)
         }
     }
+}
+
+/// Given per-message visual line heights and a target top line index,
+/// returns `(message_index, lines_to_skip)` — the first message that
+/// should appear in the viewport and how many of its leading lines to drop.
+fn find_view_start(heights: &[usize], view_top: usize) -> (usize, usize) {
+    let mut accum = 0usize;
+    for (i, &h) in heights.iter().enumerate() {
+        if accum + h > view_top {
+            return (i, view_top - accum);
+        }
+        accum += h;
+    }
+    (heights.len(), 0)
 }
 
 /// Map a username to a consistent, unique-feeling color from a fixed palette.
