@@ -1,7 +1,13 @@
 [package]
-name = "room"
+name = "agentroom"
 version = "0.1.0"
 edition = "2021"
+description = "Multi-user chat room for agent/human coordination over Unix domain sockets"
+license = "MIT"
+repository = "https://github.com/knoxio/room"
+readme = "README.md"
+keywords = ["cli", "chat", "agents", "coordination", "tui"]
+categories = ["command-line-utilities", "asynchronous"]
 
 [[bin]]
 name = "room"
