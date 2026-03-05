@@ -9,7 +9,7 @@ use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
-    text::{Line, Span},
+    text::{Line, Span, Text},
     widgets::{Block, Borders, List, ListItem, Paragraph},
     Terminal,
 };
@@ -92,16 +92,19 @@ pub async fn run(
             messages.push(msg);
         }
 
-        let msg_items: Vec<ListItem> = messages
-            .iter()
-            .map(|m| ListItem::new(format_message(m)))
-            .collect();
-
         terminal.draw(|f| {
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([Constraint::Min(3), Constraint::Length(3)])
                 .split(f.area());
+
+            // Available content width inside the bordered message panel.
+            let content_width = chunks[0].width.saturating_sub(2) as usize;
+
+            let msg_items: Vec<ListItem> = messages
+                .iter()
+                .map(|m| ListItem::new(format_message(m, content_width)))
+                .collect();
 
             let visible_count = chunks[0].height.saturating_sub(2) as usize;
             let total = msg_items.len();
@@ -189,11 +192,62 @@ pub async fn run(
     result
 }
 
-fn format_message(msg: &Message) -> Line<'static> {
+/// Arrow glyph used in DM display (`→`).
+const DM_ARROW: &str = "\u{2192}";
+
+/// Word-wrap `text` so that no line exceeds `width` characters.
+///
+/// Words longer than `width` are hard-split at the column boundary.
+/// If `width` is 0 the text is returned as a single unsplit chunk.
+fn wrap_words(text: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![text.to_string()];
+    }
+    let mut lines: Vec<String> = Vec::new();
+    let mut current = String::new();
+
+    for word in text.split_whitespace() {
+        if current.is_empty() {
+            // Hard-split any word that is longer than the available width.
+            let mut w = word;
+            while w.chars().count() > width {
+                let split_idx = w
+                    .char_indices()
+                    .nth(width)
+                    .map(|(i, _)| i)
+                    .unwrap_or(w.len());
+                lines.push(w[..split_idx].to_string());
+                w = &w[split_idx..];
+            }
+            current = w.to_string();
+        } else if current.chars().count() + 1 + word.chars().count() <= width {
+            current.push(' ');
+            current.push_str(word);
+        } else {
+            lines.push(std::mem::take(&mut current));
+            let mut w = word;
+            while w.chars().count() > width {
+                let split_idx = w
+                    .char_indices()
+                    .nth(width)
+                    .map(|(i, _)| i)
+                    .unwrap_or(w.len());
+                lines.push(w[..split_idx].to_string());
+                w = &w[split_idx..];
+            }
+            current = w.to_string();
+        }
+    }
+
+    lines.push(current); // may be empty for empty input — that's fine
+    lines
+}
+
+fn format_message(msg: &Message, available_width: usize) -> Text<'static> {
     match msg {
         Message::Join { ts, user, .. } => {
             let ts_str = ts.format("%H:%M:%S").to_string();
-            Line::from(vec![
+            Text::from(Line::from(vec![
                 Span::styled(format!("[{ts_str}] "), Style::default().fg(Color::DarkGray)),
                 Span::styled(
                     format!("{user} joined"),
@@ -201,11 +255,11 @@ fn format_message(msg: &Message) -> Line<'static> {
                         .fg(Color::Green)
                         .add_modifier(Modifier::ITALIC),
                 ),
-            ])
+            ]))
         }
         Message::Leave { ts, user, .. } => {
             let ts_str = ts.format("%H:%M:%S").to_string();
-            Line::from(vec![
+            Text::from(Line::from(vec![
                 Span::styled(format!("[{ts_str}] "), Style::default().fg(Color::DarkGray)),
                 Span::styled(
                     format!("{user} left"),
@@ -213,22 +267,38 @@ fn format_message(msg: &Message) -> Line<'static> {
                         .fg(Color::Red)
                         .add_modifier(Modifier::ITALIC),
                 ),
-            ])
+            ]))
         }
         Message::Message {
             ts, user, content, ..
         } => {
             let ts_str = ts.format("%H:%M:%S").to_string();
-            Line::from(vec![
-                Span::styled(format!("[{ts_str}] "), Style::default().fg(Color::DarkGray)),
-                Span::styled(
-                    format!("{user}: "),
-                    Style::default()
-                        .fg(user_color(user))
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(content.clone()),
-            ])
+            let prefix_plain = format!("[{ts_str}] {user}: ");
+            let prefix_width = prefix_plain.chars().count();
+            let content_width = available_width.saturating_sub(prefix_width);
+            let chunks = wrap_words(content, content_width);
+            let indent = " ".repeat(prefix_width);
+            let mut lines: Vec<Line<'static>> = Vec::new();
+            for (i, chunk) in chunks.into_iter().enumerate() {
+                if i == 0 {
+                    lines.push(Line::from(vec![
+                        Span::styled(format!("[{ts_str}] "), Style::default().fg(Color::DarkGray)),
+                        Span::styled(
+                            format!("{user}: "),
+                            Style::default()
+                                .fg(user_color(user))
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::raw(chunk),
+                    ]));
+                } else {
+                    lines.push(Line::from(vec![
+                        Span::raw(indent.clone()),
+                        Span::raw(chunk),
+                    ]));
+                }
+            }
+            Text::from(lines)
         }
         Message::Reply {
             ts,
@@ -239,20 +309,36 @@ fn format_message(msg: &Message) -> Line<'static> {
         } => {
             let ts_str = ts.format("%H:%M:%S").to_string();
             let short_id = &reply_to[..reply_to.len().min(8)];
-            Line::from(vec![
-                Span::styled(format!("[{ts_str}] "), Style::default().fg(Color::DarkGray)),
-                Span::styled(
-                    format!("{user}: "),
-                    Style::default()
-                        .fg(user_color(user))
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    format!("(re:{short_id}) "),
-                    Style::default().fg(Color::DarkGray),
-                ),
-                Span::raw(content.clone()),
-            ])
+            let prefix_plain = format!("[{ts_str}] {user}: (re:{short_id}) ");
+            let prefix_width = prefix_plain.chars().count();
+            let content_width = available_width.saturating_sub(prefix_width);
+            let chunks = wrap_words(content, content_width);
+            let indent = " ".repeat(prefix_width);
+            let mut lines: Vec<Line<'static>> = Vec::new();
+            for (i, chunk) in chunks.into_iter().enumerate() {
+                if i == 0 {
+                    lines.push(Line::from(vec![
+                        Span::styled(format!("[{ts_str}] "), Style::default().fg(Color::DarkGray)),
+                        Span::styled(
+                            format!("{user}: "),
+                            Style::default()
+                                .fg(user_color(user))
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            format!("(re:{short_id}) "),
+                            Style::default().fg(Color::DarkGray),
+                        ),
+                        Span::raw(chunk),
+                    ]));
+                } else {
+                    lines.push(Line::from(vec![
+                        Span::raw(indent.clone()),
+                        Span::raw(chunk),
+                    ]));
+                }
+            }
+            Text::from(lines)
         }
         Message::Command {
             ts,
@@ -262,7 +348,7 @@ fn format_message(msg: &Message) -> Line<'static> {
             ..
         } => {
             let ts_str = ts.format("%H:%M:%S").to_string();
-            Line::from(vec![
+            Text::from(Line::from(vec![
                 Span::styled(format!("[{ts_str}] "), Style::default().fg(Color::DarkGray)),
                 Span::styled(
                     format!("{user}: "),
@@ -274,17 +360,33 @@ fn format_message(msg: &Message) -> Line<'static> {
                     format!("/{cmd} {}", params.join(" ")),
                     Style::default().fg(Color::Magenta),
                 ),
-            ])
+            ]))
         }
         Message::System { ts, content, .. } => {
             let ts_str = ts.format("%H:%M:%S").to_string();
-            Line::from(vec![
-                Span::styled(format!("[{ts_str}] "), Style::default().fg(Color::DarkGray)),
-                Span::styled(
-                    format!("[system] {content}"),
-                    Style::default().fg(Color::Cyan),
-                ),
-            ])
+            let prefix_plain = format!("[{ts_str}] [system] ");
+            let prefix_width = prefix_plain.chars().count();
+            let content_width = available_width.saturating_sub(prefix_width);
+            let chunks = wrap_words(content, content_width);
+            let indent = " ".repeat(prefix_width);
+            let mut lines: Vec<Line<'static>> = Vec::new();
+            for (i, chunk) in chunks.into_iter().enumerate() {
+                if i == 0 {
+                    lines.push(Line::from(vec![
+                        Span::styled(format!("[{ts_str}] "), Style::default().fg(Color::DarkGray)),
+                        Span::styled(
+                            format!("[system] {chunk}"),
+                            Style::default().fg(Color::Cyan),
+                        ),
+                    ]));
+                } else {
+                    lines.push(Line::from(vec![
+                        Span::raw(indent.clone()),
+                        Span::styled(chunk, Style::default().fg(Color::Cyan)),
+                    ]));
+                }
+            }
+            Text::from(lines)
         }
         Message::DirectMessage {
             ts,
@@ -294,22 +396,38 @@ fn format_message(msg: &Message) -> Line<'static> {
             ..
         } => {
             let ts_str = ts.format("%H:%M:%S").to_string();
-            Line::from(vec![
-                Span::styled(format!("[{ts_str}] "), Style::default().fg(Color::DarkGray)),
-                Span::styled(
-                    "[dm] ",
-                    Style::default()
-                        .fg(Color::Magenta)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    format!("{user}→{to}: "),
-                    Style::default()
-                        .fg(user_color(user))
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(content.clone()),
-            ])
+            let prefix_plain = format!("[{ts_str}] [dm] {user}{DM_ARROW}{to}: ");
+            let prefix_width = prefix_plain.chars().count();
+            let content_width = available_width.saturating_sub(prefix_width);
+            let chunks = wrap_words(content, content_width);
+            let indent = " ".repeat(prefix_width);
+            let mut lines: Vec<Line<'static>> = Vec::new();
+            for (i, chunk) in chunks.into_iter().enumerate() {
+                if i == 0 {
+                    lines.push(Line::from(vec![
+                        Span::styled(format!("[{ts_str}] "), Style::default().fg(Color::DarkGray)),
+                        Span::styled(
+                            "[dm] ",
+                            Style::default()
+                                .fg(Color::Magenta)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            format!("{user}{DM_ARROW}{to}: "),
+                            Style::default()
+                                .fg(user_color(user))
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::raw(chunk),
+                    ]));
+                } else {
+                    lines.push(Line::from(vec![
+                        Span::raw(indent.clone()),
+                        Span::raw(chunk),
+                    ]));
+                }
+            }
+            Text::from(lines)
         }
     }
 }
