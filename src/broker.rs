@@ -29,6 +29,15 @@ type StatusMap = Arc<Mutex<HashMap<String, String>>>;
 /// The host receives all DMs regardless of sender/recipient.
 type HostUser = Arc<Mutex<Option<String>>>;
 
+/// Shared broker state passed to every client handler.
+struct RoomState {
+    clients: ClientMap,
+    status_map: StatusMap,
+    host_user: HostUser,
+    chat_path: Arc<PathBuf>,
+    room_id: Arc<String>,
+}
+
 pub struct Broker {
     room_id: String,
     chat_path: PathBuf,
@@ -55,11 +64,13 @@ impl Broker {
         let listener = UnixListener::bind(&self.socket_path)?;
         eprintln!("[broker] listening on {}", self.socket_path.display());
 
-        let clients: ClientMap = Arc::new(Mutex::new(HashMap::new()));
-        let status_map: StatusMap = Arc::new(Mutex::new(HashMap::new()));
-        let host_user: HostUser = Arc::new(Mutex::new(None));
-        let chat_path = Arc::new(self.chat_path.clone());
-        let room_id = Arc::new(self.room_id.clone());
+        let state = Arc::new(RoomState {
+            clients: Arc::new(Mutex::new(HashMap::new())),
+            status_map: Arc::new(Mutex::new(HashMap::new())),
+            host_user: Arc::new(Mutex::new(None)),
+            chat_path: Arc::new(self.chat_path.clone()),
+            room_id: Arc::new(self.room_id.clone()),
+        });
         let mut next_id: u64 = 0;
 
         loop {
@@ -69,33 +80,19 @@ impl Broker {
 
             let (tx, _) = broadcast::channel::<String>(256);
             // Insert with empty username; handle_client updates it after handshake.
-            clients
+            state
+                .clients
                 .lock()
                 .await
                 .insert(cid, (String::new(), tx.clone()));
 
-            let clients_clone = clients.clone();
-            let status_map_clone = status_map.clone();
-            let host_user_clone = host_user.clone();
-            let chat_path_clone = chat_path.clone();
-            let room_id_clone = room_id.clone();
+            let state_clone = state.clone();
 
             tokio::spawn(async move {
-                if let Err(e) = handle_client(
-                    cid,
-                    stream,
-                    tx,
-                    clients_clone.clone(),
-                    status_map_clone,
-                    host_user_clone,
-                    chat_path_clone,
-                    room_id_clone,
-                )
-                .await
-                {
+                if let Err(e) = handle_client(cid, stream, tx, &state_clone).await {
                     eprintln!("[broker] client {cid} error: {e:#}");
                 }
-                clients_clone.lock().await.remove(&cid);
+                state_clone.clients.lock().await.remove(&cid);
             });
         }
     }
@@ -105,12 +102,15 @@ async fn handle_client(
     cid: u64,
     stream: UnixStream,
     own_tx: broadcast::Sender<String>,
-    clients: ClientMap,
-    status_map: StatusMap,
-    host_user: HostUser,
-    chat_path: Arc<PathBuf>,
-    room_id: Arc<String>,
+    state: &RoomState,
 ) -> anyhow::Result<()> {
+    // Clone the Arc fields up-front so spawned tasks can capture owned handles.
+    let clients = state.clients.clone();
+    let status_map = state.status_map.clone();
+    let host_user = state.host_user.clone();
+    let chat_path = state.chat_path.clone();
+    let room_id = state.room_id.clone();
+
     let (read_half, mut write_half) = stream.into_split();
     let mut reader = BufReader::new(read_half);
 
