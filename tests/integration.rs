@@ -463,6 +463,162 @@ async fn stale_socket_is_cleaned_up() {
     panic!("broker did not recover from stale socket");
 }
 
+/// A DM is delivered to the sender, the recipient, and the broker host.
+/// It must NOT be delivered to other connected clients.
+#[tokio::test]
+async fn dm_delivered_to_sender_recipient_and_host() {
+    let broker = TestBroker::start("t_dm_fanout").await;
+
+    // alice connects first → she becomes the host
+    let mut alice = TestClient::connect(&broker.socket_path, "alice").await;
+    alice.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "alice")).await;
+
+    let mut bob = TestClient::connect(&broker.socket_path, "bob").await;
+    alice.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "bob")).await;
+    bob.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "bob")).await;
+
+    let mut carol = TestClient::connect(&broker.socket_path, "carol").await;
+    alice.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "carol")).await;
+    bob.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "carol")).await;
+    carol.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "carol")).await;
+
+    // dan is a bystander — not sender, recipient, or host
+    let mut dan = TestClient::connect(&broker.socket_path, "dan").await;
+    alice.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "dan")).await;
+    bob.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "dan")).await;
+    carol.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "dan")).await;
+    dan.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "dan")).await;
+
+    // bob sends a DM to carol
+    bob.send_json(r#"{"type":"dm","to":"carol","content":"psst"}"#).await;
+
+    // carol (recipient) receives it
+    let msg = carol
+        .recv_until(|m| matches!(m, Message::DirectMessage { content, .. } if content == "psst"))
+        .await;
+    assert_eq!(msg.user(), "bob");
+    if let Message::DirectMessage { to, .. } = &msg {
+        assert_eq!(to, "carol");
+    }
+
+    // bob (sender) receives the echo
+    bob.recv_until(|m| matches!(m, Message::DirectMessage { content, .. } if content == "psst"))
+        .await;
+
+    // alice (host) receives it
+    alice
+        .recv_until(|m| matches!(m, Message::DirectMessage { content, .. } if content == "psst"))
+        .await;
+
+    // dan (bystander) must NOT receive it — collect all of dan's messages for 300 ms
+    let got_dm = tokio::time::timeout(Duration::from_millis(300), async {
+        let mut line = String::new();
+        loop {
+            line.clear();
+            if dan.reader.read_line(&mut line).await.unwrap_or(0) == 0 {
+                break false;
+            }
+            if let Ok(msg) = serde_json::from_str::<Message>(line.trim()) {
+                if matches!(&msg, Message::DirectMessage { content, .. } if content == "psst") {
+                    break true;
+                }
+            }
+        }
+    })
+    .await;
+    assert!(
+        got_dm.is_err() || !got_dm.unwrap(),
+        "dan should not receive the DM"
+    );
+}
+
+/// DMs are persisted to the chat history file.
+#[tokio::test]
+async fn dm_is_persisted_to_history() {
+    let broker = TestBroker::start("t_dm_persist").await;
+
+    let mut alice = TestClient::connect(&broker.socket_path, "alice").await;
+    alice.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "alice")).await;
+
+    let mut bob = TestClient::connect(&broker.socket_path, "bob").await;
+    alice.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "bob")).await;
+    bob.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "bob")).await;
+
+    alice
+        .send_json(r#"{"type":"dm","to":"bob","content":"private"}"#)
+        .await;
+    // wait for echo to confirm the broker processed it
+    alice
+        .recv_until(|m| matches!(m, Message::DirectMessage { content, .. } if content == "private"))
+        .await;
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let history = history::load(&broker.chat_path).await.unwrap();
+    assert!(
+        history
+            .iter()
+            .any(|m| matches!(m, Message::DirectMessage { content, .. } if content == "private")),
+        "DM not found in history"
+    );
+}
+
+/// When the host is also the DM sender, delivery still works correctly.
+#[tokio::test]
+async fn dm_from_host_is_delivered_to_recipient() {
+    let broker = TestBroker::start("t_dm_host_sender").await;
+
+    // alice is host (first connect)
+    let mut alice = TestClient::connect(&broker.socket_path, "alice").await;
+    alice.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "alice")).await;
+
+    let mut bob = TestClient::connect(&broker.socket_path, "bob").await;
+    alice.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "bob")).await;
+    bob.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "bob")).await;
+
+    alice
+        .send_json(r#"{"type":"dm","to":"bob","content":"host dm"}"#)
+        .await;
+
+    // bob receives it
+    bob.recv_until(|m| matches!(m, Message::DirectMessage { content, .. } if content == "host dm"))
+        .await;
+
+    // alice receives the echo (she is both sender and host)
+    alice
+        .recv_until(|m| matches!(m, Message::DirectMessage { content, .. } if content == "host dm"))
+        .await;
+}
+
+/// A DM sent to an offline user is still persisted and the sender gets the echo.
+#[tokio::test]
+async fn dm_to_offline_user_is_persisted() {
+    let broker = TestBroker::start("t_dm_offline").await;
+
+    let mut alice = TestClient::connect(&broker.socket_path, "alice").await;
+    alice.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "alice")).await;
+
+    // ghost is not connected
+    alice
+        .send_json(r#"{"type":"dm","to":"ghost","content":"nobody home"}"#)
+        .await;
+
+    // alice (sender = host) gets the echo
+    alice
+        .recv_until(|m| matches!(m, Message::DirectMessage { content, .. } if content == "nobody home"))
+        .await;
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let history = history::load(&broker.chat_path).await.unwrap();
+    assert!(
+        history.iter().any(
+            |m| matches!(m, Message::DirectMessage { content, .. } if content == "nobody home")
+        ),
+        "DM to offline user not found in history"
+    );
+}
+
 #[tokio::test]
 async fn writes_to_tmp_slash_directly() {
     let path = std::path::PathBuf::from("/tmp/room_test_direct.chat");
