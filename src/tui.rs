@@ -210,20 +210,30 @@ fn wrap_words(text: &str, width: usize) -> Vec<String> {
         if current.is_empty() {
             // Hard-split any word that is longer than the available width.
             let mut w = word;
-            while w.len() > width {
-                lines.push(w[..width].to_string());
-                w = &w[width..];
+            while w.chars().count() > width {
+                let split_idx = w
+                    .char_indices()
+                    .nth(width)
+                    .map(|(i, _)| i)
+                    .unwrap_or(w.len());
+                lines.push(w[..split_idx].to_string());
+                w = &w[split_idx..];
             }
             current = w.to_string();
-        } else if current.len() + 1 + word.len() <= width {
+        } else if current.chars().count() + 1 + word.chars().count() <= width {
             current.push(' ');
             current.push_str(word);
         } else {
             lines.push(std::mem::take(&mut current));
             let mut w = word;
-            while w.len() > width {
-                lines.push(w[..width].to_string());
-                w = &w[width..];
+            while w.chars().count() > width {
+                let split_idx = w
+                    .char_indices()
+                    .nth(width)
+                    .map(|(i, _)| i)
+                    .unwrap_or(w.len());
+                lines.push(w[..split_idx].to_string());
+                w = &w[split_idx..];
             }
             current = w.to_string();
         }
@@ -275,7 +285,9 @@ fn format_message(msg: &Message, available_width: usize) -> Text<'static> {
                         Span::styled(format!("[{ts_str}] "), Style::default().fg(Color::DarkGray)),
                         Span::styled(
                             format!("{user}: "),
-                            Style::default().fg(user_color(user)).add_modifier(Modifier::BOLD),
+                            Style::default()
+                                .fg(user_color(user))
+                                .add_modifier(Modifier::BOLD),
                         ),
                         Span::raw(chunk),
                     ]));
@@ -309,7 +321,9 @@ fn format_message(msg: &Message, available_width: usize) -> Text<'static> {
                         Span::styled(format!("[{ts_str}] "), Style::default().fg(Color::DarkGray)),
                         Span::styled(
                             format!("{user}: "),
-                            Style::default().fg(user_color(user)).add_modifier(Modifier::BOLD),
+                            Style::default()
+                                .fg(user_color(user))
+                                .add_modifier(Modifier::BOLD),
                         ),
                         Span::styled(
                             format!("(re:{short_id}) "),
@@ -351,7 +365,7 @@ fn format_message(msg: &Message, available_width: usize) -> Text<'static> {
         Message::System { ts, content, .. } => {
             let ts_str = ts.format("%H:%M:%S").to_string();
             let prefix_plain = format!("[{ts_str}] [system] ");
-            let prefix_width = prefix_plain.len();
+            let prefix_width = prefix_plain.chars().count();
             let content_width = available_width.saturating_sub(prefix_width);
             let chunks = wrap_words(content, content_width);
             let indent = " ".repeat(prefix_width);
@@ -394,11 +408,15 @@ fn format_message(msg: &Message, available_width: usize) -> Text<'static> {
                         Span::styled(format!("[{ts_str}] "), Style::default().fg(Color::DarkGray)),
                         Span::styled(
                             "[dm] ",
-                            Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+                            Style::default()
+                                .fg(Color::Magenta)
+                                .add_modifier(Modifier::BOLD),
                         ),
                         Span::styled(
                             format!("{user}{DM_ARROW}{to}: "),
-                            Style::default().fg(user_color(user)).add_modifier(Modifier::BOLD),
+                            Style::default()
+                                .fg(user_color(user))
+                                .add_modifier(Modifier::BOLD),
                         ),
                         Span::raw(chunk),
                     ]));
