@@ -30,9 +30,15 @@ enum Cmd {
 #[derive(Parser, Debug)]
 #[command(
     name = "room",
+    version,
+    disable_version_flag = true,
     about = "Multi-user chat room for agent/human coordination"
 )]
 struct Args {
+    /// Print version and exit
+    #[arg(short = 'v', long = "version", action = clap::ArgAction::Version)]
+    _version: bool,
+
     /// Room identifier (required when no subcommand is given)
     room_id: Option<String>,
 
