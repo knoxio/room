@@ -10,7 +10,7 @@ use tokio::{
         unix::{OwnedReadHalf, OwnedWriteHalf},
         UnixListener, UnixStream,
     },
-    sync::{broadcast, Mutex},
+    sync::{broadcast, Mutex, Notify},
 };
 use uuid::Uuid;
 
@@ -42,6 +42,8 @@ struct RoomState {
     token_map: TokenMap,
     chat_path: Arc<PathBuf>,
     room_id: Arc<String>,
+    /// Signalled by the `\exit` admin command to shut down the broker run loop.
+    shutdown: Arc<Notify>,
 }
 
 pub struct Broker {
@@ -70,6 +72,7 @@ impl Broker {
         let listener = UnixListener::bind(&self.socket_path)?;
         eprintln!("[broker] listening on {}", self.socket_path.display());
 
+        let shutdown = Arc::new(Notify::new());
         let state = Arc::new(RoomState {
             clients: Arc::new(Mutex::new(HashMap::new())),
             status_map: Arc::new(Mutex::new(HashMap::new())),
@@ -77,30 +80,39 @@ impl Broker {
             token_map: Arc::new(Mutex::new(HashMap::new())),
             chat_path: Arc::new(self.chat_path.clone()),
             room_id: Arc::new(self.room_id.clone()),
+            shutdown: shutdown.clone(),
         });
         let mut next_id: u64 = 0;
 
         loop {
-            let (stream, _) = listener.accept().await?;
-            next_id += 1;
-            let cid = next_id;
+            tokio::select! {
+                accept = listener.accept() => {
+                    let (stream, _) = accept?;
+                    next_id += 1;
+                    let cid = next_id;
 
-            let (tx, _) = broadcast::channel::<String>(256);
-            // Insert with empty username; handle_client updates it after handshake.
-            state
-                .clients
-                .lock()
-                .await
-                .insert(cid, (String::new(), tx.clone()));
+                    let (tx, _) = broadcast::channel::<String>(256);
+                    // Insert with empty username; handle_client updates it after handshake.
+                    state
+                        .clients
+                        .lock()
+                        .await
+                        .insert(cid, (String::new(), tx.clone()));
 
-            let state_clone = state.clone();
+                    let state_clone = state.clone();
 
-            tokio::spawn(async move {
-                if let Err(e) = handle_client(cid, stream, tx, &state_clone).await {
-                    eprintln!("[broker] client {cid} error: {e:#}");
+                    tokio::spawn(async move {
+                        if let Err(e) = handle_client(cid, stream, tx, &state_clone).await {
+                            eprintln!("[broker] client {cid} error: {e:#}");
+                        }
+                        state_clone.clients.lock().await.remove(&cid);
+                    });
                 }
-                state_clone.clients.lock().await.remove(&cid);
-            });
+                _ = shutdown.notified() => {
+                    eprintln!("[broker] shutdown requested, exiting");
+                    break Ok(());
+                }
+            }
         }
     }
 }
@@ -118,6 +130,7 @@ async fn handle_client(
     let token_map = state.token_map.clone();
     let chat_path = state.chat_path.clone();
     let room_id = state.room_id.clone();
+    let shutdown = state.shutdown.clone();
 
     let (read_half, mut write_half) = stream.into_split();
     let mut reader = BufReader::new(read_half);
@@ -131,27 +144,13 @@ async fn handle_client(
     let first_line = first.trim();
 
     if let Some(send_user) = first_line.strip_prefix("SEND:") {
-        return handle_oneshot_send(
-            send_user.to_owned(),
-            reader,
-            write_half,
-            &clients,
-            &host_user,
-            &chat_path,
-            &room_id,
-        )
-        .await;
+        return handle_oneshot_send(send_user.to_owned(), reader, write_half, state).await;
     }
 
     if let Some(token) = first_line.strip_prefix("TOKEN:") {
         let username = token_map.lock().await.get(token).cloned();
         return match username {
-            Some(u) => {
-                handle_oneshot_send(
-                    u, reader, write_half, &clients, &host_user, &chat_path, &room_id,
-                )
-                .await
-            }
+            Some(u) => handle_oneshot_send(u, reader, write_half, state).await,
             None => {
                 let err = serde_json::json!({"type":"error","code":"invalid_token"});
                 write_half
@@ -256,6 +255,8 @@ async fn handle_client(
     let status_map_in = status_map.clone();
     let host_user_in = host_user.clone();
     let chat_path_in = chat_path.clone();
+    let token_map_in = token_map.clone();
+    let shutdown_in = shutdown.clone();
     let write_half_in = write_half.clone();
     let inbound = tokio::spawn(async move {
         let mut line = String::new();
@@ -266,6 +267,20 @@ async fn handle_client(
                 Ok(_) => {
                     let trimmed = line.trim();
                     if trimmed.is_empty() {
+                        continue;
+                    }
+                    // Admin commands: lines starting with `\`
+                    if let Some(admin_line) = trimmed.strip_prefix('\\') {
+                        handle_admin_cmd(
+                            admin_line,
+                            &username_in,
+                            &room_id_in,
+                            &clients_in,
+                            &token_map_in,
+                            &chat_path_in,
+                            &shutdown_in,
+                        )
+                        .await;
                         continue;
                     }
                     match parse_client_line(trimmed, &room_id_in, &username_in) {
@@ -376,10 +391,7 @@ async fn handle_oneshot_send(
     username: String,
     mut reader: BufReader<OwnedReadHalf>,
     mut write_half: OwnedWriteHalf,
-    clients: &ClientMap,
-    host_user: &HostUser,
-    chat_path: &Arc<PathBuf>,
-    room_id: &Arc<String>,
+    state: &RoomState,
 ) -> anyhow::Result<()> {
     let mut line = String::new();
     reader.read_line(&mut line).await?;
@@ -387,12 +399,36 @@ async fn handle_oneshot_send(
     if trimmed.is_empty() {
         return Ok(());
     }
-    let msg = parse_client_line(trimmed, room_id, &username)?;
+    // Admin commands: lines starting with `\`
+    if let Some(admin_line) = trimmed.strip_prefix('\\') {
+        handle_admin_cmd(
+            admin_line,
+            &username,
+            &state.room_id,
+            &state.clients,
+            &state.token_map,
+            &state.chat_path,
+            &state.shutdown,
+        )
+        .await;
+        let ack = serde_json::json!({"type":"system","user":"broker","content":"command executed"});
+        write_half.write_all(format!("{ack}\n").as_bytes()).await?;
+        return Ok(());
+    }
+    let msg = parse_client_line(trimmed, &state.room_id, &username)?;
     let result = match &msg {
         Message::DirectMessage { to, .. } => {
-            dm_and_persist(&msg, &username, to, host_user, clients, chat_path).await
+            dm_and_persist(
+                &msg,
+                &username,
+                to,
+                &state.host_user,
+                &state.clients,
+                &state.chat_path,
+            )
+            .await
         }
-        _ => broadcast_and_persist(&msg, clients, chat_path).await,
+        _ => broadcast_and_persist(&msg, &state.clients, &state.chat_path).await,
     };
     result?;
     let echo = format!("{}\n", serde_json::to_string(&msg)?);
@@ -422,6 +458,106 @@ async fn handle_oneshot_join(
     let resp = serde_json::json!({"type":"token","token": token,"username": username});
     write_half.write_all(format!("{resp}\n").as_bytes()).await?;
     Ok(())
+}
+
+/// Dispatch a `\command [arg]` line sent from a connected client.
+///
+/// Supported commands:
+/// - `\kick <username>`      — invalidates the user's token so they cannot issue further
+///   authenticated requests; the username remains reserved so they cannot rejoin without `\reauth`.
+/// - `\reauth <username>`    — removes the user's token entirely so they can `room join` again.
+/// - `\clear-tokens`         — removes every token for this room (all users must rejoin).
+/// - `\exit`                 — broadcasts a shutdown notice then signals the broker to stop.
+/// - `\clear`                — truncates the chat history file and broadcasts a notice.
+async fn handle_admin_cmd(
+    cmd_line: &str,
+    issuer: &str,
+    room_id: &str,
+    clients: &ClientMap,
+    token_map: &TokenMap,
+    chat_path: &Arc<PathBuf>,
+    shutdown: &Arc<Notify>,
+) {
+    let mut parts = cmd_line.splitn(2, ' ');
+    let cmd = parts.next().unwrap_or("").trim();
+    let arg = parts.next().unwrap_or("").trim();
+
+    match cmd {
+        "kick" => {
+            if arg.is_empty() {
+                return;
+            }
+            let target = arg.to_owned();
+            let mut map = token_map.lock().await;
+            // Remove all existing tokens for this username, then insert the sentinel.
+            map.retain(|_, u| u != &target);
+            map.insert("INVALID_TOKEN".to_owned(), target.clone());
+            drop(map);
+            let content = format!("{issuer} kicked {target} (token invalidated)");
+            let msg = make_system(room_id, "broker", content);
+            let _ = broadcast_and_persist(&msg, clients, chat_path).await;
+        }
+        "reauth" => {
+            if arg.is_empty() {
+                return;
+            }
+            let target = arg.to_owned();
+            let mut map = token_map.lock().await;
+            map.retain(|_, u| u != &target);
+            drop(map);
+            // Remove the on-disk token file so the user can join afresh.
+            let prefix = format!("room-{room_id}-");
+            let suffix = format!("-{target}.token");
+            if let Ok(entries) = std::fs::read_dir("/tmp") {
+                for entry in entries.flatten() {
+                    let name = entry.file_name();
+                    let s = name.to_string_lossy();
+                    if s.starts_with(&prefix) && s.ends_with(&suffix) {
+                        let _ = std::fs::remove_file(entry.path());
+                    }
+                }
+            }
+            let content = format!("{issuer} reauthed {target} (token cleared, can rejoin)");
+            let msg = make_system(room_id, "broker", content);
+            let _ = broadcast_and_persist(&msg, clients, chat_path).await;
+        }
+        "clear-tokens" => {
+            token_map.lock().await.clear();
+            // Remove all on-disk token files for this room.
+            let prefix = format!("room-{room_id}-");
+            if let Ok(entries) = std::fs::read_dir("/tmp") {
+                for entry in entries.flatten() {
+                    let name = entry.file_name();
+                    let s = name.to_string_lossy();
+                    if s.starts_with(&prefix) && s.ends_with(".token") {
+                        let _ = std::fs::remove_file(entry.path());
+                    }
+                }
+            }
+            let content = format!("{issuer} cleared all tokens (all users must rejoin)");
+            let msg = make_system(room_id, "broker", content);
+            let _ = broadcast_and_persist(&msg, clients, chat_path).await;
+        }
+        "exit" => {
+            let content = format!("{issuer} is shutting down the room");
+            let msg = make_system(room_id, "broker", content);
+            let _ = broadcast_and_persist(&msg, clients, chat_path).await;
+            shutdown.notify_one();
+        }
+        "clear" => {
+            // Truncate the history file.
+            if let Err(e) = std::fs::write(chat_path.as_ref(), "") {
+                eprintln!("[broker] \\clear failed: {e}");
+                return;
+            }
+            let content = format!("{issuer} cleared chat history");
+            let msg = make_system(room_id, "broker", content);
+            let _ = broadcast_and_persist(&msg, clients, chat_path).await;
+        }
+        _ => {
+            eprintln!("[broker] unknown admin command from {issuer}: \\{cmd_line}");
+        }
+    }
 }
 
 /// Persist a message and fan it out to all connected clients.

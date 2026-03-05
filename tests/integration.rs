@@ -1296,3 +1296,174 @@ async fn token_is_reusable_across_sends() {
             .unwrap_or_else(|e| panic!("send {i} failed: {e}"));
     }
 }
+
+// ── Admin command tests ───────────────────────────────────────────────────────
+
+/// `\kick <username>` invalidates the target's token; subsequent sends fail.
+#[tokio::test]
+async fn admin_kick_invalidates_token() {
+    let broker = TestBroker::start("t_kick").await;
+    let mut admin = TestClient::connect(&broker.socket_path, "admin").await;
+    // Drain admin's own join
+    admin
+        .recv_until(|m| matches!(m, Message::Join { .. }))
+        .await;
+
+    let (_, victim_token) = room::oneshot::join_session(&broker.socket_path, "victim")
+        .await
+        .expect("join failed");
+
+    // Admin kicks victim
+    admin.send_text(r"\kick victim").await;
+
+    // Kick produces a system broadcast
+    let sys = admin
+        .recv_until(|m| matches!(m, Message::System { .. }))
+        .await;
+    assert!(
+        matches!(&sys, Message::System { content, .. } if content.contains("kicked victim")),
+        "expected kick system message, got: {sys:?}"
+    );
+
+    // Victim's token is now invalid
+    let wire = serde_json::json!({"type": "message", "content": "sneaky"}).to_string();
+    let err = room::oneshot::send_message_with_token(&broker.socket_path, &victim_token, &wire)
+        .await
+        .expect_err("send with kicked token should fail");
+    assert!(
+        err.to_string().contains("invalid token"),
+        "expected invalid token error, got: {err}"
+    );
+}
+
+/// `\reauth <username>` removes the token so the user can rejoin.
+#[tokio::test]
+async fn admin_reauth_allows_rejoin() {
+    let broker = TestBroker::start("t_reauth").await;
+    let mut admin = TestClient::connect(&broker.socket_path, "admin").await;
+    admin
+        .recv_until(|m| matches!(m, Message::Join { .. }))
+        .await;
+
+    // Join as "alice" to register the username
+    let (_, _alice_token) = room::oneshot::join_session(&broker.socket_path, "alice")
+        .await
+        .expect("alice join failed");
+
+    // Alice is now registered; a second join would fail
+    let err = room::oneshot::join_session(&broker.socket_path, "alice")
+        .await
+        .expect_err("duplicate alice join should fail");
+    assert!(err.to_string().contains("username_taken") || err.to_string().contains("alice"));
+
+    // Admin reauthenticates alice
+    admin.send_text(r"\reauth alice").await;
+    admin
+        .recv_until(|m| matches!(m, Message::System { .. }))
+        .await;
+
+    // Now alice can rejoin
+    let result = room::oneshot::join_session(&broker.socket_path, "alice").await;
+    assert!(
+        result.is_ok(),
+        "alice should be able to rejoin after reauth"
+    );
+}
+
+/// `\clear-tokens` removes all tokens; no user can send until they rejoin.
+#[tokio::test]
+async fn admin_clear_tokens_blocks_all_sends() {
+    let broker = TestBroker::start("t_clear_tokens").await;
+    let mut admin = TestClient::connect(&broker.socket_path, "admin").await;
+    admin
+        .recv_until(|m| matches!(m, Message::Join { .. }))
+        .await;
+
+    let (_, tok1) = room::oneshot::join_session(&broker.socket_path, "u1")
+        .await
+        .unwrap();
+    let (_, tok2) = room::oneshot::join_session(&broker.socket_path, "u2")
+        .await
+        .unwrap();
+
+    admin.send_text(r"\clear-tokens").await;
+    admin
+        .recv_until(|m| matches!(m, Message::System { content, .. } if content.contains("cleared all tokens")))
+        .await;
+
+    for (user, tok) in [("u1", &tok1), ("u2", &tok2)] {
+        let wire = serde_json::json!({"type": "message", "content": "hi"}).to_string();
+        let result = room::oneshot::send_message_with_token(&broker.socket_path, tok, &wire).await;
+        assert!(
+            result.is_err(),
+            "send from {user} should fail after clear-tokens"
+        );
+    }
+}
+
+/// `\clear` truncates the history file and broadcasts a system message.
+#[tokio::test]
+async fn admin_clear_history() {
+    let broker = TestBroker::start("t_clear_history").await;
+    let mut admin = TestClient::connect(&broker.socket_path, "admin").await;
+    admin
+        .recv_until(|m| matches!(m, Message::Join { .. }))
+        .await;
+
+    // Write something to history first
+    let wire = serde_json::json!({"type": "message", "content": "keep me"}).to_string();
+    room::oneshot::send_message(&broker.socket_path, "admin", &wire)
+        .await
+        .unwrap();
+
+    // Verify history has content
+    let before = history::load(&broker.chat_path).await.unwrap();
+    assert!(
+        !before.is_empty(),
+        "history should have at least join + message"
+    );
+
+    admin.send_text(r"\clear").await;
+    admin
+        .recv_until(|m| matches!(m, Message::System { content, .. } if content.contains("cleared chat history")))
+        .await;
+
+    // The \clear system message itself is written after truncation, so history
+    // should contain only that one entry now.
+    let after = history::load(&broker.chat_path).await.unwrap();
+    assert_eq!(
+        after.len(),
+        1,
+        "history should have only the clear notice: {after:?}"
+    );
+    assert!(
+        matches!(&after[0], Message::System { content, .. } if content.contains("cleared chat history"))
+    );
+}
+
+/// `\exit` broadcasts a shutdown notice and the broker stops accepting connections.
+#[tokio::test]
+async fn admin_exit_shuts_down_broker() {
+    let broker = TestBroker::start("t_exit").await;
+    let mut admin = TestClient::connect(&broker.socket_path, "admin").await;
+    admin
+        .recv_until(|m| matches!(m, Message::Join { .. }))
+        .await;
+
+    admin.send_text(r"\exit").await;
+    admin
+        .recv_until(
+            |m| matches!(m, Message::System { content, .. } if content.contains("shutting down")),
+        )
+        .await;
+
+    // Give the broker a moment to stop listening
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // New connections should fail
+    let result = UnixStream::connect(&broker.socket_path).await;
+    assert!(
+        result.is_err(),
+        "broker should have stopped accepting connections after \\exit"
+    );
+}
