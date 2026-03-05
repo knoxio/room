@@ -125,6 +125,7 @@ async fn handle_client(
             reader,
             write_half,
             &clients,
+            &host_user,
             &chat_path,
             &room_id,
         )
@@ -163,13 +164,24 @@ async fn handle_client(
     // Subscribe before sending history so we don't miss concurrent messages
     let mut rx = own_tx.subscribe();
 
-    // Send chat history directly to this client's socket.
+    // Send chat history directly to this client's socket, filtering DMs the
+    // client is not party to (sender, recipient, or host).
     // If the client disconnects mid-replay, treat it as a clean exit.
+    let host_name = host_user.lock().await.clone();
+    let is_host = host_name.as_deref() == Some(username.as_str());
     let history = history::load(&chat_path).await.unwrap_or_default();
     for msg in &history {
-        let line = format!("{}\n", serde_json::to_string(msg)?);
-        if write_half.write_all(line.as_bytes()).await.is_err() {
-            return Ok(());
+        let visible = match msg {
+            Message::DirectMessage { user, to, .. } => {
+                is_host || user == &username || to == &username
+            }
+            _ => true,
+        };
+        if visible {
+            let line = format!("{}\n", serde_json::to_string(msg)?);
+            if write_half.write_all(line.as_bytes()).await.is_err() {
+                return Ok(());
+            }
         }
     }
 
@@ -322,13 +334,15 @@ async fn handle_client(
     Ok(())
 }
 
-/// Handle a one-shot SEND connection: read one message line, broadcast it, echo it back, close.
+/// Handle a one-shot SEND connection: read one message line, route it, echo it back, close.
 /// The sender is never registered in ClientMap/StatusMap and generates no join/leave events.
+/// DM envelopes are routed via `dm_and_persist`; all other messages are broadcast.
 async fn handle_oneshot_send(
     username: String,
     mut reader: BufReader<OwnedReadHalf>,
     mut write_half: OwnedWriteHalf,
     clients: &ClientMap,
+    host_user: &HostUser,
     chat_path: &Arc<PathBuf>,
     room_id: &Arc<String>,
 ) -> anyhow::Result<()> {
@@ -339,7 +353,13 @@ async fn handle_oneshot_send(
         return Ok(());
     }
     let msg = parse_client_line(trimmed, room_id, &username)?;
-    broadcast_and_persist(&msg, clients, chat_path).await?;
+    let result = match &msg {
+        Message::DirectMessage { to, .. } => {
+            dm_and_persist(&msg, &username, to, host_user, clients, chat_path).await
+        }
+        _ => broadcast_and_persist(&msg, clients, chat_path).await,
+    };
+    result?;
     let echo = format!("{}\n", serde_json::to_string(&msg)?);
     write_half.write_all(echo.as_bytes()).await?;
     Ok(())

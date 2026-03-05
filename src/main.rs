@@ -11,6 +11,9 @@ enum Cmd {
     Send {
         room_id: String,
         username: String,
+        /// Recipient username for a direct message
+        #[arg(long)]
+        to: Option<String>,
         /// Message content; all remaining tokens are joined with spaces
         #[arg(trailing_var_arg = true, num_args = 1..)]
         message: Vec<String>,
@@ -69,10 +72,11 @@ async fn main() -> anyhow::Result<()> {
         Some(Cmd::Send {
             room_id,
             username,
+            to,
             message,
         }) => {
             let content = message.join(" ");
-            oneshot::cmd_send(&room_id, &username, &content).await?;
+            oneshot::cmd_send(&room_id, &username, to.as_deref(), &content).await?;
         }
         Some(Cmd::Poll {
             room_id,

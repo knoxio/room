@@ -30,9 +30,23 @@ pub async fn send_message(
 }
 
 /// One-shot send subcommand: connect, send, print echo JSON to stdout, exit.
-pub async fn cmd_send(room_id: &str, username: &str, content: &str) -> anyhow::Result<()> {
+///
+/// When `to` is `Some(recipient)`, the message is sent as a DM envelope so the
+/// broker routes it only to the sender, recipient, and host.
+pub async fn cmd_send(
+    room_id: &str,
+    username: &str,
+    to: Option<&str>,
+    content: &str,
+) -> anyhow::Result<()> {
     let socket_path = PathBuf::from(format!("/tmp/room-{room_id}.sock"));
-    let msg = send_message(&socket_path, username, content).await?;
+    let wire = match to {
+        Some(recipient) => {
+            serde_json::json!({"type": "dm", "to": recipient, "content": content}).to_string()
+        }
+        None => content.to_owned(),
+    };
+    let msg = send_message(&socket_path, username, &wire).await?;
     println!("{}", serde_json::to_string(&msg)?);
     Ok(())
 }
@@ -42,10 +56,15 @@ pub async fn cmd_send(room_id: &str, username: &str, content: &str) -> anyhow::R
 /// If `since` is `None`, the cursor file at `cursor_path` is checked for a previously
 /// stored position. A `None` cursor means all messages are returned.
 ///
+/// `viewer` is the username of the caller. When `Some`, `DirectMessage` entries are
+/// filtered to only those where the viewer is the sender or the recipient. Pass `None`
+/// to skip DM filtering (e.g. in tests that don't involve DMs).
+///
 /// The cursor file is updated to the last returned message's ID after each successful call.
 pub async fn poll_messages(
     chat_path: &Path,
     cursor_path: &Path,
+    viewer: Option<&str>,
     since: Option<&str>,
 ) -> anyhow::Result<Vec<Message>> {
     let effective_since: Option<String> = since
@@ -63,7 +82,16 @@ pub async fn poll_messages(
         None => 0,
     };
 
-    let result: Vec<Message> = messages[start..].to_vec();
+    let result: Vec<Message> = messages[start..]
+        .iter()
+        .filter(|m| match m {
+            Message::DirectMessage { user, to, .. } => viewer
+                .map(|v| v == user.as_str() || v == to.as_str())
+                .unwrap_or(true),
+            _ => true,
+        })
+        .cloned()
+        .collect();
 
     if let Some(last) = result.last() {
         write_cursor(cursor_path, last.id())?;
@@ -78,7 +106,8 @@ pub async fn cmd_poll(room_id: &str, username: &str, since: Option<String>) -> a
     let chat_path = chat_path_from_meta(room_id, &meta_path);
     let cursor_path = PathBuf::from(format!("/tmp/room-{room_id}-{username}.cursor"));
 
-    let messages = poll_messages(&chat_path, &cursor_path, since.as_deref()).await?;
+    let messages =
+        poll_messages(&chat_path, &cursor_path, Some(username), since.as_deref()).await?;
     for msg in &messages {
         println!("{}", serde_json::to_string(msg)?);
     }
