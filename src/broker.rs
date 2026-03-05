@@ -121,7 +121,7 @@ async fn handle_client(
     cid: u64,
     stream: UnixStream,
     own_tx: broadcast::Sender<String>,
-    state: &RoomState,
+    state: &Arc<RoomState>,
 ) -> anyhow::Result<()> {
     // Clone the Arc fields up-front so spawned tasks can capture owned handles.
     let clients = state.clients.clone();
@@ -130,7 +130,6 @@ async fn handle_client(
     let token_map = state.token_map.clone();
     let chat_path = state.chat_path.clone();
     let room_id = state.room_id.clone();
-    let shutdown = state.shutdown.clone();
 
     let (read_half, mut write_half) = stream.into_split();
     let mut reader = BufReader::new(read_half);
@@ -255,9 +254,8 @@ async fn handle_client(
     let status_map_in = status_map.clone();
     let host_user_in = host_user.clone();
     let chat_path_in = chat_path.clone();
-    let token_map_in = token_map.clone();
-    let shutdown_in = shutdown.clone();
     let write_half_in = write_half.clone();
+    let state_in = state.clone();
     let inbound = tokio::spawn(async move {
         let mut line = String::new();
         loop {
@@ -271,16 +269,7 @@ async fn handle_client(
                     }
                     // Admin commands: lines starting with `\`
                     if let Some(admin_line) = trimmed.strip_prefix('\\') {
-                        handle_admin_cmd(
-                            admin_line,
-                            &username_in,
-                            &room_id_in,
-                            &clients_in,
-                            &token_map_in,
-                            &chat_path_in,
-                            &shutdown_in,
-                        )
-                        .await;
+                        handle_admin_cmd(admin_line, &username_in, &state_in).await;
                         continue;
                     }
                     match parse_client_line(trimmed, &room_id_in, &username_in) {
@@ -401,21 +390,39 @@ async fn handle_oneshot_send(
     }
     // Admin commands: lines starting with `\`
     if let Some(admin_line) = trimmed.strip_prefix('\\') {
-        handle_admin_cmd(
-            admin_line,
-            &username,
-            &state.room_id,
-            &state.clients,
-            &state.token_map,
-            &state.chat_path,
-            &state.shutdown,
-        )
-        .await;
+        handle_admin_cmd(admin_line, &username, state).await;
         let ack = serde_json::json!({"type":"system","user":"broker","content":"command executed"});
         write_half.write_all(format!("{ack}\n").as_bytes()).await?;
         return Ok(());
     }
     let msg = parse_client_line(trimmed, &state.room_id, &username)?;
+    // Handle /who privately in oneshot context: return the user list without broadcasting.
+    if let Message::Command { ref cmd, .. } = msg {
+        if cmd == "who" {
+            let map = state.status_map.lock().await;
+            let mut entries: Vec<String> = map
+                .iter()
+                .map(|(u, s)| {
+                    if s.is_empty() {
+                        u.clone()
+                    } else {
+                        format!("{u}: {s}")
+                    }
+                })
+                .collect();
+            entries.sort();
+            drop(map);
+            let content = if entries.is_empty() {
+                "no users online".to_owned()
+            } else {
+                format!("online — {}", entries.join(", "))
+            };
+            let sys = make_system(&state.room_id, "broker", content);
+            let json = serde_json::to_string(&sys)?;
+            write_half.write_all(format!("{json}\n").as_bytes()).await?;
+            return Ok(());
+        }
+    }
     let result = match &msg {
         Message::DirectMessage { to, .. } => {
             dm_and_persist(
@@ -465,19 +472,19 @@ async fn handle_oneshot_join(
 /// Supported commands:
 /// - `\kick <username>`      — invalidates the user's token so they cannot issue further
 ///   authenticated requests; the username remains reserved so they cannot rejoin without `\reauth`.
+///   Also removes them from the status map so `/who` no longer shows them as online.
 /// - `\reauth <username>`    — removes the user's token entirely so they can `room join` again.
 /// - `\clear-tokens`         — removes every token for this room (all users must rejoin).
 /// - `\exit`                 — broadcasts a shutdown notice then signals the broker to stop.
 /// - `\clear`                — truncates the chat history file and broadcasts a notice.
-async fn handle_admin_cmd(
-    cmd_line: &str,
-    issuer: &str,
-    room_id: &str,
-    clients: &ClientMap,
-    token_map: &TokenMap,
-    chat_path: &Arc<PathBuf>,
-    shutdown: &Arc<Notify>,
-) {
+async fn handle_admin_cmd(cmd_line: &str, issuer: &str, state: &RoomState) {
+    let room_id = state.room_id.as_str();
+    let clients = &state.clients;
+    let token_map = &state.token_map;
+    let status_map = &state.status_map;
+    let chat_path = &state.chat_path;
+    let shutdown = &state.shutdown;
+
     let mut parts = cmd_line.splitn(2, ' ');
     let cmd = parts.next().unwrap_or("").trim();
     let arg = parts.next().unwrap_or("").trim();
@@ -495,6 +502,8 @@ async fn handle_admin_cmd(
             map.retain(|_, u| u != &target);
             map.insert(format!("KICKED:{target}"), target.clone());
             drop(map);
+            // Remove from status map immediately so /who no longer shows the kicked user.
+            status_map.lock().await.remove(&target);
             let content = format!("{issuer} kicked {target} (token invalidated)");
             let msg = make_system(room_id, "broker", content);
             let _ = broadcast_and_persist(&msg, clients, chat_path).await;

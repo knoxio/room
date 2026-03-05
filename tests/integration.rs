@@ -1721,3 +1721,82 @@ async fn pull_messages_filters_dms_for_viewer() {
         "alice should see the DM addressed to her"
     );
 }
+
+/// After `\kick`, the kicked user must not appear in subsequent `/who` responses.
+#[tokio::test]
+async fn kick_removes_user_from_who() {
+    let broker = TestBroker::start("t_kick_who").await;
+    let mut admin = TestClient::connect(&broker.socket_path, "admin").await;
+    admin
+        .recv_until(|m| matches!(m, Message::Join { .. }))
+        .await;
+
+    let mut victim = TestClient::connect(&broker.socket_path, "victim").await;
+    victim
+        .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "victim"))
+        .await;
+
+    // Admin kicks victim
+    admin.send_text(r"\kick victim").await;
+    admin
+        .recv_until(|m| matches!(m, Message::System { .. }))
+        .await;
+
+    // Admin queries /who — victim should no longer appear
+    admin
+        .send_json(r#"{"type":"command","cmd":"who","params":[]}"#)
+        .await;
+    let sys = admin
+        .recv_until(|m| matches!(m, Message::System { .. }))
+        .await;
+    let Message::System { content, .. } = &sys else {
+        panic!("expected system message");
+    };
+    assert!(
+        !content.contains("victim"),
+        "kicked user should not appear in /who, got: {content}"
+    );
+    assert!(
+        content.contains("admin"),
+        "admin should still appear in /who, got: {content}"
+    );
+}
+
+/// `/who` via oneshot send returns the user list to the sender without broadcasting.
+#[tokio::test]
+async fn oneshot_who_returns_user_list() {
+    let broker = TestBroker::start("t_oneshot_who").await;
+    let mut alice = TestClient::connect(&broker.socket_path, "alice").await;
+    alice
+        .recv_until(|m| matches!(m, Message::Join { .. }))
+        .await;
+
+    let (_, tok) = room::oneshot::join_session(&broker.socket_path, "bot")
+        .await
+        .unwrap();
+
+    let wire = serde_json::json!({"type":"command","cmd":"who","params":[]}).to_string();
+    let msg = room::oneshot::send_message_with_token(&broker.socket_path, &tok, &wire)
+        .await
+        .expect("oneshot /who should succeed");
+
+    let Message::System { content, .. } = msg else {
+        panic!("expected system message, got: {msg:?}");
+    };
+    assert!(
+        content.contains("alice"),
+        "/who should list alice, got: {content}"
+    );
+
+    // The Command should NOT have been broadcast to alice
+    let got_cmd = tokio::time::timeout(std::time::Duration::from_millis(200), async {
+        alice
+            .recv_until(|m| matches!(m, Message::Command { cmd, .. } if cmd == "who"))
+            .await
+    })
+    .await;
+    assert!(
+        got_cmd.is_err(),
+        "/who command should not be broadcast to other clients"
+    );
+}
