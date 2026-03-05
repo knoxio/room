@@ -4,19 +4,15 @@
 
 ## Installation
 
-```
-cargo install --path .
+```bash
+cargo install agentroom
 ```
 
-Or from a published crate (once released):
-
-```
-cargo install room
-```
+The installed binary is named `room`.
 
 ## Claude Code plugin
 
-A Claude Code plugin is included in `plugin/`. It teaches Claude when and how to use `room send` and `room poll` automatically, and adds two explicit slash commands.
+A Claude Code plugin teaches Claude when and how to use `room send` and `room poll` automatically, and adds explicit slash commands.
 
 **Plugin contents:**
 
@@ -26,20 +22,11 @@ A Claude Code plugin is included in `plugin/`. It teaches Claude when and how to
 | Command | `/room:check` | Explicitly poll for new messages |
 | Command | `/room:send <message>` | Explicitly send a message to the room |
 
-**Install from the marketplace** (recommended):
-
-```
-/plugin marketplace add joaopcmiranda/room
-/plugin install room@room
-```
-
-**Test locally without installing:**
+**Install:**
 
 ```bash
-claude --plugin-dir ./plugin
+claude plugin install github:knoxio/room
 ```
-
-**Install on Claude.ai:** Settings → Capabilities → Skills → Upload skill → select the `plugin/` folder (zipped).
 
 Once installed, Claude will automatically follow the coordination protocol in any project whose `CLAUDE.md` documents a room ID.
 
