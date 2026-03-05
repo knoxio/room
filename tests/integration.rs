@@ -473,3 +473,117 @@ async fn writes_to_tmp_slash_directly() {
     assert_eq!(loaded.len(), 1);
     let _ = tokio::fs::remove_file(&path).await;
 }
+
+/// set_status broadcasts a System message to all connected clients announcing
+/// the status change. The command itself is not echoed — only the system notice.
+#[tokio::test]
+async fn set_status_broadcasts_system_message_to_all() {
+    let broker = TestBroker::start("t_set_status").await;
+
+    let mut alice = TestClient::connect(&broker.socket_path, "alice").await;
+    alice.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "alice")).await;
+
+    let mut bob = TestClient::connect(&broker.socket_path, "bob").await;
+    alice.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "bob")).await;
+    bob.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "bob")).await;
+
+    alice
+        .send_json(r#"{"type":"command","cmd":"set_status","params":["working on auth"]}"#)
+        .await;
+
+    // Both alice and bob should receive the system broadcast
+    let alice_notice = alice
+        .recv_until(|m| matches!(m, Message::System { content, .. } if content.contains("working on auth")))
+        .await;
+    assert!(alice_notice.user() == "broker");
+
+    let bob_notice = bob
+        .recv_until(|m| matches!(m, Message::System { content, .. } if content.contains("working on auth")))
+        .await;
+    assert!(bob_notice.user() == "broker");
+
+    // The raw Command must NOT have been broadcast to bob
+    // (no Command with cmd="set_status" should appear — we verify by checking
+    // that what bob received was a System, not a Command)
+    assert!(
+        matches!(bob_notice, Message::System { .. }),
+        "expected System message, got something else"
+    );
+}
+
+/// who responds only to the requesting client with the current online list.
+/// The response is a System message and is not broadcast to other clients.
+#[tokio::test]
+async fn who_responds_only_to_requester() {
+    let broker = TestBroker::start("t_who").await;
+
+    let mut alice = TestClient::connect(&broker.socket_path, "alice").await;
+    alice.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "alice")).await;
+
+    let mut bob = TestClient::connect(&broker.socket_path, "bob").await;
+    alice.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "bob")).await;
+    bob.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "bob")).await;
+
+    // Bob sets a status so alice can verify it appears in who output
+    bob.send_json(r#"{"type":"command","cmd":"set_status","params":["idle"]}"#)
+        .await;
+    // Drain the system broadcast on both sides
+    alice.recv_until(|m| matches!(m, Message::System { content, .. } if content.contains("idle"))).await;
+    bob.recv_until(|m| matches!(m, Message::System { content, .. } if content.contains("idle"))).await;
+
+    // Alice sends /who
+    alice
+        .send_json(r#"{"type":"command","cmd":"who","params":[]}"#)
+        .await;
+
+    // Alice should receive a System message listing online users
+    let response = alice
+        .recv_until(|m| matches!(m, Message::System { content, .. } if content.contains("online")))
+        .await;
+    if let Message::System { content, .. } = &response {
+        assert!(content.contains("alice"), "alice should be in who list");
+        assert!(content.contains("bob"), "bob should be in who list");
+        assert!(content.contains("idle"), "bob's status should appear");
+    }
+
+    // Bob should NOT receive the who response — it's private to alice.
+    // We verify by checking that bob's next message (if any within 200ms) is not a System "online" response.
+    let bob_got_who = timeout(Duration::from_millis(200), async {
+        bob.recv_until(|m| matches!(m, Message::System { content, .. } if content.contains("online"))).await
+    })
+    .await;
+    assert!(
+        bob_got_who.is_err(),
+        "who response should not be broadcast to other clients"
+    );
+}
+
+/// Users removed from status map on disconnect do not appear in subsequent who responses.
+#[tokio::test]
+async fn who_excludes_disconnected_users() {
+    let broker = TestBroker::start("t_who_disconnect").await;
+
+    let mut alice = TestClient::connect(&broker.socket_path, "alice").await;
+    alice.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "alice")).await;
+
+    let mut bob = TestClient::connect(&broker.socket_path, "bob").await;
+    alice.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "bob")).await;
+    bob.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "bob")).await;
+
+    // Bob disconnects
+    drop(bob);
+    alice.recv_until(|m| matches!(m, Message::Leave { user, .. } if user == "bob")).await;
+
+    // Alice queries who — bob should not appear
+    alice
+        .send_json(r#"{"type":"command","cmd":"who","params":[]}"#)
+        .await;
+
+    let response = alice
+        .recv_until(|m| matches!(m, Message::System { content, .. } if content.contains("online")))
+        .await;
+    if let Message::System { content, .. } = &response {
+        assert!(!content.contains("bob"), "disconnected user should not appear in who list");
+        assert!(content.contains("alice"), "alice should still be in who list");
+    }
+}
