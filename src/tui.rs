@@ -224,7 +224,7 @@ fn format_message(msg: &Message) -> Line<'static> {
                 Span::styled(
                     format!("{user}: "),
                     Style::default()
-                        .fg(Color::Yellow)
+                        .fg(user_color(user))
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::raw(content.clone()),
@@ -244,7 +244,7 @@ fn format_message(msg: &Message) -> Line<'static> {
                 Span::styled(
                     format!("{user}: "),
                     Style::default()
-                        .fg(Color::Yellow)
+                        .fg(user_color(user))
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
@@ -267,7 +267,7 @@ fn format_message(msg: &Message) -> Line<'static> {
                 Span::styled(
                     format!("{user}: "),
                     Style::default()
-                        .fg(Color::Yellow)
+                        .fg(user_color(user))
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
@@ -297,15 +297,41 @@ fn format_message(msg: &Message) -> Line<'static> {
             Line::from(vec![
                 Span::styled(format!("[{ts_str}] "), Style::default().fg(Color::DarkGray)),
                 Span::styled(
-                    format!("[dm] {user}→{to}: "),
+                    "[dm] ",
                     Style::default()
                         .fg(Color::Magenta)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("{user}→{to}: "),
+                    Style::default()
+                        .fg(user_color(user))
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::raw(content.clone()),
             ])
         }
     }
+}
+
+/// Map a username to a consistent, unique-feeling color from a fixed palette.
+fn user_color(username: &str) -> Color {
+    const PALETTE: &[Color] = &[
+        Color::Yellow,
+        Color::Cyan,
+        Color::Green,
+        Color::Magenta,
+        Color::LightYellow,
+        Color::LightCyan,
+        Color::LightGreen,
+        Color::LightMagenta,
+        Color::LightRed,
+        Color::LightBlue,
+    ];
+    let hash = username.bytes().fold(0usize, |acc, b| {
+        acc.wrapping_mul(31).wrapping_add(b as usize)
+    });
+    PALETTE[hash % PALETTE.len()]
 }
 
 /// Convert TUI input to a JSON envelope for the broker.
