@@ -1,5 +1,7 @@
 use std::io;
 
+use unicode_width::UnicodeWidthChar;
+
 use crossterm::{
     event::{self, Event, KeyCode, KeyModifiers},
     execute,
@@ -126,21 +128,35 @@ pub async fn run(
             f.render_widget(msg_list, chunks[0]);
 
             let input_content_width = chunks[1].width.saturating_sub(2) as usize;
-            let cursor_char = input[..cursor_pos].chars().count();
 
-            // Adjust horizontal scroll to keep cursor visible
-            if cursor_char < input_scroll {
-                input_scroll = cursor_char;
+            // Single pass: compute cursor display-column and scroll byte index.
+            // Uses Unicode display widths so wide (CJK) chars are accounted for.
+            let cursor_col: usize = input[..cursor_pos]
+                .chars()
+                .map(|c| c.width().unwrap_or(0))
+                .sum();
+
+            // Adjust horizontal scroll (in display columns) to keep cursor visible.
+            if cursor_col < input_scroll {
+                input_scroll = cursor_col;
             }
-            if input_content_width > 0 && cursor_char >= input_scroll + input_content_width {
-                input_scroll = cursor_char - input_content_width + 1;
+            if input_content_width > 0 && cursor_col >= input_scroll + input_content_width {
+                input_scroll = cursor_col - input_content_width + 1;
             }
 
-            let scroll_byte = input
-                .char_indices()
-                .nth(input_scroll)
-                .map(|(i, _)| i)
-                .unwrap_or(input.len());
+            // Find the byte offset of the first char at or past the scroll column.
+            let scroll_byte = {
+                let mut col: usize = 0;
+                let mut byte = input.len();
+                for (i, ch) in input.char_indices() {
+                    if col >= input_scroll {
+                        byte = i;
+                        break;
+                    }
+                    col += ch.width().unwrap_or(0);
+                }
+                byte
+            };
 
             let input_widget = Paragraph::new(&input[scroll_byte..])
                 .block(
@@ -152,8 +168,8 @@ pub async fn run(
                 .style(Style::default().fg(Color::White));
             f.render_widget(input_widget, chunks[1]);
 
-            // Place terminal cursor inside the input box
-            let cursor_x = chunks[1].x + 1 + (cursor_char - input_scroll) as u16;
+            // Place terminal cursor inside the input box.
+            let cursor_x = chunks[1].x + 1 + (cursor_col - input_scroll) as u16;
             let cursor_y = chunks[1].y + 1;
             f.set_cursor_position((cursor_x, cursor_y));
         })?;
