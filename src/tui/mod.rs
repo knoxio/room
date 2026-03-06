@@ -27,7 +27,7 @@ use input::{
     build_payload, cursor_display_pos, handle_key, seed_online_users_from_who, wrap_input_display,
     Action, InputState,
 };
-use render::{find_view_start, format_message, user_color};
+use render::{assign_color, find_view_start, format_message, user_color, ColorMap};
 
 /// Maximum visible content lines in the input box before it stops growing.
 const MAX_INPUT_LINES: usize = 6;
@@ -95,6 +95,7 @@ pub async fn run(
 
     let mut messages: Vec<Message> = Vec::new();
     let mut online_users: Vec<String> = Vec::new();
+    let mut color_map = ColorMap::new();
     let mut state = InputState::new();
     let mut result: anyhow::Result<()> = Ok(());
 
@@ -113,6 +114,7 @@ pub async fn run(
                 Ok(msg) => {
                     match &msg {
                         Message::Join { user, .. } if !online_users.contains(user) => {
+                            assign_color(user, &mut color_map);
                             online_users.push(user.clone());
                         }
                         Message::Leave { user, .. } => {
@@ -121,11 +123,19 @@ pub async fn run(
                         // Seed from message senders so @mention works for users who connected
                         // via poll/send (no persistent connection, not in the status_map).
                         Message::Message { user, .. } if !online_users.contains(user) => {
+                            assign_color(user, &mut color_map);
                             online_users.push(user.clone());
+                        }
+                        // Assign color for any message sender not yet in the map.
+                        Message::Message { user, .. } => {
+                            assign_color(user, &mut color_map);
                         }
                         // Parse the /who response to seed the authoritative user list.
                         Message::System { user, content, .. } if user == "broker" => {
                             seed_online_users_from_who(content, &mut online_users);
+                            for u in &online_users {
+                                assign_color(u, &mut color_map);
+                            }
                         }
                         _ => {}
                     }
@@ -166,7 +176,7 @@ pub async fn run(
 
         let msg_texts: Vec<Text<'static>> = messages
             .iter()
-            .map(|m| format_message(m, content_width))
+            .map(|m| format_message(m, content_width, &color_map))
             .collect();
 
         let heights: Vec<usize> = msg_texts.iter().map(|t| t.lines.len().max(1)).collect();
@@ -300,10 +310,10 @@ pub async fn run(
                         let style = if row == state.mention.selected {
                             Style::default()
                                 .fg(Color::Black)
-                                .bg(user_color(user))
+                                .bg(user_color(user, &color_map))
                                 .add_modifier(Modifier::BOLD)
                         } else {
-                            Style::default().fg(user_color(user))
+                            Style::default().fg(user_color(user, &color_map))
                         };
                         ListItem::new(Line::from(Span::styled(format!("@{user}"), style)))
                     })
@@ -381,18 +391,24 @@ pub async fn run(
                 Ok(msg) => {
                     match &msg {
                         Message::Join { user, .. } if !online_users.contains(user) => {
+                            assign_color(user, &mut color_map);
                             online_users.push(user.clone());
                         }
                         Message::Leave { user, .. } => {
                             online_users.retain(|u| u != user);
                         }
-                        // Seed from message senders so @mention works for users who connected
-                        // via poll/send (no persistent connection, not in the status_map).
                         Message::Message { user, .. } if !online_users.contains(user) => {
+                            assign_color(user, &mut color_map);
                             online_users.push(user.clone());
+                        }
+                        Message::Message { user, .. } => {
+                            assign_color(user, &mut color_map);
                         }
                         Message::System { user, content, .. } if user == "broker" => {
                             seed_online_users_from_who(content, &mut online_users);
+                            for u in &online_users {
+                                assign_color(u, &mut color_map);
+                            }
                         }
                         _ => {}
                     }

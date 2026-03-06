@@ -1,3 +1,5 @@
+use std::collections::{HashMap, HashSet};
+
 use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
@@ -5,12 +7,62 @@ use ratatui::{
 
 use crate::message::Message;
 
+/// Color palette for user names.
+const PALETTE: &[Color] = &[
+    Color::Yellow,
+    Color::Cyan,
+    Color::Green,
+    Color::Magenta,
+    Color::LightYellow,
+    Color::LightCyan,
+    Color::LightGreen,
+    Color::LightMagenta,
+    Color::LightRed,
+    Color::LightBlue,
+];
+
+/// Persistent map of username -> assigned color. Stored in TUI state.
+pub(super) type ColorMap = HashMap<String, Color>;
+
+/// Assign a color to a username, preferring unused palette colors.
+///
+/// If the user already has a color, returns it. Otherwise picks the
+/// hash-preferred color if available, or the first unused palette color.
+/// Falls back to the hash color when all palette slots are taken.
+pub(super) fn assign_color(username: &str, color_map: &mut ColorMap) -> Color {
+    if let Some(&color) = color_map.get(username) {
+        return color;
+    }
+    let used: HashSet<Color> = color_map.values().copied().collect();
+    let hash = username.bytes().fold(0usize, |acc, b| {
+        acc.wrapping_mul(31).wrapping_add(b as usize)
+    });
+    let preferred = PALETTE[hash % PALETTE.len()];
+    if !used.contains(&preferred) {
+        color_map.insert(username.to_owned(), preferred);
+        return preferred;
+    }
+    // Hash color is taken — find first unused palette color.
+    for &color in PALETTE {
+        if !used.contains(&color) {
+            color_map.insert(username.to_owned(), color);
+            return color;
+        }
+    }
+    // All palette colors used — accept collision with hash color.
+    color_map.insert(username.to_owned(), preferred);
+    preferred
+}
+
 /// Arrow glyph used in DM display (`→`).
 const DM_ARROW: &str = "\u{2192}";
 
 /// Split a message content string into styled spans, rendering `@username`
 /// tokens in the mentioned user's colour.
-pub(super) fn render_content_with_mentions(content: &str) -> Vec<Span<'static>> {
+pub(super) fn render_content_with_mentions(
+    content: &str,
+    color_map: &ColorMap,
+) -> Vec<Span<'static>> {
     let mut spans: Vec<Span<'static>> = Vec::new();
     let mut remaining = content;
     while let Some(at_pos) = remaining.find('@') {
@@ -30,7 +82,7 @@ pub(super) fn render_content_with_mentions(content: &str) -> Vec<Span<'static>> 
             spans.push(Span::styled(
                 format!("@{username}"),
                 Style::default()
-                    .fg(user_color(username))
+                    .fg(user_color(username, color_map))
                     .add_modifier(Modifier::BOLD),
             ));
             remaining = &after_at[username_end..];
@@ -95,7 +147,11 @@ pub(super) fn wrap_words(text: &str, width: usize) -> Vec<String> {
     all_chunks
 }
 
-pub(super) fn format_message(msg: &Message, available_width: usize) -> Text<'static> {
+pub(super) fn format_message(
+    msg: &Message,
+    available_width: usize,
+    color_map: &ColorMap,
+) -> Text<'static> {
     match msg {
         Message::Join { ts, user, .. } => {
             let ts_str = ts.format("%H:%M:%S").to_string();
@@ -138,15 +194,15 @@ pub(super) fn format_message(msg: &Message, available_width: usize) -> Text<'sta
                         Span::styled(
                             format!("{user}: "),
                             Style::default()
-                                .fg(user_color(user))
+                                .fg(user_color(user, color_map))
                                 .add_modifier(Modifier::BOLD),
                         ),
                     ];
-                    line_spans.extend(render_content_with_mentions(&chunk));
+                    line_spans.extend(render_content_with_mentions(&chunk, color_map));
                     lines.push(Line::from(line_spans));
                 } else {
                     let mut line_spans = vec![Span::raw(indent.clone())];
-                    line_spans.extend(render_content_with_mentions(&chunk));
+                    line_spans.extend(render_content_with_mentions(&chunk, color_map));
                     lines.push(Line::from(line_spans));
                 }
             }
@@ -174,7 +230,7 @@ pub(super) fn format_message(msg: &Message, available_width: usize) -> Text<'sta
                         Span::styled(
                             format!("{user}: "),
                             Style::default()
-                                .fg(user_color(user))
+                                .fg(user_color(user, color_map))
                                 .add_modifier(Modifier::BOLD),
                         ),
                         Span::styled(
@@ -182,11 +238,11 @@ pub(super) fn format_message(msg: &Message, available_width: usize) -> Text<'sta
                             Style::default().fg(Color::DarkGray),
                         ),
                     ];
-                    line_spans.extend(render_content_with_mentions(&chunk));
+                    line_spans.extend(render_content_with_mentions(&chunk, color_map));
                     lines.push(Line::from(line_spans));
                 } else {
                     let mut line_spans = vec![Span::raw(indent.clone())];
-                    line_spans.extend(render_content_with_mentions(&chunk));
+                    line_spans.extend(render_content_with_mentions(&chunk, color_map));
                     lines.push(Line::from(line_spans));
                 }
             }
@@ -205,7 +261,7 @@ pub(super) fn format_message(msg: &Message, available_width: usize) -> Text<'sta
                 Span::styled(
                     format!("{user}: "),
                     Style::default()
-                        .fg(user_color(user))
+                        .fg(user_color(user, color_map))
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
@@ -267,7 +323,7 @@ pub(super) fn format_message(msg: &Message, available_width: usize) -> Text<'sta
                         Span::styled(
                             format!("{user}{DM_ARROW}{to}: "),
                             Style::default()
-                                .fg(user_color(user))
+                                .fg(user_color(user, color_map))
                                 .add_modifier(Modifier::BOLD),
                         ),
                         Span::raw(chunk),
@@ -298,20 +354,12 @@ pub(super) fn find_view_start(heights: &[usize], view_top: usize) -> (usize, usi
     (heights.len(), 0)
 }
 
-/// Map a username to a consistent, unique-feeling color from a fixed palette.
-pub(super) fn user_color(username: &str) -> Color {
-    const PALETTE: &[Color] = &[
-        Color::Yellow,
-        Color::Cyan,
-        Color::Green,
-        Color::Magenta,
-        Color::LightYellow,
-        Color::LightCyan,
-        Color::LightGreen,
-        Color::LightMagenta,
-        Color::LightRed,
-        Color::LightBlue,
-    ];
+/// Look up a username's color from the map, falling back to the hash-based
+/// palette index if the user has not been assigned a color yet.
+pub(super) fn user_color(username: &str, color_map: &ColorMap) -> Color {
+    if let Some(&color) = color_map.get(username) {
+        return color;
+    }
     let hash = username.bytes().fold(0usize, |acc, b| {
         acc.wrapping_mul(31).wrapping_add(b as usize)
     });
@@ -362,23 +410,24 @@ mod tests {
 
     #[test]
     fn render_mentions_no_at_returns_single_raw_span() {
-        let spans = render_content_with_mentions("hello world");
+        let cm = ColorMap::new();
+        let spans = render_content_with_mentions("hello world", &cm);
         assert_eq!(spans.len(), 1);
         assert_eq!(spans[0].content, "hello world");
     }
 
     #[test]
     fn render_mentions_bare_at_no_username_is_literal() {
-        let spans = render_content_with_mentions("email@");
-        // '@' with no username after is treated as literal
+        let cm = ColorMap::new();
+        let spans = render_content_with_mentions("email@", &cm);
         let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(text, "email@");
     }
 
     #[test]
     fn render_mentions_single_mention() {
-        let spans = render_content_with_mentions("hey @alice!");
-        // "hey " + "@alice" + "!"
+        let cm = ColorMap::new();
+        let spans = render_content_with_mentions("hey @alice!", &cm);
         assert_eq!(spans.len(), 3);
         assert_eq!(spans[0].content, "hey ");
         assert_eq!(spans[1].content, "@alice");
@@ -387,8 +436,8 @@ mod tests {
 
     #[test]
     fn render_mentions_multiple_mentions() {
-        let spans = render_content_with_mentions("@alice and @bob");
-        // "@alice" + " and " + "@bob"
+        let cm = ColorMap::new();
+        let spans = render_content_with_mentions("@alice and @bob", &cm);
         assert_eq!(spans.len(), 3);
         assert_eq!(spans[0].content, "@alice");
         assert_eq!(spans[1].content, " and ");
@@ -397,15 +446,99 @@ mod tests {
 
     #[test]
     fn render_mentions_mention_only() {
-        let spans = render_content_with_mentions("@r2d2");
+        let cm = ColorMap::new();
+        let spans = render_content_with_mentions("@r2d2", &cm);
         assert_eq!(spans.len(), 1);
         assert_eq!(spans[0].content, "@r2d2");
     }
 
     #[test]
     fn render_mentions_empty_content() {
-        let spans = render_content_with_mentions("");
-        // Should return at least one span (even if empty)
+        let cm = ColorMap::new();
+        let spans = render_content_with_mentions("", &cm);
         assert!(!spans.is_empty());
+    }
+
+    // ── assign_color ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn assign_color_returns_consistent_color() {
+        let mut cm = ColorMap::new();
+        let c1 = assign_color("alice", &mut cm);
+        let c2 = assign_color("alice", &mut cm);
+        assert_eq!(c1, c2);
+    }
+
+    #[test]
+    fn assign_color_different_users_get_different_colors() {
+        let mut cm = ColorMap::new();
+        let c1 = assign_color("alice", &mut cm);
+        let c2 = assign_color("bob", &mut cm);
+        assert_ne!(c1, c2);
+    }
+
+    #[test]
+    fn assign_color_avoids_collision_when_preferred_taken() {
+        let mut cm = ColorMap::new();
+        // "alice" gets her preferred color first.
+        let alice_color = assign_color("alice", &mut cm);
+        // Find another username that hashes to the same palette index.
+        let mut collider = String::new();
+        for i in 0u32..10_000 {
+            let name = format!("u{i}");
+            let hash = name.bytes().fold(0usize, |acc, b| {
+                acc.wrapping_mul(31).wrapping_add(b as usize)
+            });
+            if PALETTE[hash % PALETTE.len()] == alice_color {
+                collider = name;
+                break;
+            }
+        }
+        assert!(!collider.is_empty(), "could not find a colliding username");
+        let collider_color = assign_color(&collider, &mut cm);
+        // The collider should NOT get Alice's color — it should get a different unused one.
+        assert_ne!(collider_color, alice_color);
+    }
+
+    #[test]
+    fn assign_color_fills_all_palette_slots() {
+        let mut cm = ColorMap::new();
+        let mut colors = HashSet::new();
+        // Assign colors to enough users to fill the palette.
+        for i in 0..PALETTE.len() {
+            let c = assign_color(&format!("user{i}"), &mut cm);
+            colors.insert(c);
+        }
+        // Every palette color should be used exactly once.
+        assert_eq!(colors.len(), PALETTE.len());
+    }
+
+    #[test]
+    fn assign_color_accepts_collision_when_palette_exhausted() {
+        let mut cm = ColorMap::new();
+        // Fill all palette slots.
+        for i in 0..PALETTE.len() {
+            assign_color(&format!("user{i}"), &mut cm);
+        }
+        // The 11th user must accept a collision.
+        let c = assign_color("overflow", &mut cm);
+        assert!(PALETTE.contains(&c));
+    }
+
+    #[test]
+    fn user_color_uses_map_when_present() {
+        let mut cm = ColorMap::new();
+        cm.insert("alice".to_owned(), Color::LightRed);
+        assert_eq!(user_color("alice", &cm), Color::LightRed);
+    }
+
+    #[test]
+    fn user_color_falls_back_to_hash_when_not_in_map() {
+        let cm = ColorMap::new();
+        let c = user_color("alice", &cm);
+        let hash = "alice".bytes().fold(0usize, |acc, b| {
+            acc.wrapping_mul(31).wrapping_add(b as usize)
+        });
+        assert_eq!(c, PALETTE[hash % PALETTE.len()]);
     }
 }
