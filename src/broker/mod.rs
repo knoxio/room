@@ -1,11 +1,12 @@
 pub(crate) mod auth;
+pub(crate) mod fanout;
 pub(crate) mod state;
 
 use std::{
     collections::HashMap,
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::AtomicU64,
         Arc,
     },
 };
@@ -23,7 +24,8 @@ use crate::{
     message::{make_join, make_leave, make_system, parse_client_line, Message},
 };
 use auth::{handle_oneshot_join, validate_token};
-use state::{ClientMap, HostUser, RoomState};
+use fanout::{broadcast_and_persist, dm_and_persist};
+use state::RoomState;
 
 /// Admin command names — routed through `handle_admin_cmd` when received as
 /// a `Message::Command` with one of these cmd values.
@@ -603,56 +605,3 @@ async fn handle_admin_cmd(cmd_line: &str, issuer: &str, state: &RoomState) -> Op
     None
 }
 
-/// Assign the next sequence number, persist a message, and fan it out to all connected clients.
-///
-/// Returns the message with its `seq` field populated so callers can echo it to one-shot senders.
-async fn broadcast_and_persist(
-    msg: &Message,
-    clients: &ClientMap,
-    chat_path: &Path,
-    seq_counter: &Arc<AtomicU64>,
-) -> anyhow::Result<Message> {
-    let seq = seq_counter.fetch_add(1, Ordering::SeqCst) + 1;
-    let mut msg = msg.clone();
-    msg.set_seq(seq);
-
-    history::append(chat_path, &msg).await?;
-
-    let line = format!("{}\n", serde_json::to_string(&msg)?);
-    let map = clients.lock().await;
-    for (_, tx) in map.values() {
-        let _ = tx.send(line.clone());
-    }
-    Ok(msg)
-}
-
-/// Assign the next sequence number, persist a DM, and deliver it only to the sender,
-/// the recipient, and the host.
-/// If the recipient is offline the message is still persisted and the sender
-/// receives their own echo; no error is returned.
-async fn dm_and_persist(
-    msg: &Message,
-    sender: &str,
-    recipient: &str,
-    host_user: &HostUser,
-    clients: &ClientMap,
-    chat_path: &Path,
-    seq_counter: &Arc<AtomicU64>,
-) -> anyhow::Result<Message> {
-    let seq = seq_counter.fetch_add(1, Ordering::SeqCst) + 1;
-    let mut msg = msg.clone();
-    msg.set_seq(seq);
-
-    history::append(chat_path, &msg).await?;
-
-    let line = format!("{}\n", serde_json::to_string(&msg)?);
-    let host = host_user.lock().await;
-    let host_name = host.as_deref();
-    let map = clients.lock().await;
-    for (username, tx) in map.values() {
-        if username == sender || username == recipient || host_name == Some(username.as_str()) {
-            let _ = tx.send(line.clone());
-        }
-    }
-    Ok(msg)
-}
