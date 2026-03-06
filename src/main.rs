@@ -68,6 +68,11 @@ enum Cmd {
         #[arg(long, default_value_t = 5)]
         interval: u64,
     },
+    /// List active rooms with running brokers.
+    ///
+    /// Scans `/tmp` for `room-*.sock` files and probes each to verify the broker
+    /// is alive. Prints one NDJSON line per active room. No token required.
+    List,
 }
 
 #[derive(Parser, Debug)]
@@ -141,6 +146,9 @@ async fn main() -> anyhow::Result<()> {
             interval,
         }) => {
             oneshot::cmd_watch(&room_id, &token, interval).await?;
+        }
+        Some(Cmd::List) => {
+            oneshot::cmd_list().await?;
         }
         None => {
             let room_id = args.room_id.unwrap_or_else(|| {
