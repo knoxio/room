@@ -2,11 +2,15 @@ pub(crate) mod auth;
 pub(crate) mod commands;
 pub(crate) mod fanout;
 pub(crate) mod state;
+pub(crate) mod ws;
 
 use std::{
     collections::HashMap,
     path::PathBuf,
-    sync::{atomic::AtomicU64, Arc},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
 };
 
 use crate::{
@@ -30,14 +34,21 @@ pub struct Broker {
     room_id: String,
     chat_path: PathBuf,
     socket_path: PathBuf,
+    ws_port: Option<u16>,
 }
 
 impl Broker {
-    pub fn new(room_id: &str, chat_path: PathBuf, socket_path: PathBuf) -> Self {
+    pub fn new(
+        room_id: &str,
+        chat_path: PathBuf,
+        socket_path: PathBuf,
+        ws_port: Option<u16>,
+    ) -> Self {
         Self {
             room_id: room_id.to_owned(),
             chat_path,
             socket_path,
+            ws_port,
         }
     }
 
@@ -63,14 +74,29 @@ impl Broker {
             shutdown: Arc::new(shutdown_tx),
             seq_counter: Arc::new(AtomicU64::new(0)),
         });
-        let mut next_id: u64 = 0;
+        let next_client_id = Arc::new(AtomicU64::new(0));
+
+        // Start WebSocket/REST server if a port was configured.
+        if let Some(port) = self.ws_port {
+            let ws_state = ws::WsAppState {
+                room_state: state.clone(),
+                next_client_id: next_client_id.clone(),
+            };
+            let app = ws::create_router(ws_state);
+            let tcp = tokio::net::TcpListener::bind(("0.0.0.0", port)).await?;
+            eprintln!("[broker] WebSocket/REST listening on port {port}");
+            tokio::spawn(async move {
+                if let Err(e) = axum::serve(tcp, app).await {
+                    eprintln!("[broker] WS server error: {e}");
+                }
+            });
+        }
 
         loop {
             tokio::select! {
                 accept = listener.accept() => {
                     let (stream, _) = accept?;
-                    next_id += 1;
-                    let cid = next_id;
+                    let cid = next_client_id.fetch_add(1, Ordering::SeqCst) + 1;
 
                     let (tx, _) = broadcast::channel::<String>(256);
                     // Insert with empty username; handle_client updates it after handshake.

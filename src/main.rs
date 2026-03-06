@@ -105,6 +105,10 @@ struct Args {
     #[arg(long)]
     agent: bool,
 
+    /// Enable WebSocket/REST transport on this port (e.g. --ws-port 4200)
+    #[arg(long)]
+    ws_port: Option<u16>,
+
     #[command(subcommand)]
     command: Option<Cmd>,
 }
@@ -165,6 +169,7 @@ async fn main() -> anyhow::Result<()> {
                 args.history_lines,
                 args.chat_file,
                 args.agent,
+                args.ws_port,
             )
             .await?;
         }
@@ -179,6 +184,7 @@ async fn run_join(
     history_lines: usize,
     chat_file: Option<PathBuf>,
     agent: bool,
+    ws_port: Option<u16>,
 ) -> anyhow::Result<()> {
     let socket_path = PathBuf::from(format!("/tmp/room-{}.sock", room_id));
     let meta_path = PathBuf::from(format!("/tmp/room-{}.meta", room_id));
@@ -208,7 +214,7 @@ async fn run_join(
             resolved_chat_path.display()
         );
 
-        let broker = Broker::new(&room_id, resolved_chat_path, socket_path.clone());
+        let broker = Broker::new(&room_id, resolved_chat_path, socket_path.clone(), ws_port);
 
         tokio::spawn(async move {
             if let Err(e) = broker.run().await {

@@ -4,6 +4,7 @@
 /// Unix-socket clients, and verifies behaviour at the wire level.
 use std::{path::PathBuf, time::Duration};
 
+use futures_util::{SinkExt, StreamExt};
 use room::{
     broker::Broker,
     history,
@@ -15,6 +16,7 @@ use tokio::{
     net::UnixStream,
     time::timeout,
 };
+use tokio_tungstenite::{connect_async, tungstenite::Message as TungsteniteMsg};
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -28,11 +30,39 @@ struct TestBroker {
 impl TestBroker {
     /// Start a broker and wait until the socket is ready.
     async fn start(room_id: &str) -> Self {
+        Self::start_inner(room_id, None).await
+    }
+
+    /// Start a broker with both UDS and WebSocket/REST transport.
+    /// Returns (TestBroker, ws_port).
+    async fn start_with_ws(room_id: &str) -> (Self, u16) {
+        // Bind to port 0 to get a free ephemeral port, then release it.
+        let tmp = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = tmp.local_addr().unwrap().port();
+        drop(tmp);
+
+        let broker = Self::start_inner(room_id, Some(port)).await;
+
+        // Wait for the HTTP server to be ready.
+        for _ in 0..100 {
+            if tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .is_ok()
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        (broker, port)
+    }
+
+    async fn start_inner(room_id: &str, ws_port: Option<u16>) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let socket_path = dir.path().join(format!("{room_id}.sock"));
         let chat_path = dir.path().join(format!("{room_id}.chat"));
 
-        let broker = Broker::new(room_id, chat_path.clone(), socket_path.clone());
+        let broker = Broker::new(room_id, chat_path.clone(), socket_path.clone(), ws_port);
         tokio::spawn(async move {
             broker.run().await.ok();
         });
@@ -440,7 +470,7 @@ async fn pre_existing_history_is_replayed() {
         history::append(&chat_path, m).await.unwrap();
     }
 
-    let broker = Broker::new("pre", chat_path.clone(), socket_path.clone());
+    let broker = Broker::new("pre", chat_path.clone(), socket_path.clone(), None);
     tokio::spawn(async move { broker.run().await.ok() });
     for _ in 0..100 {
         if socket_path.exists() {
@@ -481,7 +511,7 @@ async fn stale_socket_is_cleaned_up() {
     assert!(socket_path.exists());
 
     // Broker should remove the stale file and bind
-    let broker = Broker::new("stale", chat_path, socket_path.clone());
+    let broker = Broker::new("stale", chat_path, socket_path.clone(), None);
     tokio::spawn(async move { broker.run().await.ok() });
 
     for _ in 0..100 {
@@ -1099,7 +1129,7 @@ async fn history_replay_filters_dm_for_non_party() {
     let dm = room::message::make_dm("replay_dm", "bob", "carol", "for bob and carol only");
     room::history::append(&chat_path, &dm).await.unwrap();
 
-    let broker = Broker::new("replay_dm", chat_path, socket_path.clone());
+    let broker = Broker::new("replay_dm", chat_path, socket_path.clone(), None);
     tokio::spawn(async move { broker.run().await.ok() });
     for _ in 0..100 {
         if socket_path.exists() {
@@ -2089,4 +2119,487 @@ async fn history_without_seq_parses_as_none() {
             "old messages without seq should deserialize to seq=None"
         );
     }
+}
+
+// ── WebSocket / REST integration tests ───────────────────────────────────────
+
+/// Helper: connect a WebSocket client and perform the username handshake.
+/// Returns the split (sink, stream) after sending the first frame.
+async fn ws_connect(
+    port: u16,
+    room_id: &str,
+    first_frame: &str,
+) -> (
+    futures_util::stream::SplitSink<
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+        TungsteniteMsg,
+    >,
+    futures_util::stream::SplitStream<
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+    >,
+) {
+    let url = format!("ws://127.0.0.1:{port}/ws/{room_id}");
+    let (ws, _) = connect_async(&url).await.expect("WS connect failed");
+    let (mut tx, rx) = ws.split();
+    tx.send(TungsteniteMsg::Text(first_frame.into()))
+        .await
+        .unwrap();
+    (tx, rx)
+}
+
+/// Read the next text frame as raw JSON Value.
+async fn ws_recv_json(
+    rx: &mut futures_util::stream::SplitStream<
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+    >,
+) -> serde_json::Value {
+    let deadline = Duration::from_secs(2);
+    match timeout(deadline, rx.next()).await {
+        Ok(Some(Ok(TungsteniteMsg::Text(text)))) => {
+            serde_json::from_str(&text).expect("WS broker sent invalid JSON value")
+        }
+        Ok(Some(Ok(other))) => panic!("unexpected WS frame: {other:?}"),
+        Ok(Some(Err(e))) => panic!("WS read error: {e}"),
+        Ok(None) => panic!("WS stream ended unexpectedly"),
+        Err(_) => panic!("timed out waiting for WS message"),
+    }
+}
+
+/// Drain WS frames until predicate matches a Message, or panic after 2s.
+async fn ws_recv_until<F: Fn(&Message) -> bool>(
+    rx: &mut futures_util::stream::SplitStream<
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+    >,
+    pred: F,
+) -> Message {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        let remaining = deadline
+            .checked_duration_since(tokio::time::Instant::now())
+            .unwrap_or_default();
+        if remaining.is_zero() {
+            panic!("timed out waiting for expected WS message");
+        }
+        match timeout(remaining, rx.next()).await {
+            Ok(Some(Ok(TungsteniteMsg::Text(text)))) => {
+                if let Ok(msg) = serde_json::from_str::<Message>(&text) {
+                    if pred(&msg) {
+                        return msg;
+                    }
+                }
+            }
+            Ok(Some(Ok(_))) => continue,
+            _ => panic!("WS stream ended or errored while waiting for message"),
+        }
+    }
+}
+
+// ── WS: interactive session ─────────────────────────────────────────────────
+
+#[tokio::test]
+async fn ws_interactive_join_and_message() {
+    let (tb, port) = TestBroker::start_with_ws("ws_join").await;
+    let _ = &tb.chat_path; // keep broker alive
+
+    let (mut tx, mut rx) = ws_connect(port, "ws_join", "alice").await;
+
+    // Should receive the join event for alice.
+    let join = ws_recv_until(
+        &mut rx,
+        |m| matches!(m, Message::Join { user, .. } if user == "alice"),
+    )
+    .await;
+    assert!(matches!(join, Message::Join { user, .. } if user == "alice"));
+
+    // Send a message.
+    tx.send(TungsteniteMsg::Text("hello from ws".into()))
+        .await
+        .unwrap();
+
+    // Should receive the broadcast back.
+    let msg = ws_recv_until(
+        &mut rx,
+        |m| matches!(m, Message::Message { content, .. } if content == "hello from ws"),
+    )
+    .await;
+    assert!(matches!(msg, Message::Message { content, .. } if content == "hello from ws"));
+
+    // Verify it was persisted.
+    let history = history::load(&tb.chat_path).await.unwrap();
+    assert!(
+        history
+            .iter()
+            .any(|m| matches!(m, Message::Message { content, .. } if content == "hello from ws")),
+        "WS message should be persisted to chat file"
+    );
+}
+
+#[tokio::test]
+async fn ws_oneshot_join_returns_token() {
+    let (_tb, port) = TestBroker::start_with_ws("ws_osjoin").await;
+
+    let (mut _tx, mut rx) = ws_connect(port, "ws_osjoin", "JOIN:bob").await;
+
+    let v = ws_recv_json(&mut rx).await;
+    assert_eq!(v["type"], "token");
+    assert_eq!(v["username"], "bob");
+    assert!(
+        v["token"].as_str().unwrap().len() > 10,
+        "token should be a UUID"
+    );
+}
+
+#[tokio::test]
+async fn ws_oneshot_join_duplicate_returns_error() {
+    let (_tb, port) = TestBroker::start_with_ws("ws_osjdup").await;
+
+    // First join succeeds.
+    let (_tx1, mut rx1) = ws_connect(port, "ws_osjdup", "JOIN:carol").await;
+    let v1 = ws_recv_json(&mut rx1).await;
+    assert_eq!(v1["type"], "token");
+
+    // Second join with same username fails.
+    let (_tx2, mut rx2) = ws_connect(port, "ws_osjdup", "JOIN:carol").await;
+    let v2 = ws_recv_json(&mut rx2).await;
+    assert_eq!(v2["type"], "error");
+    assert_eq!(v2["code"], "username_taken");
+}
+
+#[tokio::test]
+async fn ws_oneshot_send_with_token() {
+    let (tb, port) = TestBroker::start_with_ws("ws_ossend").await;
+
+    // First, get a token via JOIN.
+    let (_tx_j, mut rx_j) = ws_connect(port, "ws_ossend", "JOIN:dave").await;
+    let token_resp = ws_recv_json(&mut rx_j).await;
+    let token = token_resp["token"].as_str().unwrap();
+
+    // Use TOKEN: prefix to send a one-shot message.
+    let first_frame = format!("TOKEN:{token}");
+    let (mut tx_s, mut rx_s) = ws_connect(port, "ws_ossend", &first_frame).await;
+
+    // Send the actual message content as the second frame.
+    tx_s.send(TungsteniteMsg::Text("one-shot hello".into()))
+        .await
+        .unwrap();
+
+    // Should get the echo back.
+    let echo = ws_recv_json(&mut rx_s).await;
+    assert_eq!(echo["type"], "message");
+    assert_eq!(echo["content"], "one-shot hello");
+    assert_eq!(echo["user"], "dave");
+    assert!(
+        echo["seq"].as_u64().is_some(),
+        "echo should have a seq number"
+    );
+
+    // Verify persistence.
+    let history = history::load(&tb.chat_path).await.unwrap();
+    assert!(history
+        .iter()
+        .any(|m| matches!(m, Message::Message { content, .. } if content == "one-shot hello")));
+}
+
+#[tokio::test]
+async fn ws_invalid_token_returns_error() {
+    let (_tb, port) = TestBroker::start_with_ws("ws_badtok").await;
+
+    let (_tx, mut rx) = ws_connect(port, "ws_badtok", "TOKEN:not-a-real-token").await;
+
+    let v = ws_recv_json(&mut rx).await;
+    assert_eq!(v["type"], "error");
+    assert_eq!(v["code"], "invalid_token");
+}
+
+#[tokio::test]
+async fn ws_wrong_room_returns_not_found() {
+    let (_tb, port) = TestBroker::start_with_ws("ws_room404").await;
+
+    let url = format!("ws://127.0.0.1:{port}/ws/nonexistent");
+    // The server should reject the upgrade. connect_async may get an HTTP error.
+    let result = connect_async(&url).await;
+    assert!(result.is_err(), "connecting to wrong room should fail");
+}
+
+// ── WS ↔ UDS cross-transport ───────────────────────────────────────────────
+
+#[tokio::test]
+async fn cross_transport_uds_sees_ws_message() {
+    let (tb, port) = TestBroker::start_with_ws("ws_cross1").await;
+
+    // UDS client connects first.
+    let mut uds = TestClient::connect(&tb.socket_path, "uds_user").await;
+    // Drain the join event for uds_user.
+    uds.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "uds_user"))
+        .await;
+
+    // WS client connects.
+    let (mut ws_tx, _ws_rx) = ws_connect(port, "ws_cross1", "ws_user").await;
+
+    // UDS client should see ws_user's join.
+    uds.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "ws_user"))
+        .await;
+
+    // WS client sends a message.
+    ws_tx
+        .send(TungsteniteMsg::Text("from websocket".into()))
+        .await
+        .unwrap();
+
+    // UDS client should receive it.
+    let msg = uds
+        .recv_until(
+            |m| matches!(m, Message::Message { content, .. } if content == "from websocket"),
+        )
+        .await;
+    assert!(
+        matches!(msg, Message::Message { user, content, .. } if user == "ws_user" && content == "from websocket")
+    );
+}
+
+#[tokio::test]
+async fn cross_transport_ws_sees_uds_message() {
+    let (tb, port) = TestBroker::start_with_ws("ws_cross2").await;
+
+    // WS client connects first.
+    let (_ws_tx, mut ws_rx) = ws_connect(port, "ws_cross2", "ws_user2").await;
+
+    // Drain ws_user2's own join.
+    ws_recv_until(
+        &mut ws_rx,
+        |m| matches!(m, Message::Join { user, .. } if user == "ws_user2"),
+    )
+    .await;
+
+    // UDS client connects.
+    let mut uds = TestClient::connect(&tb.socket_path, "uds_user2").await;
+
+    // WS should see uds_user2's join.
+    ws_recv_until(
+        &mut ws_rx,
+        |m| matches!(m, Message::Join { user, .. } if user == "uds_user2"),
+    )
+    .await;
+
+    // UDS client sends a message.
+    uds.send_text("from unix socket").await;
+
+    // WS client should receive it.
+    let msg = ws_recv_until(
+        &mut ws_rx,
+        |m| matches!(m, Message::Message { content, .. } if content == "from unix socket"),
+    )
+    .await;
+    assert!(
+        matches!(msg, Message::Message { user, content, .. } if user == "uds_user2" && content == "from unix socket")
+    );
+}
+
+// ── REST API tests ──────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn rest_health_returns_ok() {
+    let (_tb, port) = TestBroker::start_with_ws("ws_health").await;
+
+    let resp = reqwest::get(format!("http://127.0.0.1:{port}/api/health"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["status"], "ok");
+    assert_eq!(body["room"], "ws_health");
+}
+
+#[tokio::test]
+async fn rest_join_send_poll_lifecycle() {
+    let (_tb, port) = TestBroker::start_with_ws("ws_rest").await;
+    let base = format!("http://127.0.0.1:{port}");
+    let client = reqwest::Client::new();
+
+    // JOIN via REST.
+    let join_resp = client
+        .post(format!("{base}/api/ws_rest/join"))
+        .json(&serde_json::json!({"username": "rest_user"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(join_resp.status(), 200);
+    let join_body: serde_json::Value = join_resp.json().await.unwrap();
+    assert_eq!(join_body["type"], "token");
+    let token = join_body["token"].as_str().unwrap();
+
+    // SEND via REST.
+    let send_resp = client
+        .post(format!("{base}/api/ws_rest/send"))
+        .header("Authorization", format!("Bearer {token}"))
+        .json(&serde_json::json!({"content": "hello from REST"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(send_resp.status(), 200);
+    let send_body: serde_json::Value = send_resp.json().await.unwrap();
+    assert_eq!(send_body["type"], "message");
+    assert_eq!(send_body["content"], "hello from REST");
+    assert_eq!(send_body["user"], "rest_user");
+    let msg_id = send_body["id"].as_str().unwrap().to_owned();
+
+    // POLL via REST — no since param, should get the message.
+    let poll_resp = client
+        .get(format!("{base}/api/ws_rest/poll"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(poll_resp.status(), 200);
+    let poll_body: serde_json::Value = poll_resp.json().await.unwrap();
+    let messages = poll_body["messages"].as_array().unwrap();
+    assert!(
+        messages.iter().any(|m| m["content"] == "hello from REST"),
+        "poll should contain the sent message"
+    );
+
+    // POLL with since= the message ID — should return empty.
+    let poll2_resp = client
+        .get(format!("{base}/api/ws_rest/poll?since={msg_id}"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    let poll2_body: serde_json::Value = poll2_resp.json().await.unwrap();
+    let messages2 = poll2_body["messages"].as_array().unwrap();
+    assert!(
+        messages2.is_empty(),
+        "poll with since=last_id should return no messages"
+    );
+}
+
+#[tokio::test]
+async fn rest_send_without_token_returns_401() {
+    let (_tb, port) = TestBroker::start_with_ws("ws_noauth").await;
+    let base = format!("http://127.0.0.1:{port}");
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(format!("{base}/api/ws_noauth/send"))
+        .json(&serde_json::json!({"content": "should fail"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["code"], "missing_token");
+}
+
+#[tokio::test]
+async fn rest_send_with_invalid_token_returns_401() {
+    let (_tb, port) = TestBroker::start_with_ws("ws_badauth").await;
+    let base = format!("http://127.0.0.1:{port}");
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(format!("{base}/api/ws_badauth/send"))
+        .header("Authorization", "Bearer fake-token-123")
+        .json(&serde_json::json!({"content": "should fail"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["code"], "invalid_token");
+}
+
+#[tokio::test]
+async fn rest_wrong_room_returns_404() {
+    let (_tb, port) = TestBroker::start_with_ws("ws_404room").await;
+    let base = format!("http://127.0.0.1:{port}");
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(format!("{base}/api/wrong_room/join"))
+        .json(&serde_json::json!({"username": "nobody"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["code"], "room_not_found");
+}
+
+#[tokio::test]
+async fn rest_duplicate_join_returns_409() {
+    let (_tb, port) = TestBroker::start_with_ws("ws_dupjoin").await;
+    let base = format!("http://127.0.0.1:{port}");
+    let client = reqwest::Client::new();
+
+    // First join succeeds.
+    let r1 = client
+        .post(format!("{base}/api/ws_dupjoin/join"))
+        .json(&serde_json::json!({"username": "dup_user"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r1.status(), 200);
+
+    // Second join with same name returns 409.
+    let r2 = client
+        .post(format!("{base}/api/ws_dupjoin/join"))
+        .json(&serde_json::json!({"username": "dup_user"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r2.status(), 409);
+    let body: serde_json::Value = r2.json().await.unwrap();
+    assert_eq!(body["code"], "username_taken");
+}
+
+#[tokio::test]
+async fn rest_send_dm_is_persisted() {
+    let (tb, port) = TestBroker::start_with_ws("ws_restdm").await;
+    let base = format!("http://127.0.0.1:{port}");
+    let client = reqwest::Client::new();
+
+    // Join sender.
+    let r1 = client
+        .post(format!("{base}/api/ws_restdm/join"))
+        .json(&serde_json::json!({"username": "sender"}))
+        .send()
+        .await
+        .unwrap();
+    let t1: serde_json::Value = r1.json().await.unwrap();
+    let token = t1["token"].as_str().unwrap();
+
+    // Join recipient (so the name is registered).
+    let _r2 = client
+        .post(format!("{base}/api/ws_restdm/join"))
+        .json(&serde_json::json!({"username": "recipient"}))
+        .send()
+        .await
+        .unwrap();
+
+    // Send DM.
+    let send_resp = client
+        .post(format!("{base}/api/ws_restdm/send"))
+        .header("Authorization", format!("Bearer {token}"))
+        .json(&serde_json::json!({"content": "secret DM", "to": "recipient"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(send_resp.status(), 200);
+    let send_body: serde_json::Value = send_resp.json().await.unwrap();
+    assert_eq!(send_body["type"], "dm");
+    assert_eq!(send_body["to"], "recipient");
+
+    // Verify persisted.
+    let history = history::load(&tb.chat_path).await.unwrap();
+    assert!(history
+        .iter()
+        .any(|m| matches!(m, Message::DirectMessage { content, to, .. } if content == "secret DM" && to == "recipient")));
 }
