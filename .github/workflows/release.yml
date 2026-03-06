@@ -102,3 +102,7 @@ jobs:
         run: sleep 30
       - name: Publish room-ralph
         run: cargo publish -p room-ralph --token ${{ secrets.CARGO_REGISTRY_TOKEN }} --allow-dirty
+      - name: Wait for crates.io index
+        run: sleep 30
+      - name: Publish agentroom (deprecation shim)
+        run: cargo publish -p agentroom --token ${{ secrets.CARGO_REGISTRY_TOKEN }} --allow-dirty
