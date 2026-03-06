@@ -169,10 +169,16 @@ pub async fn run(
         }
 
         let content_width = term_area.width.saturating_sub(2) as usize;
-        let visible_count = term_area
-            .height
-            .saturating_sub(input_box_height)
-            .saturating_sub(2) as usize;
+        // Compute visible message lines by pre-computing the layout split.
+        // This must match the Layout used in the draw closure so scroll
+        // clamping and viewport computation use the same height.
+        let msg_area_height = {
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(3), Constraint::Length(input_box_height)])
+                .split(Rect::new(0, 0, term_area.width, term_area.height));
+            chunks[0].height.saturating_sub(2) as usize
+        };
 
         let msg_texts: Vec<Text<'static>> = messages
             .iter()
@@ -185,7 +191,7 @@ pub async fn run(
         // Clamp scroll offset so it can't exceed scrollable range
         state.scroll_offset = state
             .scroll_offset
-            .min(total_lines.saturating_sub(visible_count));
+            .min(total_lines.saturating_sub(msg_area_height));
 
         terminal.draw(|f| {
             let chunks = Layout::default()
@@ -193,11 +199,8 @@ pub async fn run(
                 .constraints([Constraint::Min(3), Constraint::Length(input_box_height)])
                 .split(f.area());
 
-            // actual visible rows from layout (overrides approximation)
-            let actual_visible = chunks[0].height.saturating_sub(2) as usize;
-
             let view_bottom = total_lines.saturating_sub(state.scroll_offset);
-            let view_top = view_bottom.saturating_sub(actual_visible);
+            let view_top = view_bottom.saturating_sub(msg_area_height);
 
             let (start_msg_idx, skip_first) = find_view_start(&heights, view_top);
 
@@ -358,7 +361,7 @@ pub async fn run(
                         key,
                         &mut state,
                         &online_users,
-                        visible_count,
+                        msg_area_height,
                         input_content_width,
                     ) {
                         Some(Action::Send(payload)) => {

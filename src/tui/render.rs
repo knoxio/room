@@ -541,4 +541,96 @@ mod tests {
         });
         assert_eq!(c, PALETTE[hash % PALETTE.len()]);
     }
+
+    // ── find_view_start tests ────────────────────────────────────────────────
+
+    #[test]
+    fn find_view_start_single_line_messages() {
+        // 5 messages, each 1 line tall
+        let heights = [1, 1, 1, 1, 1];
+        assert_eq!(find_view_start(&heights, 0), (0, 0));
+        assert_eq!(find_view_start(&heights, 2), (2, 0));
+        assert_eq!(find_view_start(&heights, 4), (4, 0));
+    }
+
+    #[test]
+    fn find_view_start_multi_line_message_partial() {
+        // msg0: 1 line, msg1: 5 lines, msg2: 1 line = 7 total
+        let heights = [1, 5, 1];
+        // view_top=0 → start at msg0, skip 0
+        assert_eq!(find_view_start(&heights, 0), (0, 0));
+        // view_top=1 → start at msg1 (line 1 is first line of msg1), skip 0
+        assert_eq!(find_view_start(&heights, 1), (1, 0));
+        // view_top=2 → start at msg1, skip 1 line (show lines 2-5 of msg1)
+        assert_eq!(find_view_start(&heights, 2), (1, 1));
+        // view_top=3 → start at msg1, skip 2 lines
+        assert_eq!(find_view_start(&heights, 3), (1, 2));
+        // view_top=5 → start at msg1, skip 4 lines (show only last line of msg1)
+        assert_eq!(find_view_start(&heights, 5), (1, 4));
+        // view_top=6 → start at msg2, skip 0
+        assert_eq!(find_view_start(&heights, 6), (2, 0));
+    }
+
+    #[test]
+    fn find_view_start_past_end_returns_len() {
+        let heights = [1, 2];
+        // view_top=3 is exactly total_lines → past end
+        assert_eq!(find_view_start(&heights, 3), (2, 0));
+        // view_top=10 → way past end
+        assert_eq!(find_view_start(&heights, 10), (2, 0));
+    }
+
+    #[test]
+    fn find_view_start_empty_heights() {
+        let heights: [usize; 0] = [];
+        assert_eq!(find_view_start(&heights, 0), (0, 0));
+    }
+
+    #[test]
+    fn find_view_start_scroll_through_tall_message_line_by_line() {
+        // Simulate scrolling through a 10-line message with a 3-line viewport
+        let heights = [2, 10, 2]; // total = 14
+        let viewport = 3;
+
+        // scroll_offset goes from 0 to total-viewport = 11
+        // For each offset, verify the view start advances line by line
+        let expected: Vec<(usize, usize)> = vec![
+            // scroll_offset=0: vb=14, vt=11 → msg1 skip 9 (last line of 10-line msg)
+            (1, 9),
+            // scroll_offset=1: vb=13, vt=10 → msg1 skip 8
+            (1, 8),
+            // scroll_offset=2: vb=12, vt=9 → msg1 skip 7
+            (1, 7),
+            // scroll_offset=3: vb=11, vt=8 → msg1 skip 6
+            (1, 6),
+            // scroll_offset=4: vb=10, vt=7 → msg1 skip 5
+            (1, 5),
+            // scroll_offset=5: vb=9, vt=6 → msg1 skip 4
+            (1, 4),
+            // scroll_offset=6: vb=8, vt=5 → msg1 skip 3
+            (1, 3),
+            // scroll_offset=7: vb=7, vt=4 → msg1 skip 2
+            (1, 2),
+            // scroll_offset=8: vb=6, vt=3 → msg1 skip 1
+            (1, 1),
+            // scroll_offset=9: vb=5, vt=2 → msg1 skip 0
+            (1, 0),
+            // scroll_offset=10: vb=4, vt=1 → msg0 skip 1
+            (0, 1),
+            // scroll_offset=11: vb=3, vt=0 → msg0 skip 0
+            (0, 0),
+        ];
+
+        let total_lines: usize = heights.iter().sum();
+        for (offset, &(exp_msg, exp_skip)) in expected.iter().enumerate() {
+            let view_bottom = total_lines.saturating_sub(offset);
+            let view_top = view_bottom.saturating_sub(viewport);
+            let result = find_view_start(&heights, view_top);
+            assert_eq!(
+                result,
+                (exp_msg, exp_skip),
+                "scroll_offset={offset}, view_top={view_top}"
+            );
+        }
+    }
 }
