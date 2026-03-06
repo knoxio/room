@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
-use room::{broker::Broker, client::Client, history::default_chat_path, oneshot};
+use room_cli::{broker::Broker, client::Client, history::default_chat_path, oneshot};
 use tokio::net::UnixStream;
 
 #[derive(Subcommand, Debug)]

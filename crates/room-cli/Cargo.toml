@@ -1,0 +1,39 @@
+[package]
+name = "room-cli"
+version = "1.0.2"
+edition = "2021"
+description = "Multi-user chat room for agent/human coordination over Unix domain sockets"
+license = "MIT"
+repository = "https://github.com/knoxio/room"
+readme = "../../README.md"
+keywords = ["cli", "chat", "agents", "coordination", "tui"]
+categories = ["command-line-utilities", "asynchronous"]
+
+[lib]
+name = "room_cli"
+path = "src/lib.rs"
+
+[[bin]]
+name = "room"
+path = "src/main.rs"
+
+[dependencies]
+room-protocol = { path = "../room-protocol" }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+clap = { version = "4", features = ["derive"] }
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+ratatui = "0.30"
+crossterm = "0.29"
+anyhow = "1"
+unicode-width = "0.2"
+axum = { version = "0.8.8", features = ["ws"] }
+tower-http = { version = "0.6.8", features = ["cors"] }
+futures-util = { version = "=0.3.31", features = ["sink"] }
+
+[dev-dependencies]
+reqwest = { version = "0.13.2", features = ["json"] }
+tempfile = "3"
+tokio-tungstenite = "0.28"

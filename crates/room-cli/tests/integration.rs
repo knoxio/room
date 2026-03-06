@@ -5,7 +5,7 @@
 use std::{path::PathBuf, time::Duration};
 
 use futures_util::{SinkExt, StreamExt};
-use room::{
+use room_cli::{
     broker::Broker,
     history,
     message::{self, Message},
@@ -717,9 +717,9 @@ async fn dm_to_offline_user_is_persisted() {
 async fn writes_to_tmp_slash_directly() {
     let path = std::path::PathBuf::from("/tmp/room_test_direct.chat");
     let _ = tokio::fs::remove_file(&path).await;
-    let msg = room::message::make_message("r", "u", "test to /tmp");
-    room::history::append(&path, &msg).await.unwrap();
-    let loaded = room::history::load(&path).await.unwrap();
+    let msg = room_cli::message::make_message("r", "u", "test to /tmp");
+    room_cli::history::append(&path, &msg).await.unwrap();
+    let loaded = room_cli::history::load(&path).await.unwrap();
     assert_eq!(loaded.len(), 1);
     let _ = tokio::fs::remove_file(&path).await;
 }
@@ -841,7 +841,7 @@ async fn send_delivers_message_without_join_leave() {
         .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "alice"))
         .await;
 
-    room::oneshot::send_message(&broker.socket_path, "bot", "hello from bot")
+    room_cli::oneshot::send_message(&broker.socket_path, "bot", "hello from bot")
         .await
         .unwrap();
 
@@ -868,7 +868,7 @@ async fn send_delivers_message_without_join_leave() {
 async fn send_returns_echo_json() {
     let broker = TestBroker::start("t_send_echo").await;
 
-    let msg = room::oneshot::send_message(&broker.socket_path, "bot", "test echo")
+    let msg = room_cli::oneshot::send_message(&broker.socket_path, "bot", "test echo")
         .await
         .unwrap();
 
@@ -909,9 +909,10 @@ async fn poll_returns_messages_since_id() {
     let dir = tempfile::tempdir().unwrap();
     let cursor_path = dir.path().join("test.cursor");
 
-    let msgs = room::oneshot::poll_messages(&broker.chat_path, &cursor_path, None, Some(m1.id()))
-        .await
-        .unwrap();
+    let msgs =
+        room_cli::oneshot::poll_messages(&broker.chat_path, &cursor_path, None, Some(m1.id()))
+            .await
+            .unwrap();
 
     let contents: Vec<&str> = msgs
         .iter()
@@ -950,7 +951,7 @@ async fn poll_updates_cursor_file() {
     let cursor_path = dir.path().join("alice.cursor");
 
     // First poll: returns messages, writes cursor
-    let msgs = room::oneshot::poll_messages(&broker.chat_path, &cursor_path, None, None)
+    let msgs = room_cli::oneshot::poll_messages(&broker.chat_path, &cursor_path, None, None)
         .await
         .unwrap();
     assert!(!msgs.is_empty(), "first poll should return messages");
@@ -960,7 +961,7 @@ async fn poll_updates_cursor_file() {
     );
 
     // Second poll: cursor is up to date, nothing new
-    let msgs2 = room::oneshot::poll_messages(&broker.chat_path, &cursor_path, None, None)
+    let msgs2 = room_cli::oneshot::poll_messages(&broker.chat_path, &cursor_path, None, None)
         .await
         .unwrap();
     assert!(
@@ -976,10 +977,10 @@ async fn poll_with_no_broker_reads_file_directly() {
     let chat_path = dir.path().join("offline.chat");
     let cursor_path = dir.path().join("offline.cursor");
 
-    let msg = room::message::make_message("offline", "ghost", "written directly");
-    room::history::append(&chat_path, &msg).await.unwrap();
+    let msg = room_cli::message::make_message("offline", "ghost", "written directly");
+    room_cli::history::append(&chat_path, &msg).await.unwrap();
 
-    let msgs = room::oneshot::poll_messages(&chat_path, &cursor_path, None, None)
+    let msgs = room_cli::oneshot::poll_messages(&chat_path, &cursor_path, None, None)
         .await
         .unwrap();
 
@@ -993,7 +994,7 @@ async fn send_fails_when_no_broker() {
     let dir = tempfile::tempdir().unwrap();
     let socket_path = dir.path().join("nonexistent.sock");
 
-    let result = room::oneshot::send_message(&socket_path, "bot", "hello").await;
+    let result = room_cli::oneshot::send_message(&socket_path, "bot", "hello").await;
     assert!(
         result.is_err(),
         "send should fail when no broker is running"
@@ -1033,7 +1034,7 @@ async fn oneshot_send_dm_is_routed_privately() {
 
     // "agent" sends a one-shot DM to bob
     let wire = serde_json::json!({"type": "dm", "to": "bob", "content": "secret"}).to_string();
-    room::oneshot::send_message(&broker.socket_path, "agent", &wire)
+    room_cli::oneshot::send_message(&broker.socket_path, "agent", &wire)
         .await
         .unwrap();
 
@@ -1091,11 +1092,11 @@ async fn poll_filters_dm_for_non_party_viewer() {
     let cursor_path = dir.path().join("carol.cursor");
 
     // Write a DM between alice and bob directly into the chat file
-    let dm = room::message::make_dm("r", "alice", "bob", "eyes only");
-    room::history::append(&chat_path, &dm).await.unwrap();
+    let dm = room_cli::message::make_dm("r", "alice", "bob", "eyes only");
+    room_cli::history::append(&chat_path, &dm).await.unwrap();
 
     // carol is not party to the DM — she should see nothing
-    let msgs = room::oneshot::poll_messages(&chat_path, &cursor_path, Some("carol"), None)
+    let msgs = room_cli::oneshot::poll_messages(&chat_path, &cursor_path, Some("carol"), None)
         .await
         .unwrap();
     assert!(
@@ -1105,14 +1106,14 @@ async fn poll_filters_dm_for_non_party_viewer() {
 
     // alice (sender) should see it
     let alice_cursor = dir.path().join("alice.cursor");
-    let msgs = room::oneshot::poll_messages(&chat_path, &alice_cursor, Some("alice"), None)
+    let msgs = room_cli::oneshot::poll_messages(&chat_path, &alice_cursor, Some("alice"), None)
         .await
         .unwrap();
     assert_eq!(msgs.len(), 1, "alice should see the DM she sent");
 
     // bob (recipient) should see it
     let bob_cursor = dir.path().join("bob.cursor");
-    let msgs = room::oneshot::poll_messages(&chat_path, &bob_cursor, Some("bob"), None)
+    let msgs = room_cli::oneshot::poll_messages(&chat_path, &bob_cursor, Some("bob"), None)
         .await
         .unwrap();
     assert_eq!(msgs.len(), 1, "bob should see the DM addressed to him");
@@ -1126,8 +1127,8 @@ async fn history_replay_filters_dm_for_non_party() {
     let chat_path = dir.path().join("replay_dm.chat");
 
     // Pre-seed history with a DM between bob and carol (alice will be host later)
-    let dm = room::message::make_dm("replay_dm", "bob", "carol", "for bob and carol only");
-    room::history::append(&chat_path, &dm).await.unwrap();
+    let dm = room_cli::message::make_dm("replay_dm", "bob", "carol", "for bob and carol only");
+    room_cli::history::append(&chat_path, &dm).await.unwrap();
 
     let broker = Broker::new("replay_dm", chat_path, socket_path.clone(), None);
     tokio::spawn(async move { broker.run().await.ok() });
@@ -1225,7 +1226,7 @@ async fn who_excludes_disconnected_users() {
 #[tokio::test]
 async fn join_session_returns_token() {
     let broker = TestBroker::start("t_join_token").await;
-    let (username, token) = room::oneshot::join_session(&broker.socket_path, "agent1")
+    let (username, token) = room_cli::oneshot::join_session(&broker.socket_path, "agent1")
         .await
         .expect("join_session failed");
     assert_eq!(username, "agent1");
@@ -1236,10 +1237,10 @@ async fn join_session_returns_token() {
 #[tokio::test]
 async fn join_session_rejects_duplicate_username() {
     let broker = TestBroker::start("t_join_dup").await;
-    room::oneshot::join_session(&broker.socket_path, "bot")
+    room_cli::oneshot::join_session(&broker.socket_path, "bot")
         .await
         .expect("first join failed");
-    let err = room::oneshot::join_session(&broker.socket_path, "bot")
+    let err = room_cli::oneshot::join_session(&broker.socket_path, "bot")
         .await
         .expect_err("second join should have failed");
     assert!(
@@ -1252,10 +1253,10 @@ async fn join_session_rejects_duplicate_username() {
 #[tokio::test]
 async fn join_session_allows_different_usernames() {
     let broker = TestBroker::start("t_join_two").await;
-    let (_, tok1) = room::oneshot::join_session(&broker.socket_path, "alice")
+    let (_, tok1) = room_cli::oneshot::join_session(&broker.socket_path, "alice")
         .await
         .expect("alice join failed");
-    let (_, tok2) = room::oneshot::join_session(&broker.socket_path, "bob")
+    let (_, tok2) = room_cli::oneshot::join_session(&broker.socket_path, "bob")
         .await
         .expect("bob join failed");
     assert_ne!(tok1, tok2, "each user must receive a distinct token");
@@ -1271,12 +1272,12 @@ async fn send_with_token_delivers_message() {
         .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "watcher"))
         .await;
 
-    let (_, token) = room::oneshot::join_session(&broker.socket_path, "agent")
+    let (_, token) = room_cli::oneshot::join_session(&broker.socket_path, "agent")
         .await
         .expect("join_session failed");
 
     let wire = serde_json::json!({"type": "message", "content": "hello from token"}).to_string();
-    let msg = room::oneshot::send_message_with_token(&broker.socket_path, &token, &wire)
+    let msg = room_cli::oneshot::send_message_with_token(&broker.socket_path, &token, &wire)
         .await
         .expect("send_message_with_token failed");
 
@@ -1301,7 +1302,7 @@ async fn send_with_invalid_token_returns_error() {
     let broker = TestBroker::start("t_invalid_token").await;
     let wire = serde_json::json!({"type": "message", "content": "hi"}).to_string();
     let err =
-        room::oneshot::send_message_with_token(&broker.socket_path, "not-a-real-token", &wire)
+        room_cli::oneshot::send_message_with_token(&broker.socket_path, "not-a-real-token", &wire)
             .await
             .expect_err("should have failed with invalid token");
     assert!(
@@ -1314,14 +1315,14 @@ async fn send_with_invalid_token_returns_error() {
 #[tokio::test]
 async fn token_is_reusable_across_sends() {
     let broker = TestBroker::start("t_token_reuse").await;
-    let (_, token) = room::oneshot::join_session(&broker.socket_path, "agent")
+    let (_, token) = room_cli::oneshot::join_session(&broker.socket_path, "agent")
         .await
         .expect("join_session failed");
 
     for i in 0..2u8 {
         let wire =
             serde_json::json!({"type": "message", "content": format!("msg {i}")}).to_string();
-        room::oneshot::send_message_with_token(&broker.socket_path, &token, &wire)
+        room_cli::oneshot::send_message_with_token(&broker.socket_path, &token, &wire)
             .await
             .unwrap_or_else(|e| panic!("send {i} failed: {e}"));
     }
@@ -1339,7 +1340,7 @@ async fn admin_kick_invalidates_token() {
         .recv_until(|m| matches!(m, Message::Join { .. }))
         .await;
 
-    let (_, victim_token) = room::oneshot::join_session(&broker.socket_path, "victim")
+    let (_, victim_token) = room_cli::oneshot::join_session(&broker.socket_path, "victim")
         .await
         .expect("join failed");
 
@@ -1359,7 +1360,7 @@ async fn admin_kick_invalidates_token() {
 
     // Victim's token is now invalid
     let wire = serde_json::json!({"type": "message", "content": "sneaky"}).to_string();
-    let err = room::oneshot::send_message_with_token(&broker.socket_path, &victim_token, &wire)
+    let err = room_cli::oneshot::send_message_with_token(&broker.socket_path, &victim_token, &wire)
         .await
         .expect_err("send with kicked token should fail");
     assert!(
@@ -1377,10 +1378,10 @@ async fn admin_kick_two_users_both_blocked() {
         .recv_until(|m| matches!(m, Message::Join { .. }))
         .await;
 
-    let (_, tok_a) = room::oneshot::join_session(&broker.socket_path, "alice")
+    let (_, tok_a) = room_cli::oneshot::join_session(&broker.socket_path, "alice")
         .await
         .unwrap();
-    let (_, tok_b) = room::oneshot::join_session(&broker.socket_path, "bob")
+    let (_, tok_b) = room_cli::oneshot::join_session(&broker.socket_path, "bob")
         .await
         .unwrap();
 
@@ -1400,7 +1401,8 @@ async fn admin_kick_two_users_both_blocked() {
 
     let wire = serde_json::json!({"type": "message", "content": "x"}).to_string();
     for (user, tok) in [("alice", &tok_a), ("bob", &tok_b)] {
-        let result = room::oneshot::send_message_with_token(&broker.socket_path, tok, &wire).await;
+        let result =
+            room_cli::oneshot::send_message_with_token(&broker.socket_path, tok, &wire).await;
         assert!(
             result.is_err(),
             "{user} should still be blocked after two kicks"
@@ -1418,12 +1420,12 @@ async fn admin_reauth_allows_rejoin() {
         .await;
 
     // Join as "alice" to register the username
-    let (_, _alice_token) = room::oneshot::join_session(&broker.socket_path, "alice")
+    let (_, _alice_token) = room_cli::oneshot::join_session(&broker.socket_path, "alice")
         .await
         .expect("alice join failed");
 
     // Alice is now registered; a second join would fail
-    let err = room::oneshot::join_session(&broker.socket_path, "alice")
+    let err = room_cli::oneshot::join_session(&broker.socket_path, "alice")
         .await
         .expect_err("duplicate alice join should fail");
     assert!(err.to_string().contains("username_taken") || err.to_string().contains("alice"));
@@ -1437,7 +1439,7 @@ async fn admin_reauth_allows_rejoin() {
         .await;
 
     // Now alice can rejoin
-    let result = room::oneshot::join_session(&broker.socket_path, "alice").await;
+    let result = room_cli::oneshot::join_session(&broker.socket_path, "alice").await;
     assert!(
         result.is_ok(),
         "alice should be able to rejoin after reauth"
@@ -1453,10 +1455,10 @@ async fn admin_clear_tokens_blocks_all_sends() {
         .recv_until(|m| matches!(m, Message::Join { .. }))
         .await;
 
-    let (_, tok1) = room::oneshot::join_session(&broker.socket_path, "u1")
+    let (_, tok1) = room_cli::oneshot::join_session(&broker.socket_path, "u1")
         .await
         .unwrap();
-    let (_, tok2) = room::oneshot::join_session(&broker.socket_path, "u2")
+    let (_, tok2) = room_cli::oneshot::join_session(&broker.socket_path, "u2")
         .await
         .unwrap();
 
@@ -1469,7 +1471,8 @@ async fn admin_clear_tokens_blocks_all_sends() {
 
     for (user, tok) in [("u1", &tok1), ("u2", &tok2)] {
         let wire = serde_json::json!({"type": "message", "content": "hi"}).to_string();
-        let result = room::oneshot::send_message_with_token(&broker.socket_path, tok, &wire).await;
+        let result =
+            room_cli::oneshot::send_message_with_token(&broker.socket_path, tok, &wire).await;
         assert!(
             result.is_err(),
             "send from {user} should fail after clear-tokens"
@@ -1488,7 +1491,7 @@ async fn admin_clear_history() {
 
     // Write something to history first
     let wire = serde_json::json!({"type": "message", "content": "keep me"}).to_string();
-    room::oneshot::send_message(&broker.socket_path, "admin", &wire)
+    room_cli::oneshot::send_message(&broker.socket_path, "admin", &wire)
         .await
         .unwrap();
 
@@ -1626,7 +1629,7 @@ async fn pull_messages_returns_last_n() {
     // Give broker time to flush writes
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    let msgs = room::oneshot::pull_messages(&broker.chat_path, 3, None)
+    let msgs = room_cli::oneshot::pull_messages(&broker.chat_path, 3, None)
         .await
         .unwrap();
     // Last 3 of 5 messages sent
@@ -1659,7 +1662,7 @@ async fn pull_messages_returns_all_when_fewer_than_n() {
 
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    let msgs = room::oneshot::pull_messages(&broker.chat_path, 100, None)
+    let msgs = room_cli::oneshot::pull_messages(&broker.chat_path, 100, None)
         .await
         .unwrap();
     assert!(
@@ -1675,7 +1678,7 @@ async fn pull_messages_empty_history_returns_empty() {
     let dir = tempfile::tempdir().unwrap();
     let chat_path = dir.path().join("empty.chat");
     // file does not exist yet
-    let msgs = room::oneshot::pull_messages(&chat_path, 20, None)
+    let msgs = room_cli::oneshot::pull_messages(&chat_path, 20, None)
         .await
         .unwrap();
     assert!(msgs.is_empty());
@@ -1698,15 +1701,15 @@ async fn pull_messages_does_not_update_cursor() {
     std::fs::write(&meta_path, format!("{meta}\n")).unwrap();
 
     // Join to obtain a token and write the token file.
-    let (_user, token) = room::oneshot::join_session(&broker.socket_path, "alice")
+    let (_user, token) = room_cli::oneshot::join_session(&broker.socket_path, "alice")
         .await
         .unwrap();
-    let token_path = room::oneshot::token_file_path(room_id, "alice");
+    let token_path = room_cli::oneshot::token_file_path(room_id, "alice");
     let token_data = serde_json::json!({ "username": "alice", "token": token });
     std::fs::write(&token_path, format!("{token_data}\n")).unwrap();
 
     // Send first message via one-shot.
-    room::oneshot::send_message_with_token(
+    room_cli::oneshot::send_message_with_token(
         &broker.socket_path,
         &token,
         r#"{"type":"message","content":"first"}"#,
@@ -1716,7 +1719,7 @@ async fn pull_messages_does_not_update_cursor() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // cmd_poll advances the canonical cursor.
-    room::oneshot::cmd_poll(room_id, &token, None)
+    room_cli::oneshot::cmd_poll(room_id, &token, None)
         .await
         .unwrap();
 
@@ -1724,7 +1727,7 @@ async fn pull_messages_does_not_update_cursor() {
     let cursor_after_poll = std::fs::read_to_string(&cursor_path).unwrap();
 
     // Send a second message after the cursor.
-    room::oneshot::send_message_with_token(
+    room_cli::oneshot::send_message_with_token(
         &broker.socket_path,
         &token,
         r#"{"type":"message","content":"second"}"#,
@@ -1734,7 +1737,9 @@ async fn pull_messages_does_not_update_cursor() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // cmd_pull must not move the cursor.
-    room::oneshot::cmd_pull(room_id, &token, 5).await.unwrap();
+    room_cli::oneshot::cmd_pull(room_id, &token, 5)
+        .await
+        .unwrap();
 
     let cursor_after_pull = std::fs::read_to_string(&cursor_path).unwrap();
     assert_eq!(
@@ -1743,7 +1748,7 @@ async fn pull_messages_does_not_update_cursor() {
     );
 
     // Verify poll still returns "second" (cursor was not consumed by pull).
-    let msgs = room::oneshot::poll_messages(
+    let msgs = room_cli::oneshot::poll_messages(
         &broker.chat_path,
         &cursor_path,
         Some("alice"),
@@ -1799,7 +1804,7 @@ async fn pull_messages_filters_dms_for_viewer() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // carol (a third party) pulls history — should not see the DM
-    let carol_msgs = room::oneshot::pull_messages(&broker.chat_path, 50, Some("carol"))
+    let carol_msgs = room_cli::oneshot::pull_messages(&broker.chat_path, 50, Some("carol"))
         .await
         .unwrap();
     assert!(
@@ -1810,7 +1815,7 @@ async fn pull_messages_filters_dms_for_viewer() {
     );
 
     // alice pulls — should see the DM
-    let alice_msgs = room::oneshot::pull_messages(&broker.chat_path, 50, Some("alice"))
+    let alice_msgs = room_cli::oneshot::pull_messages(&broker.chat_path, 50, Some("alice"))
         .await
         .unwrap();
     assert!(
@@ -1872,12 +1877,12 @@ async fn oneshot_who_returns_user_list() {
         .recv_until(|m| matches!(m, Message::Join { .. }))
         .await;
 
-    let (_, tok) = room::oneshot::join_session(&broker.socket_path, "bot")
+    let (_, tok) = room_cli::oneshot::join_session(&broker.socket_path, "bot")
         .await
         .unwrap();
 
     let wire = serde_json::json!({"type":"command","cmd":"who","params":[]}).to_string();
-    let msg = room::oneshot::send_message_with_token(&broker.socket_path, &tok, &wire)
+    let msg = room_cli::oneshot::send_message_with_token(&broker.socket_path, &tok, &wire)
         .await
         .expect("oneshot /who should succeed");
 
@@ -1923,10 +1928,10 @@ async fn non_host_admin_cmd_is_rejected() {
         .await;
 
     // bot joins via token (oneshot JOIN), then attempts /kick alice
-    let (_, tok) = room::oneshot::join_session(&broker.socket_path, "bot")
+    let (_, tok) = room_cli::oneshot::join_session(&broker.socket_path, "bot")
         .await
         .unwrap();
-    let msg = room::oneshot::send_message_with_token(
+    let msg = room_cli::oneshot::send_message_with_token(
         &broker.socket_path,
         &tok,
         r#"{"type":"command","cmd":"kick","params":["alice"]}"#,
