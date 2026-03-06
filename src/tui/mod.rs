@@ -344,7 +344,13 @@ pub async fn run(
         if event::poll(std::time::Duration::from_millis(50))? {
             match event::read()? {
                 Event::Key(key) => {
-                    match handle_key(key, &mut state, &online_users, visible_count) {
+                    match handle_key(
+                        key,
+                        &mut state,
+                        &online_users,
+                        visible_count,
+                        input_content_width,
+                    ) {
                         Some(Action::Send(payload)) => {
                             if let Err(e) = write_half
                                 .write_all(format!("{payload}\n").as_bytes())

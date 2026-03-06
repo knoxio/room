@@ -48,6 +48,7 @@ pub(super) fn handle_key(
     state: &mut InputState,
     online_users: &[String],
     visible_count: usize,
+    input_width: usize,
 ) -> Option<Action> {
     match key.code {
         KeyCode::Esc => {
@@ -119,7 +120,14 @@ pub(super) fn handle_key(
             } else if state.palette.active {
                 state.palette.move_up();
             } else {
-                state.scroll_offset = state.scroll_offset.saturating_add(1);
+                let (cur_row, cur_col) =
+                    cursor_display_pos(&state.input, state.cursor_pos, input_width);
+                if cur_row > 0 {
+                    state.cursor_pos =
+                        byte_offset_at_display_pos(&state.input, cur_row - 1, cur_col, input_width);
+                } else {
+                    state.scroll_offset = state.scroll_offset.saturating_add(1);
+                }
             }
         }
         KeyCode::Down => {
@@ -128,7 +136,15 @@ pub(super) fn handle_key(
             } else if state.palette.active {
                 state.palette.move_down();
             } else {
-                state.scroll_offset = state.scroll_offset.saturating_sub(1);
+                let (cur_row, cur_col) =
+                    cursor_display_pos(&state.input, state.cursor_pos, input_width);
+                let last_row = cursor_display_pos(&state.input, state.input.len(), input_width).0;
+                if cur_row < last_row {
+                    state.cursor_pos =
+                        byte_offset_at_display_pos(&state.input, cur_row + 1, cur_col, input_width);
+                } else {
+                    state.scroll_offset = state.scroll_offset.saturating_sub(1);
+                }
             }
         }
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -299,6 +315,56 @@ pub(super) fn cursor_display_pos(input: &str, cursor_pos: usize, width: usize) -
         col = 0;
     }
     (row, col)
+}
+
+/// Given a target `(display_row, display_col)` in the wrapped display of `input`,
+/// return the byte offset into `input` that corresponds to that position.
+///
+/// Uses the same wrapping logic as [`wrap_input_display`] and [`cursor_display_pos`].
+/// If `target_col` is beyond the end of `target_row`, the returned offset is
+/// clamped to the last character position in that row (before any soft-wrap or newline).
+pub(super) fn byte_offset_at_display_pos(
+    input: &str,
+    target_row: usize,
+    target_col: usize,
+    width: usize,
+) -> usize {
+    let mut row: usize = 0;
+    let mut col: usize = 0;
+
+    for (i, ch) in input.char_indices() {
+        if row == target_row {
+            if col >= target_col {
+                return i;
+            }
+            // About to advance past the target row — clamp before the newline.
+            if ch == '\n' {
+                return i;
+            }
+        }
+
+        if ch == '\n' {
+            row += 1;
+            col = 0;
+        } else {
+            let w = ch.width().unwrap_or(0);
+            if width > 0 && col + w > width && col > 0 {
+                // This character starts a new soft-wrapped row.
+                if row == target_row {
+                    // target_col was beyond the end of the soft-wrapped row.
+                    return i;
+                }
+                row += 1;
+                col = 0;
+                if row == target_row && col >= target_col {
+                    return i;
+                }
+            }
+            col += w;
+        }
+    }
+
+    input.len()
 }
 
 /// If the cursor is currently within a `@mention` context — i.e. there is an
@@ -691,8 +757,8 @@ mod tests {
     #[test]
     fn typing_chars_appends_to_input() {
         let mut state = InputState::new();
-        handle_key(make_key(KeyCode::Char('h')), &mut state, &[], 10);
-        handle_key(make_key(KeyCode::Char('i')), &mut state, &[], 10);
+        handle_key(make_key(KeyCode::Char('h')), &mut state, &[], 10, 80);
+        handle_key(make_key(KeyCode::Char('i')), &mut state, &[], 10, 80);
         assert_eq!(state.input, "hi");
         assert_eq!(state.cursor_pos, 2);
     }
@@ -700,7 +766,7 @@ mod tests {
     #[test]
     fn enter_on_empty_input_does_nothing() {
         let mut state = InputState::new();
-        let action = handle_key(make_key(KeyCode::Enter), &mut state, &[], 10);
+        let action = handle_key(make_key(KeyCode::Enter), &mut state, &[], 10, 80);
         assert!(action.is_none());
         assert!(state.input.is_empty());
     }
@@ -710,7 +776,7 @@ mod tests {
         let mut state = InputState::new();
         state.input = "hello".to_owned();
         state.cursor_pos = 5;
-        let action = handle_key(make_key(KeyCode::Enter), &mut state, &[], 10);
+        let action = handle_key(make_key(KeyCode::Enter), &mut state, &[], 10, 80);
         assert!(matches!(action, Some(Action::Send(_))));
         assert!(state.input.is_empty());
         assert_eq!(state.cursor_pos, 0);
@@ -724,6 +790,7 @@ mod tests {
             &mut state,
             &[],
             10,
+            80,
         );
         assert!(matches!(action, Some(Action::Quit)));
     }
@@ -733,7 +800,7 @@ mod tests {
         let mut state = InputState::new();
         state.input = "hi".to_owned();
         state.cursor_pos = 2;
-        handle_key(make_key(KeyCode::Backspace), &mut state, &[], 10);
+        handle_key(make_key(KeyCode::Backspace), &mut state, &[], 10, 80);
         assert_eq!(state.input, "h");
         assert_eq!(state.cursor_pos, 1);
     }
@@ -743,7 +810,7 @@ mod tests {
         let mut state = InputState::new();
         state.input = "abc".to_owned();
         state.cursor_pos = 3;
-        handle_key(make_key(KeyCode::Left), &mut state, &[], 10);
+        handle_key(make_key(KeyCode::Left), &mut state, &[], 10, 80);
         assert_eq!(state.cursor_pos, 2);
     }
 
@@ -752,7 +819,7 @@ mod tests {
         let mut state = InputState::new();
         state.input = "abc".to_owned();
         state.cursor_pos = 1;
-        handle_key(make_key(KeyCode::Right), &mut state, &[], 10);
+        handle_key(make_key(KeyCode::Right), &mut state, &[], 10, 80);
         assert_eq!(state.cursor_pos, 2);
     }
 
@@ -761,7 +828,7 @@ mod tests {
         let mut state = InputState::new();
         state.input = "hello".to_owned();
         state.cursor_pos = 5;
-        handle_key(make_key(KeyCode::Home), &mut state, &[], 10);
+        handle_key(make_key(KeyCode::Home), &mut state, &[], 10, 80);
         assert_eq!(state.cursor_pos, 0);
     }
 
@@ -770,30 +837,98 @@ mod tests {
         let mut state = InputState::new();
         state.input = "hello".to_owned();
         state.cursor_pos = 0;
-        handle_key(make_key(KeyCode::End), &mut state, &[], 10);
+        handle_key(make_key(KeyCode::End), &mut state, &[], 10, 80);
         assert_eq!(state.cursor_pos, 5);
     }
 
+    /// Up on single-line (row 0) input scrolls message history.
     #[test]
-    fn up_arrow_scrolls_history() {
+    fn up_arrow_on_single_line_scrolls_history() {
         let mut state = InputState::new();
         state.scroll_offset = 0;
-        handle_key(make_key(KeyCode::Up), &mut state, &[], 10);
+        handle_key(make_key(KeyCode::Up), &mut state, &[], 10, 80);
         assert_eq!(state.scroll_offset, 1);
     }
 
+    /// Down on single-line input (already at last row) decrements scroll.
     #[test]
-    fn down_arrow_clamps_scroll_at_zero() {
+    fn down_arrow_on_single_line_clamps_scroll_at_zero() {
         let mut state = InputState::new();
         state.scroll_offset = 0;
-        handle_key(make_key(KeyCode::Down), &mut state, &[], 10);
+        handle_key(make_key(KeyCode::Down), &mut state, &[], 10, 80);
         assert_eq!(state.scroll_offset, 0);
+    }
+
+    /// Up on second row of multiline input moves cursor to first row.
+    #[test]
+    fn up_arrow_on_multiline_moves_cursor_to_previous_row() {
+        let mut state = InputState::new();
+        state.input = "hello\nworld".to_owned();
+        // cursor at 'o' (index 8) on row 1, col 2
+        state.cursor_pos = 8;
+        state.scroll_offset = 5;
+        handle_key(make_key(KeyCode::Up), &mut state, &[], 10, 80);
+        // Should move to row 0 col 2 = byte 2 ('l' in "hello")
+        assert_eq!(state.cursor_pos, 2);
+        // scroll_offset must not change
+        assert_eq!(state.scroll_offset, 5);
+    }
+
+    /// Down on first row of multiline input moves cursor to second row.
+    #[test]
+    fn down_arrow_on_multiline_moves_cursor_to_next_row() {
+        let mut state = InputState::new();
+        state.input = "hello\nworld".to_owned();
+        // cursor at 'l' (index 2) on row 0, col 2
+        state.cursor_pos = 2;
+        state.scroll_offset = 3;
+        handle_key(make_key(KeyCode::Down), &mut state, &[], 10, 80);
+        // Should move to row 1 col 2 = byte 8 ('r' in "world")
+        assert_eq!(state.cursor_pos, 8);
+        assert_eq!(state.scroll_offset, 3);
+    }
+
+    /// Up on the first row of a multiline input scrolls history, not moves cursor.
+    #[test]
+    fn up_arrow_on_first_row_of_multiline_scrolls_history() {
+        let mut state = InputState::new();
+        state.input = "hello\nworld".to_owned();
+        state.cursor_pos = 2; // row 0
+        state.scroll_offset = 0;
+        handle_key(make_key(KeyCode::Up), &mut state, &[], 10, 80);
+        assert_eq!(state.scroll_offset, 1);
+        assert_eq!(state.cursor_pos, 2); // unchanged
+    }
+
+    /// Down on the last row of a multiline input scrolls history.
+    #[test]
+    fn down_arrow_on_last_row_of_multiline_scrolls_history() {
+        let mut state = InputState::new();
+        state.input = "hello\nworld".to_owned();
+        state.cursor_pos = 8; // row 1 (last)
+        state.scroll_offset = 4;
+        handle_key(make_key(KeyCode::Down), &mut state, &[], 10, 80);
+        assert_eq!(state.scroll_offset, 3); // decremented
+        assert_eq!(state.cursor_pos, 8); // unchanged
+    }
+
+    /// Up clamps target column to the end of a shorter previous row.
+    #[test]
+    fn up_arrow_clamps_column_to_end_of_shorter_row() {
+        let mut state = InputState::new();
+        // row 0 = "hi" (2 chars), row 1 = "world" (5 chars)
+        state.input = "hi\nworld".to_owned();
+        // cursor at 'l' (index 6) on row 1, col 3
+        state.cursor_pos = 6;
+        handle_key(make_key(KeyCode::Up), &mut state, &[], 10, 80);
+        // row 0 only has col 0-2; col 3 clamps to end = byte 2 (position of '\n')
+        assert_eq!(state.cursor_pos, 2);
     }
 
     #[test]
     fn page_up_scrolls_by_visible_count() {
         let mut state = InputState::new();
-        handle_key(make_key(KeyCode::PageUp), &mut state, &[], 10);
+        handle_key(make_key(KeyCode::PageUp), &mut state, &[], 10, 80);
         assert_eq!(state.scroll_offset, 10);
     }
 
@@ -807,6 +942,7 @@ mod tests {
             &mut state,
             &[],
             10,
+            80,
         );
         assert_eq!(state.input, "hello\n");
         assert_eq!(state.cursor_pos, 6);
@@ -815,7 +951,7 @@ mod tests {
     #[test]
     fn slash_activates_palette() {
         let mut state = InputState::new();
-        handle_key(make_key(KeyCode::Char('/')), &mut state, &[], 10);
+        handle_key(make_key(KeyCode::Char('/')), &mut state, &[], 10, 80);
         assert!(state.palette.active);
     }
 
@@ -823,7 +959,7 @@ mod tests {
     fn esc_deactivates_palette() {
         let mut state = InputState::new();
         state.palette.activate();
-        handle_key(make_key(KeyCode::Esc), &mut state, &[], 10);
+        handle_key(make_key(KeyCode::Esc), &mut state, &[], 10, 80);
         assert!(!state.palette.active);
     }
 
@@ -831,7 +967,7 @@ mod tests {
     fn at_char_activates_mention_picker_when_users_present() {
         let mut state = InputState::new();
         let users = vec!["alice".to_owned(), "bob".to_owned()];
-        handle_key(make_key(KeyCode::Char('@')), &mut state, &users, 10);
+        handle_key(make_key(KeyCode::Char('@')), &mut state, &users, 10, 80);
         assert!(state.mention.active);
     }
 
@@ -840,7 +976,7 @@ mod tests {
         let mut state = InputState::new();
         state.input = "hello world".to_owned();
         state.cursor_pos = 11;
-        let action = handle_key(make_key(KeyCode::Enter), &mut state, &[], 10);
+        let action = handle_key(make_key(KeyCode::Enter), &mut state, &[], 10, 80);
         if let Some(Action::Send(payload)) = action {
             let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
             assert_eq!(v["type"], "message");
@@ -848,5 +984,44 @@ mod tests {
         } else {
             panic!("expected Action::Send");
         }
+    }
+
+    // ── byte_offset_at_display_pos tests ─────────────────────────────────────
+
+    #[test]
+    fn byte_offset_single_row_exact_col() {
+        // "hello", width=80: row 0, col 3 → byte 3
+        assert_eq!(byte_offset_at_display_pos("hello", 0, 3, 80), 3);
+    }
+
+    #[test]
+    fn byte_offset_col_past_end_of_row_clamps_to_end() {
+        // "hi\nworld", row 0 only has 2 chars; col 10 → byte 2 (before '\n')
+        assert_eq!(byte_offset_at_display_pos("hi\nworld", 0, 10, 80), 2);
+    }
+
+    #[test]
+    fn byte_offset_second_logical_row() {
+        // "hello\nworld", row 1 col 3 → byte 9 ('l' in "world")
+        assert_eq!(byte_offset_at_display_pos("hello\nworld", 1, 3, 80), 9);
+    }
+
+    #[test]
+    fn byte_offset_soft_wrapped_row() {
+        // "abcdef" with width=3 wraps: row0="abc", row1="def"
+        // row 1, col 1 → byte 4 ('e')
+        assert_eq!(byte_offset_at_display_pos("abcdef", 1, 1, 3), 4);
+    }
+
+    #[test]
+    fn byte_offset_col_past_soft_wrapped_row_end() {
+        // "abcdef" width=3: row 0 ends at byte 3; col 10 clamps to byte 3
+        assert_eq!(byte_offset_at_display_pos("abcdef", 0, 10, 3), 3);
+    }
+
+    #[test]
+    fn byte_offset_end_of_input() {
+        // row beyond content → input.len()
+        assert_eq!(byte_offset_at_display_pos("hello", 5, 0, 80), 5);
     }
 }
