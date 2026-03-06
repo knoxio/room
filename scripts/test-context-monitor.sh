@@ -234,6 +234,39 @@ restart_summary=$(format_usage_summary 180000 3000)
 assert_eq "format_usage_summary: restart marker over threshold" \
   "1" "$(printf '%s' "$restart_summary" | grep -c 'RESTART' | tr -d ' ')"
 
+# ── parse_cost edge cases ─────────────────────────────────────────
+
+assert_eq "parse_cost: nested result path" \
+  "2.5" "$(parse_cost '{"result":{"usage":{"total_cost":2.5}}}')"
+
+assert_eq "parse_cost: invalid JSON returns 0" \
+  "0" "$(parse_cost 'not json')"
+
+# ── context_usage_pct edge cases ──────────────────────────────────
+
+assert_eq "context_usage_pct: over 100%" \
+  "150" "$(context_usage_pct 300000)"
+
+# ── log_usage: append to file with existing content ───────────────
+
+existing_progress="$tmpdir/existing.md"
+printf '# Progress\n\nSome existing content.\n' > "$existing_progress"
+log_usage 120000 "$existing_progress" 1000 2
+assert_eq "log_usage: appends to file with existing content" \
+  "1" "$(grep -c 'Context Usage' "$existing_progress" | tr -d ' ')"
+assert_eq "log_usage: preserves existing content" \
+  "1" "$(grep -c 'existing content' "$existing_progress" | tr -d ' ')"
+
+# ── format_usage_summary edge cases ──────────────────────────────
+
+at_threshold_summary=$(format_usage_summary 160000 1000)
+assert_eq "format_usage_summary: at exact threshold has RESTART" \
+  "1" "$(printf '%s' "$at_threshold_summary" | grep -c 'RESTART' | tr -d ' ')"
+
+zero_summary=$(format_usage_summary 0 0)
+assert_eq "format_usage_summary: zero tokens shows 0%" \
+  "1" "$(printf '%s' "$zero_summary" | grep -c '0%' | tr -d ' ')"
+
 # ── Results ─────────────────────────────────────────────────────────
 
 printf '\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n'

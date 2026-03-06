@@ -295,6 +295,123 @@ assert_contains "usage has --dry-run" \
 assert_contains "usage has progress file docs" \
     "room-progress" "$usage_output"
 
+echo ""
+echo "=== Parse args ==="
+
+# parse_args sets globals — test in subshells to avoid pollution
+(
+    # Reset defaults before parsing
+    MODEL="opus"; ISSUE=""; USE_TMUX=false; MAX_ITER=50; COOLDOWN=5
+    CUSTOM_PROMPT=""; DRY_RUN=false; ADD_DIRS=()
+    parse_args "myroom" "agent1" --model "sonnet" --issue "42" --max-iter 10 --cooldown 2
+    [[ "$MODEL" == "sonnet" ]] || exit 1
+    [[ "$ISSUE" == "42" ]] || exit 1
+    [[ "$MAX_ITER" -eq 10 ]] || exit 1
+    [[ "$COOLDOWN" -eq 2 ]] || exit 1
+    [[ "$ROOM_ID" == "myroom" ]] || exit 1
+    [[ "$USERNAME" == "agent1" ]] || exit 1
+)
+if [[ $? -eq 0 ]]; then
+    PASS=$((PASS + 1)); printf '  PASS: parse_args with all flags\n'
+else
+    FAIL=$((FAIL + 1)); printf '  FAIL: parse_args with all flags\n'
+fi
+
+(
+    MODEL="opus"; ISSUE=""; USE_TMUX=false; DRY_RUN=false; ADD_DIRS=()
+    parse_args "room1" "user1" --tmux --dry-run
+    [[ "$USE_TMUX" == "true" ]] || exit 1
+    [[ "$DRY_RUN" == "true" ]] || exit 1
+)
+if [[ $? -eq 0 ]]; then
+    PASS=$((PASS + 1)); printf '  PASS: parse_args boolean flags\n'
+else
+    FAIL=$((FAIL + 1)); printf '  FAIL: parse_args boolean flags\n'
+fi
+
+(
+    MODEL="opus"; ADD_DIRS=()
+    parse_args "room1" "user1" --add-dir "/tmp/dir1" --add-dir "/tmp/dir2"
+    [[ "${#ADD_DIRS[@]}" -eq 2 ]] || exit 1
+    [[ "${ADD_DIRS[0]}" == "/tmp/dir1" ]] || exit 1
+    [[ "${ADD_DIRS[1]}" == "/tmp/dir2" ]] || exit 1
+)
+if [[ $? -eq 0 ]]; then
+    PASS=$((PASS + 1)); printf '  PASS: parse_args repeatable --add-dir\n'
+else
+    FAIL=$((FAIL + 1)); printf '  FAIL: parse_args repeatable --add-dir\n'
+fi
+
+(
+    MODEL="opus"
+    parse_args "room1" "user1"
+    [[ "$MODEL" == "opus" ]] || exit 1
+    [[ "$ROOM_ID" == "room1" ]] || exit 1
+)
+if [[ $? -eq 0 ]]; then
+    PASS=$((PASS + 1)); printf '  PASS: parse_args defaults\n'
+else
+    FAIL=$((FAIL + 1)); printf '  FAIL: parse_args defaults\n'
+fi
+
+# Unknown option should fail
+(parse_args "room1" "user1" --unknown 2>/dev/null) && {
+    FAIL=$((FAIL + 1)); printf '  FAIL: parse_args unknown option should fail\n'
+} || {
+    PASS=$((PASS + 1)); printf '  PASS: parse_args unknown option rejected\n'
+}
+
+echo ""
+echo "=== Progress file truncation ==="
+
+TEMP_TRUNC="$(mktemp)"
+# Generate 100-line response (no trailing newline to avoid empty last line)
+long_response="$(printf '%s\n' $(seq 1 100) | sed 's/^/line /')"
+write_progress_file "$TEMP_TRUNC" 1 "99" "$long_response"
+
+# Last 50 lines should be present (51-100)
+if grep -q "line 100" "$TEMP_TRUNC"; then
+    PASS=$((PASS + 1)); printf '  PASS: truncation keeps line 100\n'
+else
+    FAIL=$((FAIL + 1)); printf '  FAIL: truncation missing line 100\n'
+fi
+
+if grep -q "line 52" "$TEMP_TRUNC"; then
+    PASS=$((PASS + 1)); printf '  PASS: truncation keeps line 52\n'
+else
+    FAIL=$((FAIL + 1)); printf '  FAIL: truncation missing line 52\n'
+fi
+
+# Line 1 should be truncated (not in last 50)
+if grep -q "^line 1$" "$TEMP_TRUNC"; then
+    FAIL=$((FAIL + 1)); printf '  FAIL: truncation should have removed line 1\n'
+else
+    PASS=$((PASS + 1)); printf '  PASS: truncation removed line 1\n'
+fi
+
+rm -f "$TEMP_TRUNC"
+
+echo ""
+echo "=== Context exhaustion edge cases ==="
+
+assert_exit "case insensitive: CONTEXT LIMIT" \
+    0 detect_context_exhaustion 1 "CONTEXT LIMIT EXCEEDED"
+
+assert_exit "case insensitive: Context Window" \
+    0 detect_context_exhaustion 1 "Context Window is full"
+
+assert_exit "context_length pattern" \
+    0 detect_context_exhaustion 1 "exceeds context length limit"
+
+echo ""
+echo "=== Token expiry edge cases ==="
+
+assert_exit "case insensitive: INVALID TOKEN" \
+    0 detect_token_expiry "Error: INVALID TOKEN"
+
+assert_exit "case insensitive: Token Expired" \
+    0 detect_token_expiry "Token Expired, please rejoin"
+
 # --- summary ---
 echo ""
 echo "=============================="
