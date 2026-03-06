@@ -8,7 +8,7 @@ use tokio::net::UnixStream;
 enum Cmd {
     /// Register a username with the broker and receive a session token.
     ///
-    /// Writes the token to `/tmp/room-<room_id>.token`. Subsequent `send`,
+    /// Writes the token to `/tmp/room-<room_id>-<username>.token`. Subsequent `send`,
     /// `poll`, and `watch` calls read the username and token from that file —
     /// no username argument required. Returns an error if the username is
     /// already in use in the room.

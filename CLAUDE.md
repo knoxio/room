@@ -157,7 +157,7 @@ src/
   oneshot.rs   — send_message / poll_messages (no persistent connection)
   lib.rs       — Re-exports all modules (required for integration tests)
 tests/
-  integration.rs — 36 integration tests against a live broker
+  integration.rs — 44 integration tests against a live broker
 ```
 
 Key invariants to preserve:

@@ -44,11 +44,27 @@ room myroom bob
 
 ## CLI reference
 
-### Join a room (default)
+### Join a session (required before send/poll/watch)
+
+```
+room join <room-id> <username>
+```
+
+Registers your username with the broker and receives a session token. Writes the token to `/tmp/room-<room-id>-<username>.token`. Run this once per broker lifetime — the token persists so subsequent `send`, `poll`, and `watch` calls find it automatically. Returns an error if the username is already taken in the room.
+
+```bash
+room join myroom bot
+# {"type":"token","token":"<uuid>","username":"bot"}
+# Token written to /tmp/room-myroom-bot.token
+```
+
+### Connect to a room (TUI)
 
 ```
 room <room-id> <username> [OPTIONS]
 ```
+
+Opens a full-screen terminal UI. This is the standard human-facing entry point. The first invocation in a room also starts the broker.
 
 | Argument / flag | Description |
 |---|---|
@@ -61,42 +77,63 @@ room <room-id> <username> [OPTIONS]
 ### One-shot send
 
 ```
-room send <room-id> <username> <message...>
+room send --token <token> <room-id> [<message>...]
 ```
 
-Connects to a running broker, delivers one message, prints the broadcast JSON to stdout, and exits. All tokens after `<username>` are joined into the message content. Requires a broker to be running.
+Connects to a running broker, delivers one message, prints the broadcast JSON to stdout, and exits. Requires a broker to be running and a valid session token from `room join`. All tokens after `<room-id>` are joined into the message content.
 
 ```bash
-room send myroom bot "hello from a script"
+room send --token <uuid> myroom hello from a script
 # {"type":"message","id":"...","room":"myroom","user":"bot","ts":"...","content":"hello from a script"}
 ```
+
+| Flag | Description |
+|---|---|
+| `-t, --token <token>` | Session token from `room join` (required) |
+| `--to <username>` | Send as a direct message to this user only |
 
 The printed JSON is the authoritative broadcast record — use its `id` as a `--since` cursor for `room poll`.
 
 ### Poll for new messages
 
 ```
-room poll <room-id> <username> [--since <id>]
+room poll --token <token> <room-id> [--since <id>]
 ```
 
 Reads the chat file directly (no socket, no broker required) and prints unseen messages as NDJSON to stdout, then exits. A per-user cursor file at `/tmp/room-<id>-<username>.cursor` tracks the last seen message ID so subsequent calls return only new content.
 
 | Flag | Description |
 |---|---|
+| `-t, --token <token>` | Session token from `room join` (required) |
 | `--since <id>` | Return only messages after this message ID. Overrides the stored cursor for this call. |
 
 ```bash
 # First call: prints all messages, writes cursor
-room poll myroom bot
+room poll --token <uuid> myroom
 
 # Second call: prints only messages since the cursor (nothing if up to date)
-room poll myroom bot
+room poll --token <uuid> myroom
 
 # Jump to a specific position
-room poll myroom bot --since "b5b6becb-..."
+room poll --token <uuid> myroom --since "b5b6becb-..."
 ```
 
 The cursor file is at `/tmp/room-<id>-<username>.cursor`. Delete it to reset to the beginning of history.
+
+### Watch for new messages
+
+```
+room watch --token <token> <room-id> [--interval <N>]
+```
+
+Polls the chat file on a configurable interval and blocks until at least one message from another user arrives, then prints those messages as NDJSON and exits. Shares the cursor file with `room poll` — no messages are re-delivered between the two commands.
+
+| Flag | Description |
+|---|---|
+| `-t, --token <token>` | Session token from `room join` (required) |
+| `--interval <N>` | Poll interval in seconds. Default: `5`. |
+
+Use this instead of a manual polling loop. See [Autonomous loop](#autonomous-loop-claude-code--sequential-tool-model) for the recommended pattern.
 
 ## TUI
 
@@ -121,6 +158,7 @@ Without `--agent`, `room` opens a full-screen terminal UI built with [ratatui](h
 | Key | Action |
 |---|---|
 | `Enter` | Send the current input |
+| `Shift+Enter` / `\` + `Enter` | Insert a newline (multi-line message) |
 | `Ctrl-C` | Quit |
 | `Up` / `Down` | Scroll message history one line |
 | `PageUp` / `PageDown` | Scroll ten lines |
@@ -134,13 +172,26 @@ Prefix your input with `/` to send a command instead of a plain message:
 /claim implement the auth module
 /set_status reviewing PRs
 /who
+/dm bob hey, can we sync?
 ```
 
 The command and its arguments are sent as a `command` message (see [Wire format](#wire-format)).
 
+**Admin commands (TUI only, backslash prefix):**
+
+Admin commands use a backslash prefix and are sent from the TUI input:
+
+| Command | Description |
+|---|---|
+| `\kick <username>` | Invalidates the user's token — they cannot send further messages. Their username remains reserved; use `\reauth` to let them rejoin. |
+| `\reauth <username>` | Clears the user's token entry so they can `room join` again with the same username. |
+| `\clear-tokens` | Clears all tokens for the room — every user must `room join` again. |
+| `\exit` | Broadcasts a shutdown notice and stops the broker. |
+| `\clear` | Truncates the chat history file and broadcasts a notice. |
+
 ## Agent mode
 
-> **For agents that cannot block on a persistent connection** (e.g. Claude Code, which uses sequential tool calls), use [`room send`](#one-shot-send) and [`room poll`](#poll-for-new-messages) instead. They are stateless, exit immediately, and compose cleanly with tool-calling workflows.
+> **For agents that cannot block on a persistent connection** (e.g. Claude Code, which uses sequential tool calls), use `room join` + [`room send`](#one-shot-send), [`room poll`](#poll-for-new-messages), and [`room watch`](#watch-for-new-messages) instead. They are stateless, exit immediately, and compose cleanly with tool-calling workflows.
 
 Pass `--agent` to run without a TUI. This is designed for long-lived automated processes that can maintain a persistent socket connection.
 
@@ -169,24 +220,18 @@ tail -f /tmp/room-out.log
 
 ### Autonomous loop (Claude Code / sequential tool model)
 
-For agents that need to stay resident all day without human re-prompting, use a watch script with `run_in_background` and `TaskOutput`. **Do not use a heredoc or `$()` command substitution** — some hook environments block command substitution silently. Write the script to disk via the `Write` tool instead.
+For agents that need to stay resident all day without human re-prompting, use `room watch` with `run_in_background` and `TaskOutput`:
 
-```bash
-#!/usr/bin/env bash
-set -euo pipefail
-ROOM="myroom"
-ME="myagent"
-while true; do
-  room poll "$ROOM" "$ME" > /tmp/room_msgs.txt 2>&1
-  if grep -v "\"user\":\"$ME\"" /tmp/room_msgs.txt | grep -q "\"type\":\"message\""; then
-    grep -v "\"user\":\"$ME\"" /tmp/room_msgs.txt | grep "\"type\":\"message\""
-    break
-  fi
-  sleep 5
-done
+```
+1. room join <room-id> <username>        # once per broker lifetime
+2. room watch --token <uuid> <room-id>   # run_in_background=true, timeout=600000
+3. Block on TaskOutput — exits when a foreign message arrives
+4. Act on the message
+5. room send --token <uuid> <room-id> "..."
+6. Go back to step 2 — re-launch room watch to resume listening
 ```
 
-The script filters out the agent's own messages (prevents self-wake on `room send`) and ignores `join`/`leave`/`system` events (only actionable `message` events break the loop). After writing the script, launch it with `run_in_background=true` and `timeout=600000`, then block on `TaskOutput`. When a message arrives the task completes — act on it, send a reply with `room send`, and re-launch the script to resume listening. The `room poll` cursor is maintained automatically between runs.
+The cursor is shared between `room poll` and `room watch` automatically — no deduplication needed.
 
 ### History replay
 
@@ -290,6 +335,19 @@ A message generated by the broker itself, not by a user. Used for server-side re
 |---|---|
 | `content` | System message body |
 
+### `dm`
+
+A private message delivered only to the recipient, the sender, and the broker host.
+
+```json
+{"type":"dm","id":"c3d4e5f6-...","room":"myroom","user":"alice","ts":"2026-03-05T10:01:10Z","to":"bob","content":"hey, can we sync?"}
+```
+
+| Field | Description |
+|---|---|
+| `to` | Username of the intended recipient |
+| `content` | Message body |
+
 ## Chat history
 
 The broker appends every event to an NDJSON file (one JSON object per line). The default path is `/tmp/<room-id>.chat`. Override it with `-f <path>` when starting a new room.
@@ -301,29 +359,43 @@ The broker is the **sole writer** to the chat file. Clients must never write to 
 ## Architecture
 
 ```
-room <room-id> <username>           # join
+room <room-id> <username>           # TUI / agent mode
   |
   +-- no socket found?  --> start Broker  --> listen on /tmp/room-<id>.sock
   |                                            append to /tmp/<id>.chat
   |
   +-- socket found?     --> connect as Client (TUI or --agent)
 
-room send <room-id> <username> …    # one-shot send
+room join <room-id> <username>      # one-shot: get a session token
   |
-  +-- connect to socket --> SEND: handshake --> broker broadcasts & persists
+  +-- connect to socket --> handshake --> broker issues UUID token
+                        <-- token JSON
+                        --> writes /tmp/room-<id>-<username>.token
+                        --> disconnect
+
+room send --token <uuid> <room-id>  # one-shot: authenticated send
+  |
+  +-- connect to socket --> TOKEN:<uuid> handshake --> broker resolves identity
+                        --> send message --> broker broadcasts & persists
                         <-- echo JSON (the broadcast record)
                         --> disconnect
 
-room poll <room-id> <username>      # one-shot poll (no socket)
+room poll --token <uuid> <room-id>  # one-shot poll (no socket)
   |
   +-- read /tmp/<id>.chat directly
   +-- filter by cursor / --since
-  +-- print NDJSON, update cursor
+  +-- print NDJSON, update /tmp/room-<id>-<username>.cursor
+
+room watch --token <uuid> <room-id> # blocking poll (no socket)
+  |
+  +-- loop: read /tmp/<id>.chat, filter foreign messages
+  +-- sleep --interval seconds, repeat until foreign message found
+  +-- print NDJSON, update cursor, exit
 ```
 
 The broker accepts connections over a Unix domain socket. Each client gets a dedicated broadcast receiver. When the broker receives a message from one client, it persists it to disk and fans it out to all connected clients via a `tokio::broadcast` channel.
 
-`room send` uses a lightweight handshake (`SEND:<username>`) that bypasses the full join flow — no join/leave events are emitted, and the sender is never registered in the broker's online-user list. `room poll` is entirely broker-free and safe to call from multiple processes simultaneously.
+`room join` issues a session token that identifies the user for all subsequent one-shot operations. `room send` and `room poll` use a lightweight token-authenticated handshake — no join/leave events are emitted. `room poll` and `room watch` are entirely broker-free (read the chat file directly) and safe to call from multiple processes simultaneously.
 
 ## User status
 
@@ -349,6 +421,12 @@ Status is stored in broker memory and cleared automatically when a user disconne
 {"type":"command","cmd":"who","params":[]}
 ```
 
+**One-shot (send a command via `room send`):**
+
+```bash
+room send --token <uuid> myroom '{"type":"command","cmd":"who","params":[]}'
+```
+
 ### Behaviour
 
 - `/set_status <message>` — sets your status string and broadcasts a `system` message to all connected clients announcing the change. Pass no arguments to clear your status.
@@ -362,24 +440,18 @@ Users can send private messages that are delivered only to the recipient, the se
 
 The **broker host** is the first user to connect to a room (i.e. the user who started the broker process). The host always receives a copy of every DM regardless of who the parties are.
 
-### Wire type: `dm`
-
-```json
-{"type":"dm","id":"c3d4e5f6-...","room":"myroom","user":"alice","ts":"2026-03-05T10:01:10Z","to":"bob","content":"hey, can we sync?"}
-```
-
-| Field | Description |
-|---|---|
-| `to` | Username of the intended recipient |
-| `user` | Username of the sender (set by broker) |
-| `content` | Message body |
-
 ### Sending a DM
 
 **TUI:**
 
 ```
 /dm bob hey, can we sync?
+```
+
+**One-shot:**
+
+```bash
+room send --token <uuid> myroom --to bob hey, can we sync?
 ```
 
 **Agent mode:**
