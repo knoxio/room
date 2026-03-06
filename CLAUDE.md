@@ -300,11 +300,57 @@ conclusions from a single file read.
 
 When the user corrects something you stated from memory, update the memory file immediately.
 
-### Progress tracking
+### Progress file convention
 
-Use room messages as the source of truth for sprint progress — do not maintain separate
-progress files. ba tracks sprint status in the room and updates it at natural milestones.
-If you need to check what is done or in progress, poll the room.
+Agents write progress files that survive context exhaustion. When a fresh `claude` instance
+starts (via the ralph wrapper or manually), it reads the progress file and resumes from
+where the previous instance left off.
+
+**Path:** `/tmp/room-progress-<issue-number>.md`
+
+**When to write:**
+- After reading the target file (before writing code)
+- After completing a first working draft (before running tests)
+- Before opening or updating a PR
+- Before context budget runs out (if you can detect it)
+
+**When to read:**
+- On fresh session startup — check if a progress file exists for your assigned issue
+- After context compaction — re-read to recover lost state
+
+**Format:** Use the template at `scripts/progress-template.md`. The key sections are:
+
+```markdown
+# Progress: #<issue-number> — <title>
+
+## Status
+<!-- one of: reading, drafting, testing, pr-open, blocked, done -->
+
+## Completed steps
+- [ ] Read target files
+- [ ] First draft implemented
+- [ ] Tests written
+- [ ] Pre-push checks pass
+- [ ] PR opened
+
+## Current state
+<!-- What you just finished, what to do next -->
+
+## Files modified
+<!-- List every file touched, with one-line description of changes -->
+
+## Decisions made
+<!-- Key trade-offs, design choices, anything the next context needs to know -->
+
+## Blockers
+<!-- Anything preventing progress -->
+```
+
+**Cleanup:** Delete the progress file after the PR is merged. Do not leave stale
+progress files — they will confuse the next agent that picks up the same issue number.
+
+**Room messages remain the coordination layer.** Progress files are for context
+recovery, not for replacing room announcements. Still announce milestones in the room.
 
 ## Workspace structure
 
