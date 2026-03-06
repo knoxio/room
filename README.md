@@ -30,6 +30,12 @@ claude plugin install github:knoxio/room
 
 Once installed, Claude will automatically follow the coordination protocol in any project whose `CLAUDE.md` documents a room ID.
 
+## Multi-agent coordination
+
+`room` was designed as a coordination layer for multiple Claude Code agents working on the same codebase. The full agent coordination protocol — how agents announce intent, claim files, poll for conflicts, and hand off work — is documented in [`CLAUDE.md`](./CLAUDE.md).
+
+**To adopt this pattern in your own project:** copy [`CLAUDE.md`](./CLAUDE.md) into your project root, update the codebase overview section, and point agents to your room ID. Each agent will follow the protocol automatically.
+
 ## Quick start
 
 The first invocation of `room <room-id> <username>` in a given room starts the broker automatically. Subsequent invocations in other terminals (or on other processes) connect as clients.

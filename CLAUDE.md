@@ -80,16 +80,6 @@ room send myroom -t $TOKEN "fixing clippy error on PR #42, hold review"
 room send myroom -t $TOKEN "fix pushed"
 ```
 
-## Persistent agent mode (long-lived processes only)
-
-If your process can maintain a blocking connection (scripts, daemons), use `--agent`:
-
-```bash
-room <room-id> <your-username> --agent -n 20
-```
-
-Every event from the broker arrives as a JSON line on stdout. Send messages by writing JSON to stdin. This mode is **not suitable for Claude Code** — use `send`/`poll` instead.
-
 ## Wire format
 
 Every message is a JSON object with a `type` field:
