@@ -2,7 +2,7 @@ use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches};
 use room_ralph::{loop_runner, room, Cli};
 
 fn check_dependencies() -> Result<(), String> {
@@ -82,7 +82,20 @@ fn launch_tmux(cli: &Cli) -> Result<(), String> {
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    let cli = Cli::parse();
+    let cli = Cli::from_arg_matches(
+        &Cli::command()
+            .disable_version_flag(true)
+            .arg(
+                clap::Arg::new("version")
+                    .short('v')
+                    .short_alias('V')
+                    .long("version")
+                    .action(clap::ArgAction::Version)
+                    .help("Print version"),
+            )
+            .get_matches(),
+    )
+    .expect("failed to parse CLI arguments");
 
     // Set up logging — file + stderr
     let log_file = room::log_file_path(&cli.username);
