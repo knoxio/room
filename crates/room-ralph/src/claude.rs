@@ -157,6 +157,10 @@ pub fn detect_context_exhaustion(exit_code: i32, response: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    /// Mutex to serialize tests that touch RALPH_ALLOWED_TOOLS (env is process-global).
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn extract_response_from_result_field() {
@@ -293,33 +297,39 @@ mod tests {
 
     #[test]
     fn resolve_defaults_when_empty() {
-        // Clear env to ensure defaults apply
+        let _lock = ENV_LOCK.lock().unwrap();
         std::env::remove_var("RALPH_ALLOWED_TOOLS");
         let result = resolve_allowed_tools(&[]);
         assert_eq!(result.len(), DEFAULT_ALLOWED_TOOLS.len());
         assert!(result.contains(&"Read".to_string()));
         assert!(result.contains(&"Glob".to_string()));
         assert!(result.contains(&"Bash(room *)".to_string()));
+        std::env::remove_var("RALPH_ALLOWED_TOOLS");
     }
 
     #[test]
     fn resolve_cli_overrides_defaults() {
+        let _lock = ENV_LOCK.lock().unwrap();
         std::env::remove_var("RALPH_ALLOWED_TOOLS");
         let cli = vec!["Write".to_string(), "Edit".to_string()];
         let result = resolve_allowed_tools(&cli);
         assert_eq!(result, vec!["Write", "Edit"]);
+        std::env::remove_var("RALPH_ALLOWED_TOOLS");
     }
 
     #[test]
     fn resolve_cli_none_disables_restrictions() {
+        let _lock = ENV_LOCK.lock().unwrap();
         std::env::remove_var("RALPH_ALLOWED_TOOLS");
         let cli = vec!["none".to_string()];
         let result = resolve_allowed_tools(&cli);
         assert!(result.is_empty());
+        std::env::remove_var("RALPH_ALLOWED_TOOLS");
     }
 
     #[test]
     fn resolve_cli_none_case_insensitive() {
+        let _lock = ENV_LOCK.lock().unwrap();
         std::env::remove_var("RALPH_ALLOWED_TOOLS");
         let cli = vec!["NONE".to_string()];
         let result = resolve_allowed_tools(&cli);
@@ -328,10 +338,13 @@ mod tests {
         let cli = vec!["None".to_string()];
         let result = resolve_allowed_tools(&cli);
         assert!(result.is_empty());
+        std::env::remove_var("RALPH_ALLOWED_TOOLS");
     }
 
     #[test]
     fn resolve_env_overrides_defaults() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("RALPH_ALLOWED_TOOLS");
         std::env::set_var("RALPH_ALLOWED_TOOLS", "Bash,Read,WebSearch");
         let result = resolve_allowed_tools(&[]);
         assert_eq!(result, vec!["Bash", "Read", "WebSearch"]);
@@ -340,6 +353,8 @@ mod tests {
 
     #[test]
     fn resolve_env_none_disables_restrictions() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("RALPH_ALLOWED_TOOLS");
         std::env::set_var("RALPH_ALLOWED_TOOLS", "none");
         let result = resolve_allowed_tools(&[]);
         assert!(result.is_empty());
@@ -348,6 +363,8 @@ mod tests {
 
     #[test]
     fn resolve_cli_takes_precedence_over_env() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("RALPH_ALLOWED_TOOLS");
         std::env::set_var("RALPH_ALLOWED_TOOLS", "Bash,Read");
         let cli = vec!["Write".to_string()];
         let result = resolve_allowed_tools(&cli);
@@ -357,6 +374,8 @@ mod tests {
 
     #[test]
     fn resolve_env_trims_whitespace() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("RALPH_ALLOWED_TOOLS");
         std::env::set_var("RALPH_ALLOWED_TOOLS", " Bash , Read , Grep ");
         let result = resolve_allowed_tools(&[]);
         assert_eq!(result, vec!["Bash", "Read", "Grep"]);
@@ -365,6 +384,8 @@ mod tests {
 
     #[test]
     fn resolve_env_empty_string_uses_defaults() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("RALPH_ALLOWED_TOOLS");
         std::env::set_var("RALPH_ALLOWED_TOOLS", "");
         let result = resolve_allowed_tools(&[]);
         assert_eq!(result.len(), DEFAULT_ALLOWED_TOOLS.len());
