@@ -57,70 +57,70 @@ pub(super) fn assign_color(username: &str, color_map: &mut ColorMap) -> Color {
 /// Arrow glyph used in DM display (`→`).
 const DM_ARROW: &str = "\u{2192}";
 
-/// ASCII logo lines for the welcome splash (Option C — compact, OO-as-eyes).
-const WELCOME_LOGO: &[&str] = &[
-    "╭─────────╮",
-    "│ (◉)(◉)  │",
-    "│  ╰──╯   │",
-    "╰────┬────╯",
-    "  r o o m  ",
-];
-
 /// Build the welcome splash as centered, styled `Text`.
 ///
-/// `frame` drives a blink animation: the eyes alternate between ◉ and ○
-/// every `BLINK_INTERVAL` frames, and the "room" label pulses between
-/// bright cyan and dim gray.
+/// `frame` drives two animations:
+/// - An antenna light on top blinks between ✦ (bright) and · (dim).
+/// - The right eye winks every other cycle (◉ → ‿).
+/// - The "room" label pulses between bright cyan and dim gray.
 pub(super) fn welcome_splash(frame: usize, width: usize) -> Text<'static> {
     const BLINK_INTERVAL: usize = 10; // ~500ms at 50ms/frame
-    let eyes_open = (frame / BLINK_INTERVAL).is_multiple_of(2);
+    let phase = frame / BLINK_INTERVAL;
+    let antenna_on = phase.is_multiple_of(2);
+    let wink = !antenna_on;
 
-    let eye_line = if eyes_open {
-        "│ (◉)(◉)  │"
+    // Antenna line: light + stem
+    let antenna_light = if antenna_on { "✦" } else { "·" };
+    let antenna_line = format!("     {antenna_light}     ");
+    let stem_line = "     │     ";
+
+    // Face lines
+    let eye_line = if wink {
+        "│ (◉)(‿)  │"
     } else {
-        "│ (○)(○)  │"
+        "│ (◉)(◉)  │"
     };
 
-    let label_style = if eyes_open {
+    let light_style = if antenna_on {
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let label_style = if antenna_on {
         Style::default()
             .fg(Color::Cyan)
             .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(Color::DarkGray)
     };
-
     let box_style = Style::default().fg(Color::Cyan);
 
-    let raw_lines = [
-        WELCOME_LOGO[0], // top
-        eye_line,        // eyes (animated)
-        WELCOME_LOGO[2], // mouth
-        WELCOME_LOGO[3], // chin
-        WELCOME_LOGO[4], // label
+    let raw_lines: Vec<(&str, Style)> = vec![
+        (&antenna_line, light_style),
+        (stem_line, box_style),
+        ("╭─────────╮", box_style),
+        (eye_line, box_style),
+        ("│  ╰──╯   │", box_style),
+        ("╰────┬────╯", box_style),
+        ("  r o o m  ", label_style),
     ];
 
-    let logo_height = raw_lines.len();
     let mut lines: Vec<Line<'static>> = Vec::new();
 
-    // Vertical centering: estimate available height as ~20 lines,
-    // but the caller will position the widget so we just pad a bit.
-    let v_pad = 2;
+    let v_pad = 1;
     for _ in 0..v_pad {
         lines.push(Line::from(""));
     }
 
-    for (i, &raw) in raw_lines.iter().enumerate() {
+    for (raw, style) in &raw_lines {
         let display_width = raw.chars().count();
         let pad = width.saturating_sub(display_width) / 2;
         let padding = " ".repeat(pad);
-        let style = if i == logo_height - 1 {
-            label_style
-        } else {
-            box_style
-        };
         lines.push(Line::from(vec![
             Span::raw(padding),
-            Span::styled(raw.to_string(), style),
+            Span::styled(raw.to_string(), *style),
         ]));
     }
 
