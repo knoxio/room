@@ -1,10 +1,7 @@
 use std::{
     collections::HashMap,
     path::PathBuf,
-    sync::{
-        atomic::AtomicU64,
-        Arc,
-    },
+    sync::{atomic::AtomicU64, Arc},
 };
 
 use tokio::sync::{broadcast, watch, Mutex};

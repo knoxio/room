@@ -1,16 +1,22 @@
 pub(crate) mod auth;
+pub(crate) mod commands;
 pub(crate) mod fanout;
 pub(crate) mod state;
 
 use std::{
     collections::HashMap,
     path::PathBuf,
-    sync::{
-        atomic::AtomicU64,
-        Arc,
-    },
+    sync::{atomic::AtomicU64, Arc},
 };
 
+use crate::{
+    history,
+    message::{make_join, make_leave, parse_client_line, Message},
+};
+use auth::{handle_oneshot_join, validate_token};
+use commands::{route_command, CommandResult};
+use fanout::{broadcast_and_persist, dm_and_persist};
+use state::RoomState;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::{
@@ -19,17 +25,6 @@ use tokio::{
     },
     sync::{broadcast, watch, Mutex},
 };
-use crate::{
-    history,
-    message::{make_join, make_leave, make_system, parse_client_line, Message},
-};
-use auth::{handle_oneshot_join, validate_token};
-use fanout::{broadcast_and_persist, dm_and_persist};
-use state::RoomState;
-
-/// Admin command names — routed through `handle_admin_cmd` when received as
-/// a `Message::Command` with one of these cmd values.
-const ADMIN_CMD_NAMES: &[&str] = &["kick", "reauth", "clear-tokens", "exit", "clear"];
 
 pub struct Broker {
     room_id: String,
@@ -256,11 +251,6 @@ async fn handle_client(
     // Inbound: read lines from client socket, parse and broadcast
     let username_in = username.clone();
     let room_id_in = room_id.clone();
-    let clients_in = clients.clone();
-    let status_map_in = status_map.clone();
-    let host_user_in = host_user.clone();
-    let chat_path_in = chat_path.clone();
-    let seq_counter_in = seq_counter.clone();
     let write_half_in = write_half.clone();
     let state_in = state.clone();
     let inbound = tokio::spawn(async move {
@@ -275,110 +265,46 @@ async fn handle_client(
                         continue;
                     }
                     match parse_client_line(trimmed, &room_id_in, &username_in) {
-                        Ok(msg) => {
-                            // Handle status commands privately (no broadcast of the Command itself)
-                            if let Message::Command {
-                                ref cmd,
-                                ref params,
-                                ..
-                            } = msg
-                            {
-                                if cmd == "set_status" {
-                                    let status = params.first().cloned().unwrap_or_default();
-                                    status_map_in
-                                        .lock()
+                        Ok(msg) => match route_command(msg, &username_in, &state_in).await {
+                            Ok(CommandResult::Handled) => {}
+                            Ok(CommandResult::Reply(json)) => {
+                                let _ = write_half_in
+                                    .lock()
+                                    .await
+                                    .write_all(format!("{json}\n").as_bytes())
+                                    .await;
+                            }
+                            Ok(CommandResult::Shutdown) => break,
+                            Ok(CommandResult::Passthrough(msg)) => {
+                                let result = match &msg {
+                                    Message::DirectMessage { to, .. } => {
+                                        dm_and_persist(
+                                            &msg,
+                                            &username_in,
+                                            to,
+                                            &state_in.host_user,
+                                            &state_in.clients,
+                                            &state_in.chat_path,
+                                            &state_in.seq_counter,
+                                        )
                                         .await
-                                        .insert(username_in.clone(), status.clone());
-                                    let display = if status.is_empty() {
-                                        format!("{username_in} cleared their status")
-                                    } else {
-                                        format!("{username_in} set status: {status}")
-                                    };
-                                    let sys = make_system(&room_id_in, "broker", display);
-                                    if let Err(e) = broadcast_and_persist(
-                                        &sys,
-                                        &clients_in,
-                                        &chat_path_in,
-                                        &seq_counter_in,
-                                    )
-                                    .await
-                                    {
-                                        eprintln!("[broker] persist error: {e:#}");
                                     }
-                                    continue;
-                                } else if cmd == "who" {
-                                    let map = status_map_in.lock().await;
-                                    let mut entries: Vec<String> = map
-                                        .iter()
-                                        .map(|(u, s)| {
-                                            if s.is_empty() {
-                                                u.clone()
-                                            } else {
-                                                format!("{u}: {s}")
-                                            }
-                                        })
-                                        .collect();
-                                    entries.sort();
-                                    drop(map);
-                                    let content = if entries.is_empty() {
-                                        "no users online".to_owned()
-                                    } else {
-                                        format!("online — {}", entries.join(", "))
-                                    };
-                                    let sys = make_system(&room_id_in, "broker", content);
-                                    if let Ok(json) = serde_json::to_string(&sys) {
-                                        let _ = write_half_in
-                                            .lock()
-                                            .await
-                                            .write_all(format!("{json}\n").as_bytes())
-                                            .await;
+                                    _ => {
+                                        broadcast_and_persist(
+                                            &msg,
+                                            &state_in.clients,
+                                            &state_in.chat_path,
+                                            &state_in.seq_counter,
+                                        )
+                                        .await
                                     }
-                                    continue;
-                                } else if ADMIN_CMD_NAMES.contains(&cmd.as_str()) {
-                                    let cmd_line = format!("{cmd} {}", params.join(" "));
-                                    if let Some(err) =
-                                        handle_admin_cmd(&cmd_line, &username_in, &state_in).await
-                                    {
-                                        let sys = make_system(&room_id_in, "broker", err);
-                                        if let Ok(json) = serde_json::to_string(&sys) {
-                                            let _ = write_half_in
-                                                .lock()
-                                                .await
-                                                .write_all(format!("{json}\n").as_bytes())
-                                                .await;
-                                        }
-                                    }
-                                    continue;
+                                };
+                                if let Err(e) = result {
+                                    eprintln!("[broker] persist error: {e:#}");
                                 }
                             }
-                            // Route DMs to sender + recipient + host only; broadcast everything else
-                            let result = match &msg {
-                                Message::DirectMessage { to, .. } => {
-                                    dm_and_persist(
-                                        &msg,
-                                        &username_in,
-                                        to,
-                                        &host_user_in,
-                                        &clients_in,
-                                        &chat_path_in,
-                                        &seq_counter_in,
-                                    )
-                                    .await
-                                }
-                                _ => {
-                                    broadcast_and_persist(
-                                        &msg,
-                                        &clients_in,
-                                        &chat_path_in,
-                                        &seq_counter_in,
-                                    )
-                                    .await
-                                }
-                            };
-                            if let Err(e) = result {
-                                eprintln!("[broker] persist error: {e:#}");
-                            }
-                        }
+                            Err(e) => eprintln!("[broker] route error: {e:#}"),
+                        },
                         Err(e) => eprintln!("[broker] bad message from {username_in}: {e}"),
                     }
                 }
@@ -419,189 +345,38 @@ async fn handle_oneshot_send(
         return Ok(());
     }
     let msg = parse_client_line(trimmed, &state.room_id, &username)?;
-    // Handle /who privately in oneshot context: return the user list without broadcasting.
-    if let Message::Command {
-        ref cmd,
-        ref params,
-        ..
-    } = msg
-    {
-        if cmd == "who" {
-            let map = state.status_map.lock().await;
-            let mut entries: Vec<String> = map
-                .iter()
-                .map(|(u, s)| {
-                    if s.is_empty() {
-                        u.clone()
-                    } else {
-                        format!("{u}: {s}")
-                    }
-                })
-                .collect();
-            entries.sort();
-            drop(map);
-            let content = if entries.is_empty() {
-                "no users online".to_owned()
-            } else {
-                format!("online — {}", entries.join(", "))
-            };
-            let sys = make_system(&state.room_id, "broker", content);
-            let json = serde_json::to_string(&sys)?;
+    match route_command(msg, &username, state).await? {
+        CommandResult::Handled | CommandResult::Shutdown => {}
+        CommandResult::Reply(json) => {
             write_half.write_all(format!("{json}\n").as_bytes()).await?;
-            return Ok(());
-        } else if ADMIN_CMD_NAMES.contains(&cmd.as_str()) {
-            let cmd_line = format!("{cmd} {}", params.join(" "));
-            let content = match handle_admin_cmd(&cmd_line, &username, state).await {
-                None => "command executed".to_string(),
-                Some(err) => err,
+        }
+        CommandResult::Passthrough(msg) => {
+            let seq_msg = match &msg {
+                Message::DirectMessage { to, .. } => {
+                    dm_and_persist(
+                        &msg,
+                        &username,
+                        to,
+                        &state.host_user,
+                        &state.clients,
+                        &state.chat_path,
+                        &state.seq_counter,
+                    )
+                    .await?
+                }
+                _ => {
+                    broadcast_and_persist(
+                        &msg,
+                        &state.clients,
+                        &state.chat_path,
+                        &state.seq_counter,
+                    )
+                    .await?
+                }
             };
-            let reply = make_system(&state.room_id, "broker", content);
-            let json = serde_json::to_string(&reply)?;
-            write_half.write_all(format!("{json}\n").as_bytes()).await?;
-            return Ok(());
+            let echo = format!("{}\n", serde_json::to_string(&seq_msg)?);
+            write_half.write_all(echo.as_bytes()).await?;
         }
     }
-    let result = match &msg {
-        Message::DirectMessage { to, .. } => {
-            dm_and_persist(
-                &msg,
-                &username,
-                to,
-                &state.host_user,
-                &state.clients,
-                &state.chat_path,
-                &state.seq_counter,
-            )
-            .await
-        }
-        _ => {
-            broadcast_and_persist(&msg, &state.clients, &state.chat_path, &state.seq_counter).await
-        }
-    };
-    let seq_msg = result?;
-    let echo = format!("{}\n", serde_json::to_string(&seq_msg)?);
-    write_half.write_all(echo.as_bytes()).await?;
     Ok(())
 }
-
-/// Dispatch a `\command [arg]` line sent from a connected client.
-///
-/// Returns `None` on success or `Some(error_message)` if the command was rejected.
-/// The caller is responsible for delivering any error message back to the issuer.
-///
-/// Only the room host (the first user to complete the interactive join handshake) is
-/// authorised to run admin commands. All other callers receive a permission denied error.
-///
-/// Supported commands:
-/// - `/kick <username>`      — invalidates the user's token so they cannot issue further
-///   authenticated requests; the username remains reserved so they cannot rejoin without `\reauth`.
-///   Also removes them from the status map so `/who` no longer shows them as online.
-/// - `/reauth <username>`    — removes the user's token entirely so they can `room join` again.
-/// - `/clear-tokens`         — removes every token for this room (all users must rejoin).
-/// - `/exit`                 — broadcasts a shutdown notice then signals the broker to stop.
-/// - `/clear`                — truncates the chat history file and broadcasts a notice.
-async fn handle_admin_cmd(cmd_line: &str, issuer: &str, state: &RoomState) -> Option<String> {
-    // Auth: only the room host may run admin commands.
-    let host = state.host_user.lock().await.clone();
-    if host.as_deref() != Some(issuer) {
-        return Some(
-            "permission denied: admin commands are restricted to the room host".to_string(),
-        );
-    }
-
-    let room_id = state.room_id.as_str();
-    let clients = &state.clients;
-    let token_map = &state.token_map;
-    let status_map = &state.status_map;
-    let chat_path = &state.chat_path;
-    let shutdown = &state.shutdown;
-    let seq_counter = &state.seq_counter;
-    let mut parts = cmd_line.splitn(2, ' ');
-    let cmd = parts.next().unwrap_or("").trim();
-    let arg = parts.next().unwrap_or("").trim();
-
-    match cmd {
-        "kick" => {
-            if arg.is_empty() {
-                return None;
-            }
-            let target = arg.to_owned();
-            let mut map = token_map.lock().await;
-            // Remove all existing tokens for this username, then insert a per-user sentinel
-            // so the username stays reserved. Using KICKED:<username> as the key ensures
-            // kicking multiple users does not overwrite each other's sentinel entries.
-            map.retain(|_, u| u != &target);
-            map.insert(format!("KICKED:{target}"), target.clone());
-            drop(map);
-            // Remove from status map immediately so /who no longer shows the kicked user.
-            status_map.lock().await.remove(&target);
-            let content = format!("{issuer} kicked {target} (token invalidated)");
-            let msg = make_system(room_id, "broker", content);
-            let _ = broadcast_and_persist(&msg, clients, chat_path, seq_counter).await;
-        }
-        "reauth" => {
-            if arg.is_empty() {
-                return None;
-            }
-            let target = arg.to_owned();
-            let mut map = token_map.lock().await;
-            map.retain(|_, u| u != &target);
-            drop(map);
-            // Remove the on-disk token file so the user can join afresh.
-            let prefix = format!("room-{room_id}-");
-            let suffix = format!("-{target}.token");
-            if let Ok(entries) = std::fs::read_dir("/tmp") {
-                for entry in entries.flatten() {
-                    let name = entry.file_name();
-                    let s = name.to_string_lossy();
-                    if s.starts_with(&prefix) && s.ends_with(&suffix) {
-                        let _ = std::fs::remove_file(entry.path());
-                    }
-                }
-            }
-            let content = format!("{issuer} reauthed {target} (token cleared, can rejoin)");
-            let msg = make_system(room_id, "broker", content);
-            let _ = broadcast_and_persist(&msg, clients, chat_path, seq_counter).await;
-        }
-        "clear-tokens" => {
-            token_map.lock().await.clear();
-            // Remove all on-disk token files for this room.
-            let prefix = format!("room-{room_id}-");
-            if let Ok(entries) = std::fs::read_dir("/tmp") {
-                for entry in entries.flatten() {
-                    let name = entry.file_name();
-                    let s = name.to_string_lossy();
-                    if s.starts_with(&prefix) && s.ends_with(".token") {
-                        let _ = std::fs::remove_file(entry.path());
-                    }
-                }
-            }
-            let content = format!("{issuer} cleared all tokens (all users must rejoin)");
-            let msg = make_system(room_id, "broker", content);
-            let _ = broadcast_and_persist(&msg, clients, chat_path, seq_counter).await;
-        }
-        "exit" => {
-            let content = format!("{issuer} is shutting down the room");
-            let msg = make_system(room_id, "broker", content);
-            let _ = broadcast_and_persist(&msg, clients, chat_path, seq_counter).await;
-            // Set to true — watch receivers see this immediately regardless of
-            // when they registered, avoiding the notify_waiters() race.
-            let _ = shutdown.send(true);
-        }
-        "clear" => {
-            // Truncate the history file.
-            if let Err(e) = std::fs::write(chat_path.as_ref(), "") {
-                eprintln!("[broker] \\clear failed: {e}");
-                return None;
-            }
-            let content = format!("{issuer} cleared chat history");
-            let msg = make_system(room_id, "broker", content);
-            let _ = broadcast_and_persist(&msg, clients, chat_path, seq_counter).await;
-        }
-        _ => {
-            eprintln!("[broker] unknown admin command from {issuer}: \\{cmd_line}");
-        }
-    }
-    None
-}
-

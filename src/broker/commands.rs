@@ -1,13 +1,6 @@
-use std::{path::Path, sync::Arc};
-
-use tokio::sync::broadcast;
-
 use crate::message::{make_system, Message};
 
-use super::{
-    fanout::broadcast_and_persist,
-    state::{AtomicU64, ClientMap, RoomState},
-};
+use super::{fanout::broadcast_and_persist, state::RoomState};
 
 /// Admin command names — routed through `handle_admin_cmd` when received as
 /// a `Message::Command` with one of these cmd values.
@@ -15,11 +8,13 @@ pub(crate) const ADMIN_CMD_NAMES: &[&str] = &["kick", "reauth", "clear-tokens", 
 
 /// The result of routing an inbound command line.
 pub(crate) enum CommandResult {
-    /// The command was handled privately; send this message back only to the issuer.
+    /// The command was fully handled with a broadcast or no-op; nothing to send back privately.
+    Handled,
+    /// The command was handled privately; send this JSON line back only to the issuer.
     Reply(String),
     /// The command was handled and the broker is shutting down.
     Shutdown,
-    /// The command was not a special command; the caller should broadcast `msg` normally.
+    /// Not a special command; the caller should broadcast or DM `msg` normally.
     Passthrough(Message),
 }
 
@@ -57,8 +52,9 @@ pub(crate) async fn route_command(
             let sys = make_system(&state.room_id, "broker", display);
             broadcast_and_persist(&sys, &state.clients, &state.chat_path, &state.seq_counter)
                 .await?;
-            let json = serde_json::to_string(&sys)?;
-            return Ok(CommandResult::Reply(json));
+            // Broadcast already delivers to all connected clients including the sender;
+            // no additional private reply needed.
+            return Ok(CommandResult::Handled);
         }
 
         if cmd == "who" {
@@ -87,17 +83,19 @@ pub(crate) async fn route_command(
 
         if ADMIN_CMD_NAMES.contains(&cmd.as_str()) {
             let cmd_line = format!("{cmd} {}", params.join(" "));
-            let reply_text = match handle_admin_cmd(&cmd_line, username, state).await {
-                None => "command executed".to_owned(),
-                Some(err) => err,
-            };
-            let sys = make_system(&state.room_id, "broker", reply_text);
-            let json = serde_json::to_string(&sys)?;
-            // Check if the broker was just told to exit
+            let error = handle_admin_cmd(&cmd_line, username, state).await;
+            if let Some(err) = error {
+                // Permission denied or invalid args — send error back privately.
+                let sys = make_system(&state.room_id, "broker", err);
+                let json = serde_json::to_string(&sys)?;
+                return Ok(CommandResult::Reply(json));
+            }
+            // Admin command succeeded — the command itself may have broadcast a notice.
+            // If it was /exit the shutdown signal was already sent; signal the caller.
             if cmd == "exit" {
                 return Ok(CommandResult::Shutdown);
             }
-            return Ok(CommandResult::Reply(json));
+            return Ok(CommandResult::Handled);
         }
     }
 

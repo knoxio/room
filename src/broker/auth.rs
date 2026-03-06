@@ -8,10 +8,7 @@ use super::state::TokenMap;
 /// Returns the new token string on success, or an error message on collision.
 /// Inserts the mapping into `token_map`; the caller is responsible for
 /// writing the token file to disk.
-pub(crate) async fn issue_token(
-    username: &str,
-    token_map: &TokenMap,
-) -> Result<String, String> {
+pub(crate) async fn issue_token(username: &str, token_map: &TokenMap) -> Result<String, String> {
     let mut map = token_map.lock().await;
     if map.values().any(|u| u == username) {
         return Err(format!("username_taken:{username}"));
@@ -26,10 +23,7 @@ pub(crate) async fn issue_token(
 /// Returns `None` if the token is not found (invalid or expired).
 /// A `KICKED:<username>` sentinel is treated as invalid so kicked users
 /// cannot authenticate.
-pub(crate) async fn validate_token(
-    token: &str,
-    token_map: &TokenMap,
-) -> Option<String> {
+pub(crate) async fn validate_token(token: &str, token_map: &TokenMap) -> Option<String> {
     token_map.lock().await.get(token).cloned()
 }
 
@@ -44,11 +38,8 @@ pub(crate) async fn handle_oneshot_join(
 ) -> anyhow::Result<()> {
     match issue_token(&username, token_map).await {
         Ok(token) => {
-            let resp =
-                serde_json::json!({"type":"token","token": token,"username": username});
-            write_half
-                .write_all(format!("{resp}\n").as_bytes())
-                .await?;
+            let resp = serde_json::json!({"type":"token","token": token,"username": username});
+            write_half.write_all(format!("{resp}\n").as_bytes()).await?;
         }
         Err(_) => {
             let err = serde_json::json!({
