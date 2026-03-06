@@ -1518,7 +1518,6 @@ async fn admin_exit_shuts_down_broker() {
     );
 }
 
-
 /// After `/exit`, connected clients receive EOF (Ok(0)) on their socket read,
 /// which the TUI detects to exit cleanly without requiring Ctrl-C.
 #[tokio::test]
