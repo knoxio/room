@@ -62,14 +62,15 @@ pub async fn run_loop(cli: &Cli, token: &str, running: &Arc<AtomicBool>) -> Resu
             cli.model,
             iteration
         );
-        let claude_output = match claude::spawn_claude(&cli.model, &prompt_file, &cli.add_dirs) {
-            Ok(o) => o,
-            Err(e) => {
-                tracing::error!("failed to spawn claude: {}", e);
-                cooldown(cli.cooldown, running).await;
-                continue;
-            }
-        };
+        let claude_output =
+            match claude::spawn_claude(&cli.model, &prompt_file, &cli.add_dirs, &cli.allow_tools) {
+                Ok(o) => o,
+                Err(e) => {
+                    tracing::error!("failed to spawn claude: {}", e);
+                    cooldown(cli.cooldown, running).await;
+                    continue;
+                }
+            };
 
         tracing::info!("claude exited with code {}", claude_output.exit_code);
 

@@ -52,6 +52,10 @@ pub struct Cli {
     #[arg(long = "add-dir")]
     pub add_dirs: Vec<PathBuf>,
 
+    /// Allowed tools for claude (comma-separated, passed as --allowedTools)
+    #[arg(long = "allow-tools", value_delimiter = ',')]
+    pub allow_tools: Vec<String>,
+
     /// Print the prompt that would be sent, then exit
     #[arg(long)]
     pub dry_run: bool,

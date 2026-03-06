@@ -9,23 +9,33 @@ pub struct ClaudeOutput {
     pub exit_code: i32,
 }
 
-/// Spawn `claude -p` with the given prompt file and return its output.
-///
-/// Writes the prompt to a temp file and pipes it to claude via stdin.
-/// Uses `--output-format json` for structured output.
-pub fn spawn_claude(
-    model: &str,
-    prompt_file: &Path,
-    add_dirs: &[PathBuf],
-) -> Result<ClaudeOutput, String> {
-    let prompt = std::fs::read_to_string(prompt_file)
-        .map_err(|e| format!("cannot read prompt file {}: {e}", prompt_file.display()))?;
-
+/// Build the `claude` command with all flags, ready to spawn.
+fn build_claude_command(model: &str, add_dirs: &[PathBuf], allowed_tools: &[String]) -> Command {
     let mut cmd = Command::new("claude");
     cmd.args(["-p", "--model", model, "--output-format", "json"]);
     for dir in add_dirs {
         cmd.args(["--add-dir", &dir.display().to_string()]);
     }
+    for tool in allowed_tools {
+        cmd.args(["--allowedTools", tool]);
+    }
+    cmd
+}
+
+/// Spawn `claude -p` with the given prompt file and return its output.
+///
+/// Reads the prompt file and pipes it to claude via stdin.
+/// Uses `--output-format json` for structured output.
+pub fn spawn_claude(
+    model: &str,
+    prompt_file: &Path,
+    add_dirs: &[PathBuf],
+    allowed_tools: &[String],
+) -> Result<ClaudeOutput, String> {
+    let prompt = std::fs::read_to_string(prompt_file)
+        .map_err(|e| format!("cannot read prompt file {}: {e}", prompt_file.display()))?;
+
+    let mut cmd = build_claude_command(model, add_dirs, allowed_tools);
     cmd.stdin(std::process::Stdio::piped());
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
@@ -160,5 +170,80 @@ mod tests {
         assert!(!detect_context_exhaustion(1, "syntax error"));
         assert!(!detect_context_exhaustion(1, "network timeout"));
         assert!(!detect_context_exhaustion(1, ""));
+    }
+
+    #[test]
+    fn build_command_base_args() {
+        let cmd = build_claude_command("opus", &[], &[]);
+        let args: Vec<_> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+        assert_eq!(args, ["-p", "--model", "opus", "--output-format", "json"]);
+    }
+
+    #[test]
+    fn build_command_with_add_dirs() {
+        let dirs = vec![PathBuf::from("/tmp/dir1"), PathBuf::from("/tmp/dir2")];
+        let cmd = build_claude_command("sonnet", &dirs, &[]);
+        let args: Vec<_> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+        assert!(args.contains(&"--add-dir".to_string()));
+        assert!(args.contains(&"/tmp/dir1".to_string()));
+        assert!(args.contains(&"/tmp/dir2".to_string()));
+    }
+
+    #[test]
+    fn build_command_with_allowed_tools() {
+        let tools = vec!["Bash".to_string(), "Read".to_string(), "Write".to_string()];
+        let cmd = build_claude_command("opus", &[], &tools);
+        let args: Vec<_> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+        // Each tool should be preceded by --allowedTools
+        let tool_flags: Vec<_> = args
+            .windows(2)
+            .filter(|w| w[0] == "--allowedTools")
+            .map(|w| w[1].clone())
+            .collect();
+        assert_eq!(tool_flags, ["Bash", "Read", "Write"]);
+    }
+
+    #[test]
+    fn build_command_empty_allowed_tools() {
+        let cmd = build_claude_command("opus", &[], &[]);
+        let args: Vec<_> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+        assert!(!args.contains(&"--allowedTools".to_string()));
+    }
+
+    #[test]
+    fn build_command_with_dirs_and_tools() {
+        let dirs = vec![PathBuf::from("/tmp/work")];
+        let tools = vec!["Bash".to_string()];
+        let cmd = build_claude_command("opus", &dirs, &tools);
+        let args: Vec<_> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+        assert_eq!(
+            args,
+            [
+                "-p",
+                "--model",
+                "opus",
+                "--output-format",
+                "json",
+                "--add-dir",
+                "/tmp/work",
+                "--allowedTools",
+                "Bash"
+            ]
+        );
     }
 }
