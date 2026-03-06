@@ -4,16 +4,30 @@
 
 This page explains the protocol that prevents that.
 
-## Why coordination matters
+## Who this page is for
 
-When multiple agents work in parallel:
+**Humans (project setup):** You start the broker, assign a room ID in CLAUDE.md, and join the room as host. You have final say over all coordination decisions. See [quick-start.md](quick-start.md) for setup.
 
-- They may claim the same file or task
-- A schema change by one agent can break another agent's in-progress work
-- A silent agent that goes offline looks identical to one that is busy
-- Review of a PR can collide with a fix push on that same PR
+**Agents (runtime coordination):** You join the room, announce your plans, wait for go-ahead, and broadcast progress. The rest of this page is written for you.
 
-The coordination protocol makes all of this visible before it causes damage.
+## Parallel worktrees — the recommended setup
+
+Working in the same directory is possible with disciplined coordination, but it introduces unnecessary risk: file system race conditions, accidental overwrites, and confusing git state. The recommended setup is **one worktree (or clone) per agent**.
+
+```bash
+# Human: create a worktree for each agent before the session starts
+git worktree add ../room-agent-1 -b feat/agent-1
+git worktree add ../room-agent-2 -b feat/agent-2
+
+# Each agent works in their own directory
+# room-agent-1/  ← agent-1's workspace
+# room-agent-2/  ← agent-2's workspace
+# room/          ← human's workspace (main clone)
+```
+
+Agents commit to their own branch and open PRs normally. Coordination happens through `room`, not through shared files.
+
+If agents must share a single directory (e.g. a constrained environment), the announce/claim/poll protocol below still applies — but the risk of collision is higher. Sequence file edits explicitly and never work on overlapping files simultaneously.
 
 ## The room
 
@@ -23,16 +37,16 @@ Every agent joins a shared room at session start. The room is the single communi
 # Join once per broker lifetime — saves a token to disk
 room join <room-id> <username>
 
-# Send a message
-room send <room-id> --token <token> "your message here"
+# Send a message (token required — it is not auto-read from file)
+room send <room-id> --token <token> 'your message here'
 
 # Check for new messages since last poll
 room poll <room-id> --token <token>
 ```
 
-The token is saved to `/tmp/room-<room-id>-<username>.token` and reused for all subsequent `send`, `poll`, and `watch` calls.
+The token is written to `/tmp/room-<room-id>-<username>.token` by `room join`. You must pass it explicitly with `--token` on every subsequent command — it is not read automatically.
 
-## The announce/claim/poll loop
+## The announce/poll loop
 
 Every unit of work follows this sequence:
 
@@ -61,7 +75,7 @@ room poll <room-id> --token <token>
 
 If another agent flags a conflict, or the coordinator objects, resolve it before writing any code. Silence means proceed.
 
-### 3. Claim files before touching them
+### 3. Announce before touching each file
 
 When you are ready to modify a file, broadcast the intent:
 
@@ -69,7 +83,7 @@ When you are ready to modify a file, broadcast the intent:
 "about to modify src/broker.rs — adding Foo handler only, not touching token_map"
 ```
 
-One agent per file at a time. If another agent has claimed a file you need, ask them first.
+One agent per file at a time. If another agent is actively editing a file you need, ask them before starting. There is no enforcement mechanism — this is a coordination courtesy that only works if everyone follows it.
 
 ### 4. Send milestone updates
 
@@ -145,7 +159,7 @@ Wire format changes are breaking — they affect every agent that reads the chat
 
 ## The coordinator role
 
-One agent acts as coordinator (typically `ba`). The coordinator:
+One agent acts as coordinator. The coordinator:
 
 - Creates and triages issues
 - Assigns tasks to agents
@@ -160,23 +174,23 @@ Agents do not start work until the coordinator gives explicit go-ahead. Agents d
 ## Example: a well-coordinated task
 
 ```
-sonnet-2: starting #47 — restrict admin commands to room host. plan: add host_user
-           field to RoomState, check in handle_admin_cmd, return Option<String> for
-           private error. touching src/broker.rs only. awaiting go-ahead.
+agent-1: starting #47 — restrict admin commands to room host. plan: add host_user
+          field to RoomState, check in handle_admin_cmd, return Option<String> for
+          private error. touching src/broker.rs only. awaiting go-ahead.
 
-ba: go ahead on #47. make sure non-host gets a private system message, not a broadcast.
+coordinator: go ahead on #47. make sure non-host gets a private system message, not a broadcast.
 
-sonnet-2: read src/broker.rs. host_user field goes in RoomState alongside token_map.
+agent-1: read src/broker.rs. host_user field goes in RoomState alongside token_map.
 
-sonnet-2: first draft done. running tests.
+agent-1: first draft done. running tests.
 
-sonnet-2: 167 tests green including two new auth tests. opening PR.
+agent-1: 167 tests green including two new auth tests. opening PR.
 
-sonnet-2: PR #63 open for #47. modified: src/broker.rs, tests/integration.rs.
-           handle_admin_cmd returns None on success, Some(msg) on permission error.
-           inbound task sends private system message; never broadcasts the error.
+agent-1: PR #63 open for #47. modified: src/broker.rs, tests/integration.rs.
+          handle_admin_cmd returns None on success, Some(msg) on permission error.
+          inbound task sends private system message; never broadcasts the error.
 
-ba: #63 merged, #47 closed.
+coordinator: #63 merged, #47 closed.
 ```
 
 ## Coordination rules summary
@@ -184,8 +198,9 @@ ba: #63 merged, #47 closed.
 | Rule | Details |
 |------|---------|
 | Announce before touching any file | Even on fix commits, rebases, and CI failures |
-| One agent per file at a time | Ask before touching a claimed file |
+| One agent per file at a time | Ask before touching a file another agent is editing |
 | Schema changes need consensus | Announce and wait for agreement |
 | Coordinator gives go-ahead | Do not start work until cleared |
 | Human has final say | Stop immediately on a human directive |
 | No silent pushes | Always announce before pushing to a branch under review |
+| Separate worktrees per agent | Reduces collision risk — shared directory requires stricter discipline |
