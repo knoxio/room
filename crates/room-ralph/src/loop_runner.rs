@@ -38,6 +38,7 @@ pub async fn run_loop(cli: &Cli, token: &str, running: &Arc<AtomicBool>) -> Resu
             username: &cli.username,
             token,
             custom_prompt_file: cli.prompt.as_deref(),
+            personality_file: cli.personality.as_deref(),
             progress_file: &progress_file,
             issue: cli.issue.as_deref(),
         };

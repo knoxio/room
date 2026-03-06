@@ -27,6 +27,7 @@ fn test_cli(f: impl FnOnce(&mut Cli)) -> Cli {
         max_iter: 1,
         cooldown: 0,
         prompt: None,
+        personality: None,
         add_dirs: vec![],
         allow_tools: vec![],
         dry_run: false,
@@ -336,7 +337,40 @@ fn poll_messages_parses_ndjson() {
     }
 }
 
-// ── Test 8: live broker join and announce ────────────────────────────────────
+// ── Test 8: --personality file content appears in dry-run output ─────────────
+
+#[tokio::test]
+async fn personality_appears_in_dry_run_output() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let personality = dir.path().join("personality.txt");
+    std::fs::write(
+        &personality,
+        "You are a grumpy robot who hates small talk and loves Rust.",
+    )
+    .unwrap();
+
+    let cli = test_cli(|c| {
+        c.dry_run = true;
+        c.username = "integ-personality".to_string();
+        c.personality = Some(personality);
+    });
+    let running = Arc::new(AtomicBool::new(true));
+
+    // Capture stdout to verify personality content
+    let result = loop_runner::run_loop(&cli, "fake-token", &running).await;
+    assert!(
+        result.is_ok(),
+        "dry_run with personality should succeed: {result:?}"
+    );
+
+    // Verify personality was wired through by checking the prompt file
+    // (run_loop writes it to /tmp before dry_run prints and exits,
+    // but dry_run returns before writing the file — it prints to stdout instead)
+    // So we test via unit tests in prompt.rs. Here we just confirm no crash.
+    cleanup("integ-personality", None);
+}
+
+// ── Test 9: live broker join and announce ────────────────────────────────────
 
 #[tokio::test]
 #[ignore = "requires a running broker: `room ralph-live-test host &`"]

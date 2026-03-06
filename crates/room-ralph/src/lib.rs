@@ -48,6 +48,10 @@ pub struct Cli {
     #[arg(long)]
     pub prompt: Option<PathBuf>,
 
+    /// Personality file — contents prepended to the system prompt
+    #[arg(long)]
+    pub personality: Option<PathBuf>,
+
     /// Additional directories for claude --add-dir (repeatable)
     #[arg(long = "add-dir")]
     pub add_dirs: Vec<PathBuf>,
