@@ -13,7 +13,7 @@ use tokio::{
         unix::{OwnedReadHalf, OwnedWriteHalf},
         UnixListener, UnixStream,
     },
-    sync::{broadcast, Mutex, Notify},
+    sync::{broadcast, watch, Mutex},
 };
 use uuid::Uuid;
 
@@ -49,8 +49,11 @@ struct RoomState {
     token_map: TokenMap,
     chat_path: Arc<PathBuf>,
     room_id: Arc<String>,
-    /// Signalled by the `/exit` admin command to shut down the broker run loop.
-    shutdown: Arc<Notify>,
+    /// Set to `true` by the `/exit` admin command to shut down the broker.
+    /// Using watch so receivers that check after the fact see `true` immediately
+    /// — unlike `Notify`, this avoids the race where `notify_waiters()` fires
+    /// before a task's `.notified()` future is registered.
+    shutdown: Arc<watch::Sender<bool>>,
     /// Monotonically-increasing sequence counter. Incremented for every message
     /// broadcast or persisted by the broker, starting at 1.
     seq_counter: Arc<AtomicU64>,
@@ -82,7 +85,7 @@ impl Broker {
         let listener = UnixListener::bind(&self.socket_path)?;
         eprintln!("[broker] listening on {}", self.socket_path.display());
 
-        let shutdown = Arc::new(Notify::new());
+        let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
         let state = Arc::new(RoomState {
             clients: Arc::new(Mutex::new(HashMap::new())),
             status_map: Arc::new(Mutex::new(HashMap::new())),
@@ -90,7 +93,7 @@ impl Broker {
             token_map: Arc::new(Mutex::new(HashMap::new())),
             chat_path: Arc::new(self.chat_path.clone()),
             room_id: Arc::new(self.room_id.clone()),
-            shutdown: shutdown.clone(),
+            shutdown: Arc::new(shutdown_tx),
             seq_counter: Arc::new(AtomicU64::new(0)),
         });
         let mut next_id: u64 = 0;
@@ -119,7 +122,7 @@ impl Broker {
                         state_clone.clients.lock().await.remove(&cid);
                     });
                 }
-                _ = shutdown.notified() => {
+                _ = shutdown_rx.changed() => {
                     eprintln!("[broker] shutdown requested, exiting");
                     break Ok(());
                 }
@@ -244,7 +247,7 @@ async fn handle_client(
     // Also listens for the shutdown signal; drains the channel first so the
     // client sees the shutdown system message before receiving EOF.
     let write_half_out = write_half.clone();
-    let shutdown_out = state.shutdown.clone();
+    let mut shutdown_rx = state.shutdown.subscribe();
     let outbound = tokio::spawn(async move {
         loop {
             tokio::select! {
@@ -262,7 +265,7 @@ async fn handle_client(
                         Err(broadcast::error::RecvError::Closed) => break,
                     }
                 }
-                _ = shutdown_out.notified() => {
+                _ = shutdown_rx.changed() => {
                     // Drain any messages already queued (e.g. the shutdown notice)
                     // before closing so the client sees them before receiving EOF.
                     while let Ok(line) = rx.try_recv() {
@@ -634,8 +637,9 @@ async fn handle_admin_cmd(cmd_line: &str, issuer: &str, state: &RoomState) -> Op
             let content = format!("{issuer} is shutting down the room");
             let msg = make_system(room_id, "broker", content);
             let _ = broadcast_and_persist(&msg, clients, chat_path, seq_counter).await;
-            // Wake the main accept loop AND all outbound tasks simultaneously.
-            shutdown.notify_waiters();
+            // Set to true — watch receivers see this immediately regardless of
+            // when they registered, avoiding the notify_waiters() race.
+            let _ = shutdown.send(true);
         }
         "clear" => {
             // Truncate the history file.
