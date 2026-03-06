@@ -150,6 +150,13 @@ pub(super) fn handle_key(
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             return Some(Action::Quit);
         }
+        // Emacs-style word navigation (sent by macOS Terminal / iTerm2 for Option+arrow).
+        KeyCode::Char('b') if key.modifiers.contains(KeyModifiers::ALT) => {
+            state.cursor_pos = prev_word_start(&state.input, state.cursor_pos);
+        }
+        KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::ALT) => {
+            state.cursor_pos = next_word_end(&state.input, state.cursor_pos);
+        }
         KeyCode::Char(c) => {
             state.input.insert(state.cursor_pos, c);
             state.cursor_pos += c.len_utf8();
@@ -214,6 +221,12 @@ pub(super) fn handle_key(
                     }
                 }
             }
+        }
+        KeyCode::Left if key.modifiers.contains(KeyModifiers::ALT) => {
+            state.cursor_pos = prev_word_start(&state.input, state.cursor_pos);
+        }
+        KeyCode::Right if key.modifiers.contains(KeyModifiers::ALT) => {
+            state.cursor_pos = next_word_end(&state.input, state.cursor_pos);
         }
         KeyCode::Left => {
             if state.cursor_pos > 0 {
@@ -432,6 +445,68 @@ pub(super) fn seed_online_users_from_who(content: &str, online_users: &mut Vec<S
             if !username.is_empty() && !online_users.contains(&username) {
                 online_users.push(username);
             }
+        }
+    }
+}
+
+/// Move the cursor to the start of the previous word.
+///
+/// "Word" is a maximal run of non-whitespace characters. Starting from
+/// `cursor_pos`, the function first skips any trailing whitespace going
+/// backwards (phase 1), then skips the preceding non-whitespace run (phase 2),
+/// landing at the first byte of that word.
+///
+/// Returns 0 if there is no previous word.
+fn prev_word_start(input: &str, cursor_pos: usize) -> usize {
+    let before = &input[..cursor_pos];
+    let mut it = before.char_indices().rev();
+    // Phase 1: skip trailing whitespace going backward.
+    loop {
+        match it.next() {
+            None => return 0,
+            Some((_, c)) if c.is_whitespace() => continue,
+            Some((i, _)) => {
+                // Found the first non-whitespace; now skip the whole word.
+                // `i` is the byte index of the last char of the preceding word.
+                let mut word_start = i;
+                for (j, c) in it {
+                    if c.is_whitespace() {
+                        // `j` is the byte index of the whitespace char before the word.
+                        return j + c.len_utf8();
+                    }
+                    word_start = j;
+                }
+                return word_start;
+            }
+        }
+    }
+}
+
+/// Move the cursor to one past the end of the next word.
+///
+/// "Word" is a maximal run of non-whitespace characters. Starting from
+/// `cursor_pos`, the function first skips any leading whitespace going forward
+/// (phase 1), then skips the next non-whitespace run (phase 2), landing at the
+/// byte just after the last character of that word.
+///
+/// Returns `input.len()` if there is no next word.
+fn next_word_end(input: &str, cursor_pos: usize) -> usize {
+    let after = &input[cursor_pos..];
+    let mut it = after.char_indices().peekable();
+    // Phase 1: skip leading whitespace.
+    loop {
+        match it.next() {
+            None => return input.len(),
+            Some((_, c)) if c.is_whitespace() => continue,
+            Some(_) => break,
+        }
+    }
+    // Phase 2: skip non-whitespace.
+    loop {
+        match it.next() {
+            None => return input.len(),
+            Some((i, c)) if c.is_whitespace() => return cursor_pos + i,
+            _ => continue,
         }
     }
 }
@@ -1023,5 +1098,159 @@ mod tests {
     fn byte_offset_end_of_input() {
         // row beyond content → input.len()
         assert_eq!(byte_offset_at_display_pos("hello", 5, 0, 80), 5);
+    }
+
+    // ── prev_word_start ───────────────────────────────────────────────────────
+
+    #[test]
+    fn prev_word_start_from_end_of_word() {
+        // "hello world", cursor at end → previous word start = 6 ("world")
+        assert_eq!(prev_word_start("hello world", 11), 6);
+    }
+
+    #[test]
+    fn prev_word_start_from_mid_word() {
+        // "hello world", cursor at 8 (mid "world") → word start = 6
+        assert_eq!(prev_word_start("hello world", 8), 6);
+    }
+
+    #[test]
+    fn prev_word_start_skips_trailing_whitespace() {
+        // "hello world  ", cursor at 13 (after trailing spaces) → "world" starts at 6
+        assert_eq!(prev_word_start("hello world  ", 13), 6);
+    }
+
+    #[test]
+    fn prev_word_start_at_beginning_returns_zero() {
+        assert_eq!(prev_word_start("hello", 0), 0);
+    }
+
+    #[test]
+    fn prev_word_start_from_first_word_returns_zero() {
+        // "hello world", cursor in "hello" → 0
+        assert_eq!(prev_word_start("hello world", 3), 0);
+    }
+
+    #[test]
+    fn prev_word_start_single_word_no_spaces() {
+        assert_eq!(prev_word_start("hello", 5), 0);
+    }
+
+    #[test]
+    fn prev_word_start_multiple_spaces_between_words() {
+        // "foo   bar", cursor at 9 → "bar" starts at 6
+        assert_eq!(prev_word_start("foo   bar", 9), 6);
+    }
+
+    #[test]
+    fn prev_word_start_unicode_word() {
+        // "α β", cursor at 5 (after β which is 2 bytes) → 3 (start of β)
+        let s = "α β"; // α=2 bytes, space=1, β=2 bytes → len=5
+        assert_eq!(prev_word_start(s, 5), 3);
+    }
+
+    // ── next_word_end ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn next_word_end_from_start() {
+        // "hello world", cursor at 0 → end of "hello" = 5
+        assert_eq!(next_word_end("hello world", 0), 5);
+    }
+
+    #[test]
+    fn next_word_end_from_mid_word() {
+        // "hello world", cursor at 2 → end of "hello" = 5
+        assert_eq!(next_word_end("hello world", 2), 5);
+    }
+
+    #[test]
+    fn next_word_end_skips_leading_whitespace() {
+        // "hello world", cursor at 5 (space) → end of "world" = 11
+        assert_eq!(next_word_end("hello world", 5), 11);
+    }
+
+    #[test]
+    fn next_word_end_multiple_spaces() {
+        // "foo   bar", cursor at 3 → end of "bar" = 9
+        assert_eq!(next_word_end("foo   bar", 3), 9);
+    }
+
+    #[test]
+    fn next_word_end_at_end_returns_len() {
+        assert_eq!(next_word_end("hello", 5), 5);
+    }
+
+    #[test]
+    fn next_word_end_only_spaces_returns_len() {
+        assert_eq!(next_word_end("   ", 0), 3);
+    }
+
+    #[test]
+    fn next_word_end_unicode_word() {
+        // "α β", cursor at 0 → end of "α" = 2
+        let s = "α β";
+        assert_eq!(next_word_end(s, 0), 2);
+    }
+
+    // ── Alt+word-skip via handle_key ──────────────────────────────────────────
+
+    #[test]
+    fn alt_left_moves_to_prev_word_start() {
+        let mut state = InputState::new();
+        state.input = "hello world".to_owned();
+        state.cursor_pos = 11;
+        handle_key(
+            make_key_mod(KeyCode::Left, KeyModifiers::ALT),
+            &mut state,
+            &[],
+            10,
+            80,
+        );
+        assert_eq!(state.cursor_pos, 6);
+    }
+
+    #[test]
+    fn alt_right_moves_to_next_word_end() {
+        let mut state = InputState::new();
+        state.input = "hello world".to_owned();
+        state.cursor_pos = 0;
+        handle_key(
+            make_key_mod(KeyCode::Right, KeyModifiers::ALT),
+            &mut state,
+            &[],
+            10,
+            80,
+        );
+        assert_eq!(state.cursor_pos, 5);
+    }
+
+    #[test]
+    fn alt_b_moves_to_prev_word_start() {
+        let mut state = InputState::new();
+        state.input = "hello world".to_owned();
+        state.cursor_pos = 11;
+        handle_key(
+            make_key_mod(KeyCode::Char('b'), KeyModifiers::ALT),
+            &mut state,
+            &[],
+            10,
+            80,
+        );
+        assert_eq!(state.cursor_pos, 6);
+    }
+
+    #[test]
+    fn alt_f_moves_to_next_word_end() {
+        let mut state = InputState::new();
+        state.input = "hello world".to_owned();
+        state.cursor_pos = 0;
+        handle_key(
+            make_key_mod(KeyCode::Char('f'), KeyModifiers::ALT),
+            &mut state,
+            &[],
+            10,
+            80,
+        );
+        assert_eq!(state.cursor_pos, 5);
     }
 }
