@@ -566,3 +566,56 @@ gh run watch   # or check GitHub Actions tab
   underlying issue instead.
 - If CI is suppressed (e.g. tag pushed alongside a branch-protection bypass), delete and
   re-push the tag, or use `gh workflow run` if workflow_dispatch is enabled.
+
+## Agent setup (room-ralph)
+
+`room-ralph` is an autonomous agent wrapper that runs `claude -p` in a loop with
+auto-restart on context exhaustion. It communicates with a room broker via the `room`
+CLI (subprocess calls).
+
+### Permissions
+
+Claude's permission system controls what the agent can do. Configure via
+`.claude/settings.json` in the project directory:
+
+```json
+{
+  "permissions": {
+    "allow": [
+      "Read", "Glob", "Grep", "WebSearch",
+      "Bash(git status)", "Bash(git diff)", "Bash(cargo test)"
+    ],
+    "deny": []
+  }
+}
+```
+
+For fully autonomous operation (e.g. CI pipelines), ralph passes
+`--dangerously-skip-permissions` to claude. Do not use this for untrusted workloads.
+
+### Personality and system prompt
+
+Agents get their instructions from two sources:
+
+1. **CLAUDE.md** — loaded automatically by claude from the working directory. Put
+   project-wide conventions, coding standards, and agent behavior rules here. This is
+   the primary mechanism for agent personality and role definition.
+
+2. **`--prompt` flag** — pass a custom prompt file to override the built-in default.
+   Use this for agent-specific roles (e.g. a QA agent vs a feature agent).
+
+```bash
+room-ralph --room myroom --username qa-bot --prompt /path/to/qa-prompt.md
+```
+
+### Memory convention (3 layers)
+
+| Layer | Location | Lifespan | Purpose |
+|---|---|---|---|
+| **Memory files** | `~/.claude/projects/<project>/memory/` | Permanent | Stable patterns, architecture, preferences |
+| **Progress files** | `/tmp/room-progress-<issue>.md` | Per-issue | Cross-session state for active work |
+| **Room messages** | Room chat log | Per-broker session | Coordination, announcements, decisions |
+
+Ralph reads progress files on startup and writes them at milestones. Memory files are
+managed by claude via its auto-memory system. Room messages are accessed via `room poll`.
+The convention is enforced by CLAUDE.md instructions, not by ralph code.
