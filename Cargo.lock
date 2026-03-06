@@ -14,6 +14,7 @@ dependencies = [
  "futures-util",
  "ratatui",
  "reqwest",
+ "room-protocol",
  "serde",
  "serde_json",
  "tempfile",
@@ -1949,6 +1950,16 @@ dependencies = [
  "libc",
  "untrusted",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "room-protocol"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "uuid",
 ]
 
 [[package]]
