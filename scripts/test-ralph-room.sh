@@ -299,10 +299,10 @@ echo ""
 echo "=== Parse args ==="
 
 # parse_args sets globals — test in subshells to avoid pollution
-(
+if (
     # Reset defaults before parsing
     MODEL="opus"; ISSUE=""; USE_TMUX=false; MAX_ITER=50; COOLDOWN=5
-    CUSTOM_PROMPT=""; DRY_RUN=false; ADD_DIRS=()
+    export CUSTOM_PROMPT=""; DRY_RUN=false; ADD_DIRS=()
     parse_args "myroom" "agent1" --model "sonnet" --issue "42" --max-iter 10 --cooldown 2
     [[ "$MODEL" == "sonnet" ]] || exit 1
     [[ "$ISSUE" == "42" ]] || exit 1
@@ -310,56 +310,52 @@ echo "=== Parse args ==="
     [[ "$COOLDOWN" -eq 2 ]] || exit 1
     [[ "$ROOM_ID" == "myroom" ]] || exit 1
     [[ "$USERNAME" == "agent1" ]] || exit 1
-)
-if [[ $? -eq 0 ]]; then
+); then
     PASS=$((PASS + 1)); printf '  PASS: parse_args with all flags\n'
 else
     FAIL=$((FAIL + 1)); printf '  FAIL: parse_args with all flags\n'
 fi
 
-(
+if (
     MODEL="opus"; ISSUE=""; USE_TMUX=false; DRY_RUN=false; ADD_DIRS=()
     parse_args "room1" "user1" --tmux --dry-run
     [[ "$USE_TMUX" == "true" ]] || exit 1
     [[ "$DRY_RUN" == "true" ]] || exit 1
-)
-if [[ $? -eq 0 ]]; then
+); then
     PASS=$((PASS + 1)); printf '  PASS: parse_args boolean flags\n'
 else
     FAIL=$((FAIL + 1)); printf '  FAIL: parse_args boolean flags\n'
 fi
 
-(
+if (
     MODEL="opus"; ADD_DIRS=()
     parse_args "room1" "user1" --add-dir "/tmp/dir1" --add-dir "/tmp/dir2"
     [[ "${#ADD_DIRS[@]}" -eq 2 ]] || exit 1
     [[ "${ADD_DIRS[0]}" == "/tmp/dir1" ]] || exit 1
     [[ "${ADD_DIRS[1]}" == "/tmp/dir2" ]] || exit 1
-)
-if [[ $? -eq 0 ]]; then
+); then
     PASS=$((PASS + 1)); printf '  PASS: parse_args repeatable --add-dir\n'
 else
     FAIL=$((FAIL + 1)); printf '  FAIL: parse_args repeatable --add-dir\n'
 fi
 
-(
+if (
     MODEL="opus"
     parse_args "room1" "user1"
     [[ "$MODEL" == "opus" ]] || exit 1
     [[ "$ROOM_ID" == "room1" ]] || exit 1
-)
-if [[ $? -eq 0 ]]; then
+); then
     PASS=$((PASS + 1)); printf '  PASS: parse_args defaults\n'
 else
     FAIL=$((FAIL + 1)); printf '  FAIL: parse_args defaults\n'
 fi
 
 # Unknown option should fail
-(parse_args "room1" "user1" --unknown 2>/dev/null) && {
+if (parse_args "room1" "user1" --unknown 2>/dev/null); then
     FAIL=$((FAIL + 1)); printf '  FAIL: parse_args unknown option should fail\n'
-} || {
+else
     PASS=$((PASS + 1)); printf '  PASS: parse_args unknown option rejected\n'
-}
+fi
 
 echo ""
 echo "=== Progress file truncation ==="

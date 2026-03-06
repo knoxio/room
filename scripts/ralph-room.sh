@@ -435,7 +435,7 @@ run_loop() {
         log "running claude -p (model=$MODEL, iteration=$ITER)"
         local output_file="/tmp/ralph-room-output-${username}.json"
         local exit_code=0
-        cat "$prompt_file" | "${claude_cmd[@]}" > "$output_file" 2>>"$LOG_FILE" || exit_code=$?
+        "${claude_cmd[@]}" < "$prompt_file" > "$output_file" 2>>"$LOG_FILE" || exit_code=$?
 
         log "claude exited with code $exit_code"
 
