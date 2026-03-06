@@ -110,7 +110,11 @@ pub async fn cmd_watch(room_id: &str, token: &str, interval_secs: u64) -> anyhow
 
         let foreign: Vec<&Message> = messages
             .iter()
-            .filter(|m| matches!(m, Message::Message { user, .. } if user != &username))
+            .filter(|m| match m {
+                Message::Message { user, .. } => user != &username,
+                Message::DirectMessage { to, .. } => to == &username,
+                _ => false,
+            })
             .collect();
 
         if !foreign.is_empty() {
@@ -223,6 +227,78 @@ mod tests {
             .unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].id(), dm_alice_bob.id());
+    }
+
+    /// DMs addressed to the watcher are included in the foreign message filter
+    /// used by cmd_watch, not silently consumed.
+    #[tokio::test]
+    async fn poll_messages_dm_to_viewer_is_not_consumed_silently() {
+        use crate::message::make_dm;
+        let chat = NamedTempFile::new().unwrap();
+        let cursor_dir = TempDir::new().unwrap();
+        let cursor = cursor_dir.path().join("cursor");
+
+        // alice sends a DM to bob, and a broadcast message
+        let dm = make_dm("r", "alice", "bob", "secret for bob");
+        let msg = make_message("r", "alice", "public hello");
+        crate::history::append(chat.path(), &dm).await.unwrap();
+        crate::history::append(chat.path(), &msg).await.unwrap();
+
+        // Simulate what cmd_watch does: poll, then filter for foreign messages + DMs
+        let messages = poll_messages(chat.path(), &cursor, Some("bob"), None)
+            .await
+            .unwrap();
+
+        let username = "bob";
+        let foreign: Vec<&Message> = messages
+            .iter()
+            .filter(|m| match m {
+                Message::Message { user, .. } => user != username,
+                Message::DirectMessage { to, .. } => to == username,
+                _ => false,
+            })
+            .collect();
+
+        // Both the DM (addressed to bob) and the broadcast (from alice) should appear
+        assert_eq!(foreign.len(), 2, "watch should see DMs + foreign messages");
+        assert!(
+            foreign
+                .iter()
+                .any(|m| matches!(m, Message::DirectMessage { .. })),
+            "DM must not be silently consumed"
+        );
+    }
+
+    /// DMs sent BY the watcher are excluded from the foreign filter (no self-echo).
+    #[tokio::test]
+    async fn poll_messages_dm_from_viewer_excluded_from_watch() {
+        use crate::message::make_dm;
+        let chat = NamedTempFile::new().unwrap();
+        let cursor_dir = TempDir::new().unwrap();
+        let cursor = cursor_dir.path().join("cursor");
+
+        // bob sends a DM to alice
+        let dm = make_dm("r", "bob", "alice", "from bob");
+        crate::history::append(chat.path(), &dm).await.unwrap();
+
+        let messages = poll_messages(chat.path(), &cursor, Some("bob"), None)
+            .await
+            .unwrap();
+
+        let username = "bob";
+        let foreign: Vec<&Message> = messages
+            .iter()
+            .filter(|m| match m {
+                Message::Message { user, .. } => user != username,
+                Message::DirectMessage { to, .. } => to == username,
+                _ => false,
+            })
+            .collect();
+
+        assert!(
+            foreign.is_empty(),
+            "DMs sent by the watcher should not wake watch"
+        );
     }
 
     /// pull_messages returns the last n entries without moving the cursor.
