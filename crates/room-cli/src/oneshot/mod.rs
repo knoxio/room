@@ -2,11 +2,13 @@ pub mod list;
 pub mod poll;
 pub mod token;
 pub mod transport;
+pub mod who;
 
 pub use list::cmd_list;
 pub use poll::{cmd_poll, cmd_pull, cmd_watch, poll_messages, pull_messages};
 pub use token::{cmd_join, token_file_path, username_from_token};
 pub use transport::{join_session, send_message, send_message_with_token};
+pub use who::cmd_who;
 
 use std::path::PathBuf;
 

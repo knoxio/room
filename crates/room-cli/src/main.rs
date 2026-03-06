@@ -68,6 +68,19 @@ enum Cmd {
         #[arg(long, default_value_t = 5)]
         interval: u64,
     },
+    /// Query who is online and their status.
+    ///
+    /// Sends `/who` to the broker and prints the member list with statuses.
+    /// With `--json`, prints the raw JSON response instead of human-readable text.
+    Who {
+        room_id: String,
+        /// Session token from `room join` (required)
+        #[arg(short = 't', long)]
+        token: String,
+        /// Print raw JSON instead of human-readable text
+        #[arg(long)]
+        json: bool,
+    },
     /// List active rooms with running brokers.
     ///
     /// Scans `/tmp` for `room-*.sock` files and probes each to verify the broker
@@ -150,6 +163,13 @@ async fn main() -> anyhow::Result<()> {
             interval,
         }) => {
             oneshot::cmd_watch(&room_id, &token, interval).await?;
+        }
+        Some(Cmd::Who {
+            room_id,
+            token,
+            json,
+        }) => {
+            oneshot::cmd_who(&room_id, &token, json).await?;
         }
         Some(Cmd::List) => {
             oneshot::cmd_list().await?;
