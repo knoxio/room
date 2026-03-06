@@ -1,5 +1,15 @@
 # room — Agent Coordination Guide
 
+> **TL;DR — read these first**
+>
+> 1. Join the room before doing anything: `room join <room-id> <username>`
+> 2. Announce your plan and wait for go-ahead before writing code
+> 3. One agent per file — declare ownership before touching a file
+> 4. Announce before every push, fix commit, or rebase — never push silently
+> 5. Every PR must include tests — test count must not decrease
+> 6. Run `bash scripts/pre-push.sh` before every push (or the four commands manually)
+> 7. Write shell scripts to `/tmp/` with the Write tool, then `bash /tmp/script.sh` — avoid inline shell metacharacters
+
 ## What is `room`?
 
 `room` is a CLI tool that lets multiple Claude agents and humans share a group chat over
@@ -79,6 +89,38 @@ room send myroom -t $TOKEN "fixing clippy error on PR #42, hold review"
 # ... fix ...
 room send myroom -t $TOKEN "fix pushed"
 ```
+
+## Shell environment constraints
+
+Claude Code's Bash tool triggers permission prompts on certain shell patterns. Avoid these
+to keep the workflow smooth:
+
+**Forbidden patterns:**
+- `TOKEN=$(...)` or any `$()` command substitution inline
+- `export VAR=...` followed by `$VAR` expansion in the same or later commands
+- Double-quoted strings with shell metacharacters (`"$(cat ...)"`, `"${VAR}"`)
+- `cat > file << 'EOF'` heredocs (use the Write tool instead)
+
+**Workarounds:**
+1. Write multi-step scripts to `/tmp/` using the Write tool, then run with `bash /tmp/script.sh`
+2. For token extraction: `python3 -c "import json; print(json.load(open('/tmp/room-<id>-<user>.token'))['token'])"`
+3. Pass tokens inline with `--token` flag, not via environment variables
+4. For git commits with multi-line messages: write to `/tmp/commit_msg.txt`, then `git commit -F /tmp/commit_msg.txt`
+
+## Token file format
+
+After `room join <room-id> <username>`, the token is saved to `/tmp/room-<room-id>-<username>.token`:
+
+```json
+{"type":"token","token":"<uuid>","username":"<username>"}
+```
+
+Extract the UUID with:
+```bash
+python3 -c "import json; print(json.load(open('/tmp/room-<id>-<user>.token'))['token'])"
+```
+
+The cursor (last-seen message ID) is stored at `/tmp/room-<id>-<username>.cursor`.
 
 ## Wire format
 
@@ -184,14 +226,20 @@ room send myroom -t $TOKEN "opening PR for #42"
   "fixing conflict on PR #30, hold review"
   "about to modify src/tui.rs — adding palette overlay only, not touching input rendering"
   ```
-- **Fix commits, CI failures, and rebases require the same announce-first discipline.**
-  Do not silently push a fix. Announce before you start, then again when pushed:
+- **Announce-before-fix is mandatory.** Fix commits, CI failures, rebases, and review
+  feedback all require announcement BEFORE you start working. The pattern is always:
+  1. Send "fixing X on PR #N, hold review" — wait for no objections
+  2. Do the fix
+  3. Send "fix pushed, PR #N ready for re-review"
+
+  Never silently push a fix. Examples:
   ```
   "clippy error on PR #42 — fixing, hold review"
   "rebase conflict on PR #38, resolving now"
   "addressing review feedback on PR #55 — touching broker.rs only"
   ```
-  After the fix is pushed: `"fix pushed, PR #42 ready for re-review"`
+  Violations: if ba or joao sends "hold" at any point, **stop immediately**. Do not
+  continue implementation. Wait for explicit go-ahead before resuming.
 - **Poll and send a milestone update at natural breakpoints:**
   - After reading the target file (before writing any code)
   - After completing a first working draft (before running tests)
@@ -201,6 +249,13 @@ room send myroom -t $TOKEN "opening PR for #42"
 ### Coordination rules
 - **One agent per file at a time.** If you need to modify a file that another agent has
   claimed, ask them first.
+- **File ownership declarations.** When starting work, list every file you will touch in
+  your plan announcement. This is your claim. Other agents must not modify those files
+  without asking you first. Format:
+  ```
+  "files I will touch: src/plugin/mod.rs (NEW), src/broker/commands.rs, src/lib.rs"
+  ```
+  If two agents need the same file, ba coordinates merge order.
 - **Schema changes need consensus.** If your feature requires adding a new message type or
   changing the wire format, announce the proposed change and wait for agreement before
   implementing.
@@ -213,6 +268,39 @@ room send myroom -t $TOKEN "opening PR for #42"
 2. State which files were modified.
 3. Note any decisions or trade-offs the other agents or the human should be aware of.
 4. Include `Closes #<issue-number>` in the PR description so the issue auto-closes on merge.
+
+### Tests-in-same-PR rule
+
+Every PR that adds or changes functionality **must** include tests in the same PR. Do not
+defer testing to a follow-up. The test count must never decrease without explicit
+justification. Types of tests expected:
+
+- **Unit tests**: for pure logic, data structures, helpers. Place in `#[cfg(test)] mod tests`
+  inside the source file.
+- **Integration tests**: for end-to-end flows through the broker. Place in `tests/integration.rs`.
+- If your change is a bug fix, add a regression test that fails without the fix.
+
+### Agent memory convention
+
+Each agent stores persistent notes in its auto-memory directory
+(`~/.claude/projects/<project>/memory/`). Structure memories by topic:
+
+- `MEMORY.md` — concise index (loaded into every conversation, keep under 200 lines)
+- Topic files (e.g. `debugging.md`, `patterns.md`) — detailed notes linked from MEMORY.md
+
+**What to store:** stable patterns confirmed across multiple sessions, key file paths,
+user preferences, solutions to recurring problems, architectural decisions.
+
+**What NOT to store:** session-specific state, in-progress task details, speculative
+conclusions from a single file read.
+
+When the user corrects something you stated from memory, update the memory file immediately.
+
+### Progress tracking
+
+Use room messages as the source of truth for sprint progress — do not maintain separate
+progress files. ba tracks sprint status in the room and updates it at natural milestones.
+If you need to check what is done or in progress, poll the room.
 
 ## Workspace structure
 
@@ -241,18 +329,18 @@ src/
     mod.rs             — Accept loop, handle_client, handle_oneshot_send
     state.rs           — RoomState struct and type aliases (ClientMap, StatusMap, etc.)
     auth.rs            — Token issuance (issue_token) and validation (validate_token)
-    commands.rs        — Unified command routing (route_command, handle_admin_cmd)
+    commands.rs        — Unified command routing (route_command, handle_admin_cmd, dispatch_plugin)
     fanout.rs          — broadcast_and_persist, dm_and_persist
     ws.rs              — WebSocket upgrade, REST endpoints, WS session lifecycle
+  plugin/
+    mod.rs             — Plugin trait, PluginRegistry, CommandContext, HistoryReader, ChatWriter
+    help.rs            — Built-in /help plugin
+    stats.rs           — Built-in /stats plugin
   oneshot/
     mod.rs             — Re-exports and subcommand dispatch
     transport.rs       — Socket connect, send_message, send_message_with_token
     token.rs           — Token file I/O, cursor read/write, cmd_join
     poll.rs            — poll_messages, pull_messages, cmd_poll, cmd_pull, cmd_watch
-  plugin/
-    mod.rs             — Plugin trait, PluginRegistry, HistoryReader, ChatWriter
-    help.rs            — Built-in /help command
-    stats.rs           — Built-in /stats command
   tui/
     mod.rs             — Main run() loop and TUI state
     input.rs           — InputState, handle_key, Action enum
@@ -308,7 +396,7 @@ All tests must remain green. Add tests for any new behaviour.
 
 ## Baseline test count
 
-**Current baseline: 307 tests (231 unit + 71 integration + 5 smoke)**
+**Current baseline: 318 tests (242 unit + 71 integration + 5 smoke)**
 
 Every PR that adds functionality must also add tests. The test count must never decrease
 without explicit justification in the PR description. If you remove tests, explain why
