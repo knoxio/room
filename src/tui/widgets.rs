@@ -32,6 +32,17 @@ pub(super) const PALETTE_COMMANDS: &[PaletteItem] = &[
         usage: "/who",
         description: "List users in the room",
     },
+    // Plugin commands
+    PaletteItem {
+        cmd: "help",
+        usage: "/help [command]",
+        description: "List available commands or get help for a specific command",
+    },
+    PaletteItem {
+        cmd: "stats",
+        usage: "/stats [last N]",
+        description: "Show statistical summary of recent chat activity",
+    },
     // Admin commands
     PaletteItem {
         cmd: "kick",

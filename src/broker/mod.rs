@@ -16,6 +16,7 @@ use std::{
 use crate::{
     history,
     message::{make_join, make_leave, parse_client_line, Message},
+    plugin::{self, PluginRegistry},
 };
 use auth::{handle_oneshot_join, validate_token};
 use commands::{route_command, CommandResult};
@@ -64,6 +65,11 @@ impl Broker {
         eprintln!("[broker] listening on {}", self.socket_path.display());
 
         let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
+
+        let mut registry = PluginRegistry::new();
+        registry.register(Box::new(plugin::help::HelpPlugin))?;
+        registry.register(Box::new(plugin::stats::StatsPlugin))?;
+
         let state = Arc::new(RoomState {
             clients: Arc::new(Mutex::new(HashMap::new())),
             status_map: Arc::new(Mutex::new(HashMap::new())),
@@ -73,6 +79,7 @@ impl Broker {
             room_id: Arc::new(self.room_id.clone()),
             shutdown: Arc::new(shutdown_tx),
             seq_counter: Arc::new(AtomicU64::new(0)),
+            plugin_registry: Arc::new(registry),
         });
         let next_client_id = Arc::new(AtomicU64::new(0));
 

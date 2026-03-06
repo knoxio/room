@@ -6,6 +6,8 @@ use std::{
 
 use tokio::sync::{broadcast, watch, Mutex};
 
+use crate::plugin::PluginRegistry;
+
 /// Maps client ID → (username, broadcast sender).
 /// Username is set after the handshake completes.
 pub(crate) type ClientMap = Arc<Mutex<HashMap<u64, (String, broadcast::Sender<String>)>>>;
@@ -37,4 +39,6 @@ pub(crate) struct RoomState {
     /// Monotonically-increasing sequence counter. Incremented for every message
     /// broadcast or persisted by the broker, starting at 1.
     pub(crate) seq_counter: Arc<AtomicU64>,
+    /// Plugin registry for dispatching `/` commands to plugins.
+    pub(crate) plugin_registry: Arc<PluginRegistry>,
 }

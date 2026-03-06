@@ -1,4 +1,7 @@
-use crate::message::{make_system, Message};
+use crate::{
+    message::{make_system, Message},
+    plugin::{ChatWriter, CommandContext, HistoryReader, PluginResult, RoomMetadata},
+};
 
 use super::{fanout::broadcast_and_persist, state::RoomState};
 
@@ -97,9 +100,86 @@ pub(crate) async fn route_command(
             }
             return Ok(CommandResult::Handled);
         }
+
+        // Plugin dispatch — check registry before falling through to Passthrough.
+        if let Some(plugin) = state.plugin_registry.resolve(cmd) {
+            let plugin_name = plugin.name().to_owned();
+            match dispatch_plugin(plugin, &msg, username, state).await {
+                Ok(result) => return Ok(result),
+                Err(e) => {
+                    // Plugin errors are sent as private replies, never swallowed.
+                    let err_msg = format!("plugin:{plugin_name} error: {e}");
+                    let sys = make_system(&state.room_id, "broker", err_msg);
+                    let json = serde_json::to_string(&sys)?;
+                    return Ok(CommandResult::Reply(json));
+                }
+            }
+        }
     }
 
     Ok(CommandResult::Passthrough(msg))
+}
+
+/// Build a [`CommandContext`] and call a plugin's `handle` method, translating
+/// the [`PluginResult`] into a [`CommandResult`] the broker understands.
+async fn dispatch_plugin(
+    plugin: &dyn crate::plugin::Plugin,
+    msg: &Message,
+    username: &str,
+    state: &RoomState,
+) -> anyhow::Result<CommandResult> {
+    let (cmd, params, id, ts) = match msg {
+        Message::Command {
+            cmd,
+            params,
+            id,
+            ts,
+            ..
+        } => (cmd, params, id, ts),
+        _ => return Ok(CommandResult::Passthrough(msg.clone())),
+    };
+
+    let history = HistoryReader::new(&state.chat_path, username);
+    let writer = ChatWriter::new(
+        &state.clients,
+        &state.chat_path,
+        &state.room_id,
+        &state.seq_counter,
+        plugin.name(),
+    );
+    let metadata =
+        RoomMetadata::snapshot(&state.status_map, &state.host_user, &state.chat_path).await;
+    let available_commands = state.plugin_registry.all_commands();
+
+    let ctx = CommandContext {
+        command: cmd.clone(),
+        params: params.clone(),
+        sender: username.to_owned(),
+        room_id: state.room_id.as_ref().clone(),
+        message_id: id.clone(),
+        timestamp: *ts,
+        history,
+        writer,
+        metadata,
+        available_commands,
+    };
+
+    let result = plugin.handle(ctx).await?;
+
+    Ok(match result {
+        PluginResult::Reply(text) => {
+            let sys = make_system(&state.room_id, &format!("plugin:{}", plugin.name()), text);
+            let json = serde_json::to_string(&sys)?;
+            CommandResult::Reply(json)
+        }
+        PluginResult::Broadcast(text) => {
+            let sys = make_system(&state.room_id, &format!("plugin:{}", plugin.name()), text);
+            broadcast_and_persist(&sys, &state.clients, &state.chat_path, &state.seq_counter)
+                .await?;
+            CommandResult::Handled
+        }
+        PluginResult::Handled => CommandResult::Handled,
+    })
 }
 
 /// Dispatch a `\command [arg]` line sent from a connected client.
@@ -254,6 +334,7 @@ mod tests {
             room_id: Arc::new("test-room".to_owned()),
             shutdown: Arc::new(shutdown_tx),
             seq_counter: Arc::new(AtomicU64::new(0)),
+            plugin_registry: Arc::new(crate::plugin::PluginRegistry::new()),
         })
     }
 
