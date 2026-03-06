@@ -160,16 +160,29 @@ room send myroom -t $TOKEN "opening PR for #42"
 
 ```
 src/
-  main.rs      — CLI parsing, subcommand dispatch (join / send / poll / watch)
-  broker.rs    — Unix socket server, message fanout, persistence
-  client.rs    — Connects to broker, runs TUI or agent mode
-  tui.rs       — ratatui split-pane interface
-  message.rs   — Wire format enum, constructors, parse_client_line
-  history.rs   — NDJSON load/append
-  oneshot.rs   — send_message / poll_messages (no persistent connection)
-  lib.rs       — Re-exports all modules (required for integration tests)
+  main.rs              — CLI parsing, subcommand dispatch (join / send / poll / watch)
+  lib.rs               — Re-exports all modules (required for integration tests)
+  client.rs            — Connects to broker, runs TUI or agent mode
+  message.rs           — Wire format enum, constructors, parse_client_line
+  history.rs           — NDJSON load/append
+  broker/
+    mod.rs             — Accept loop, handle_client, handle_oneshot_send
+    state.rs           — RoomState struct and type aliases (ClientMap, StatusMap, etc.)
+    auth.rs            — Token issuance (issue_token) and validation (validate_token)
+    commands.rs        — Unified command routing (route_command, handle_admin_cmd)
+    fanout.rs          — broadcast_and_persist, dm_and_persist
+  oneshot/
+    mod.rs             — Re-exports and subcommand dispatch
+    transport.rs       — Socket connect, send_message, send_message_with_token
+    token.rs           — Token file I/O, cursor read/write, cmd_join
+    poll.rs            — poll_messages, pull_messages, cmd_poll, cmd_pull, cmd_watch
+  tui/
+    mod.rs             — Main run() loop and TUI state
+    input.rs           — InputState, handle_key, Action enum
+    render.rs          — format_message, wrap_words, rendering helpers
+    widgets.rs         — CommandPalette, MentionPicker
 tests/
-  integration.rs — 55 integration tests against a live broker
+  integration.rs       — Integration tests against a live broker
 ```
 
 Key invariants to preserve:

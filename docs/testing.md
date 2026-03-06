@@ -42,9 +42,13 @@ cargo test broadcast
 
 ```
 src/
-  tui.rs           — unit tests for wrap_words, cursor, palette, mention picker
   message.rs       — unit tests for Message serde round-trips
   history.rs       — unit tests for NDJSON load/append
+  tui/input.rs     — unit tests for handle_key, cursor, key bindings
+  tui/render.rs    — unit tests for wrap_words, format_message
+  tui/widgets.rs   — unit tests for CommandPalette, MentionPicker
+  oneshot/token.rs — unit tests for token file I/O, cursor read/write
+  oneshot/poll.rs  — unit tests for DM filter, cursor advancement
 tests/
   integration.rs   — integration tests against a live broker
 ```
