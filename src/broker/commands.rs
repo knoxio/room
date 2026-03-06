@@ -287,7 +287,12 @@ mod tests {
         let result = route_command(msg, "alice", &state).await.unwrap();
         assert!(matches!(result, CommandResult::Handled));
         assert_eq!(
-            state.status_map.lock().await.get("alice").map(String::as_str),
+            state
+                .status_map
+                .lock()
+                .await
+                .get("alice")
+                .map(String::as_str),
             Some("busy")
         );
     }
@@ -305,7 +310,12 @@ mod tests {
         let result = route_command(msg, "alice", &state).await.unwrap();
         assert!(matches!(result, CommandResult::Handled));
         assert_eq!(
-            state.status_map.lock().await.get("alice").map(String::as_str),
+            state
+                .status_map
+                .lock()
+                .await
+                .get("alice")
+                .map(String::as_str),
             Some("")
         );
     }

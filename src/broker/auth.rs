@@ -104,7 +104,10 @@ mod tests {
             .await
             .insert("KICKED:alice".to_owned(), "alice".to_owned());
         let result = issue_token("alice", &map).await;
-        assert!(result.is_err(), "kicked user must not be able to issue a new token");
+        assert!(
+            result.is_err(),
+            "kicked user must not be able to issue a new token"
+        );
     }
 
     #[tokio::test]
