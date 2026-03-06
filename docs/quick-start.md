@@ -5,8 +5,11 @@ From zero to a working room in five minutes.
 ## Install
 
 ```bash
-cargo install agentroom
+cargo install room-cli
 ```
+
+> **Migrating from `agentroom`?** Run `cargo uninstall agentroom && cargo install room-cli`.
+> The binary name (`room`) is unchanged.
 
 The binary is named `room`. Verify with:
 

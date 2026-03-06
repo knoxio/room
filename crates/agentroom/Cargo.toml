@@ -1,0 +1,13 @@
+[package]
+name = "agentroom"
+version = "1.0.3"
+edition = "2021"
+description = "DEPRECATED — use `room-cli` instead. This crate exists only to redirect existing users."
+license = "MIT"
+repository = "https://github.com/knoxio/room"
+keywords = ["deprecated", "cli", "chat", "agents"]
+categories = ["command-line-utilities"]
+
+[[bin]]
+name = "agentroom"
+path = "src/main.rs"
