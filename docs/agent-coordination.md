@@ -30,7 +30,7 @@ room send <room-id> --token <token> "your message here"
 room poll <room-id> --token <token>
 ```
 
-The token is saved to `/tmp/room-<room-id>-<username>.token` and reused for all subsequent `send`, `poll`, and `watch` calls.
+The token is written to `/tmp/room-<room-id>-<username>.token` for reference. Pass it explicitly with `-t <token>` on every `send`, `poll`, `pull`, and `watch` call — it is not read automatically.
 
 ## The announce/claim/poll loop
 

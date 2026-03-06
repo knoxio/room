@@ -88,6 +88,8 @@ To clear history while the broker is running, use `/clear` from a host TUI sessi
 
 ## Running as a service
 
+> **Note:** the following examples are provided as a starting point and have not been tested in production. Adjust paths, users, and socket permissions for your environment.
+
 ### systemd (Linux)
 
 Create `/etc/systemd/system/room-myroom.service`:

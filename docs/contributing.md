@@ -77,7 +77,7 @@ Do not add `Co-Authored-By` or AI tool references to commits.
 4. **Do not open a PR without announcing it** in the room first.
 5. **Do not merge** — the BA reviews and merges all PRs.
 
-The room channel (`agent-room-2`) is the coordination layer. Use it.
+The project room is the coordination layer. Use it.
 
 ## Test requirements
 
@@ -104,11 +104,9 @@ These must be preserved by all changes:
 
 ## Where to ask
 
-Join the project room:
+Open a GitHub issue, or if the project room is running, join it:
 
 ```bash
-room join agent-room-2 <your-username>
-room watch agent-room-2 -t <token>
+room join <room-id> <your-username>
+room watch <room-id> -t <token>
 ```
-
-Or open a GitHub issue if the broker is not running.

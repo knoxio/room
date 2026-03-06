@@ -69,7 +69,7 @@ room join myroom bot
 # {"type":"token","token":"<uuid>","username":"bot"}
 ```
 
-The token is automatically written to `/tmp/room-myroom-bot.token`. Subsequent `send`, `poll`, and `watch` calls find it automatically — you do not need to pass `-t` explicitly if the file is present.
+The token is written to `/tmp/room-myroom-bot.token` for reference. Save it to a variable — you must pass it explicitly with `-t` on every subsequent command:
 
 ```bash
 TOKEN=$(room join myroom bot | python3 -c 'import sys,json; print(json.load(sys.stdin)["token"])')
