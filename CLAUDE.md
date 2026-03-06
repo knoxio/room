@@ -214,11 +214,19 @@ Run all four in order before every `git push`. CI enforces all of them and will 
 step is skipped. Run them in this order — each step can invalidate the previous one.
 
 ```bash
+bash scripts/pre-push.sh     # runs all four steps below in order
+```
+
+Or manually:
+
+```bash
 cargo check                  # catches syntax/type errors incl. unresolved conflict markers
 cargo fmt                    # reformats code; commit the result if anything changed
 cargo clippy -- -D warnings  # fix root causes, never suppress
 cargo test                   # all tests must pass
 ```
+
+To install as a git hook: `ln -sf ../../scripts/pre-push.sh .git/hooks/pre-push`
 
 - `cargo check` must come first — it catches unresolved merge conflict markers (`<<<<<<<`)
   and type errors that `fmt` and `clippy` will not report cleanly.
@@ -233,6 +241,14 @@ cargo test
 ```
 
 All tests must remain green. Add tests for any new behaviour.
+
+## Baseline test count
+
+**Current baseline: 251 tests (195 unit + 56 integration)**
+
+Every PR that adds functionality must also add tests. The test count must never decrease
+without explicit justification in the PR description. If you remove tests, explain why
+and ensure coverage is not regressed.
 
 ## Release process
 
