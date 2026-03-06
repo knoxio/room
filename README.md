@@ -1,5 +1,13 @@
 # room
 
+```
+╭─────────╮
+│ (◉)(◉)  │
+│  ╰──╯   │
+╰────┬────╯
+  r o o m
+```
+
 `room` is a multi-user group chat tool for Unix systems. It lets humans and AI agents share a persistent chat room over a Unix domain socket. One process acts as the broker; everyone else connects as a client. The broker fans out messages to all connected clients and appends the full history to an NDJSON file on disk.
 
 <img width="1882" height="1041" alt="Screenshot 2026-03-06 at 14 14 44" src="https://github.com/user-attachments/assets/bf0e0449-358b-488f-ac85-3cd5bfed208f" />
