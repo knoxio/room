@@ -286,6 +286,13 @@ pub async fn run(
     let mut mention = MentionPicker::new();
     let mut result: anyhow::Result<()> = Ok(());
 
+    // Seed online_users immediately so @mention autocomplete works for users
+    // who were already connected before we joined.
+    let who_payload = build_payload("/who");
+    write_half
+        .write_all(format!("{who_payload}\n").as_bytes())
+        .await?;
+
     'main: loop {
         // Drain pending messages from the socket reader
         while let Ok(msg) = msg_rx.try_recv() {
@@ -295,6 +302,10 @@ pub async fn run(
                 }
                 Message::Leave { user, .. } => {
                     online_users.retain(|u| u != user);
+                }
+                // Parse the /who response to seed the authoritative user list.
+                Message::System { user, content, .. } if user == "broker" => {
+                    seed_online_users_from_who(content, &mut online_users);
                 }
                 _ => {}
             }
@@ -799,6 +810,9 @@ pub async fn run(
                 }
                 Message::Leave { user, .. } => {
                     online_users.retain(|u| u != user);
+                }
+                Message::System { user, content, .. } if user == "broker" => {
+                    seed_online_users_from_who(content, &mut online_users);
                 }
                 _ => {}
             }
@@ -1397,6 +1411,43 @@ mod tests {
         assert!(usage.starts_with('\\'));
     }
 
+    // ── seed_online_users_from_who tests ─────────────────────────────────────
+
+    #[test]
+    fn seed_who_populates_users() {
+        let mut users = Vec::new();
+        seed_online_users_from_who("online — alice, bob, charlie", &mut users);
+        assert_eq!(users, ["alice", "bob", "charlie"]);
+    }
+
+    #[test]
+    fn seed_who_strips_status_suffix() {
+        let mut users = Vec::new();
+        seed_online_users_from_who("online — alice: away, bob: coding", &mut users);
+        assert_eq!(users, ["alice", "bob"]);
+    }
+
+    #[test]
+    fn seed_who_no_users_online_is_noop() {
+        let mut users = Vec::new();
+        seed_online_users_from_who("no users online", &mut users);
+        assert!(users.is_empty());
+    }
+
+    #[test]
+    fn seed_who_does_not_duplicate_existing_users() {
+        let mut users = vec!["alice".to_owned()];
+        seed_online_users_from_who("online — alice, bob", &mut users);
+        assert_eq!(users, ["alice", "bob"]);
+    }
+
+    #[test]
+    fn seed_who_unrelated_system_message_is_noop() {
+        let mut users = Vec::new();
+        seed_online_users_from_who("alice set status: away", &mut users);
+        assert!(users.is_empty());
+    }
+
     // ── build_payload tests ───────────────────────────────────────────────────
 
     #[test]
@@ -1771,6 +1822,22 @@ fn apply_backslash_enter(buf: &mut String, cursor_pos: usize) -> Option<usize> {
 }
 
 /// Convert TUI input to a JSON envelope for the broker.
+/// Seed `online_users` from the broker's `/who` response content.
+///
+/// The broker sends `"online — alice, bob: away, charlie"` (or `"no users online"`).
+/// Each entry is either a bare username or `username: status`; we extract the username part.
+/// Merges into the existing list without removing users added by Join events.
+fn seed_online_users_from_who(content: &str, online_users: &mut Vec<String>) {
+    if let Some(rest) = content.strip_prefix("online — ") {
+        for entry in rest.split(", ") {
+            let username = entry.split(':').next().unwrap_or(entry).trim().to_owned();
+            if !username.is_empty() && !online_users.contains(&username) {
+                online_users.push(username);
+            }
+        }
+    }
+}
+
 fn build_payload(input: &str) -> String {
     // `/dm <user> <message>` — preserve spaces in the message body.
     if let Some(rest) = input.strip_prefix("/dm ") {
