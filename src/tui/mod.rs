@@ -27,7 +27,7 @@ use input::{
     build_payload, cursor_display_pos, handle_key, seed_online_users_from_who, wrap_input_display,
     Action, InputState,
 };
-use render::{assign_color, find_view_start, format_message, user_color, ColorMap};
+use render::{assign_color, find_view_start, format_message, user_color, welcome_splash, ColorMap};
 
 /// Maximum visible content lines in the input box before it stops growing.
 const MAX_INPUT_LINES: usize = 6;
@@ -98,6 +98,7 @@ pub async fn run(
     let mut color_map = ColorMap::new();
     let mut state = InputState::new();
     let mut result: anyhow::Result<()> = Ok(());
+    let mut frame_count: usize = 0;
 
     // Seed online_users immediately so @mention autocomplete works for users
     // who were already connected before we joined.
@@ -221,13 +222,39 @@ pub async fn run(
             } else {
                 format!(" {room_id} ")
             };
-            let msg_list = List::new(visible).block(
-                Block::default()
-                    .title(title)
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::DarkGray)),
-            );
-            f.render_widget(msg_list, chunks[0]);
+
+            // Show the welcome splash when there are no chat messages yet.
+            let has_chat = messages.iter().any(|m| {
+                matches!(
+                    m,
+                    Message::Message { .. }
+                        | Message::Reply { .. }
+                        | Message::Command { .. }
+                        | Message::DirectMessage { .. }
+                )
+            });
+
+            if !has_chat {
+                let splash_width = chunks[0].width.saturating_sub(2) as usize;
+                let splash = welcome_splash(frame_count, splash_width);
+                let splash_widget = Paragraph::new(splash)
+                    .block(
+                        Block::default()
+                            .title(title.clone())
+                            .borders(Borders::ALL)
+                            .border_style(Style::default().fg(Color::DarkGray)),
+                    )
+                    .alignment(ratatui::layout::Alignment::Left);
+                f.render_widget(splash_widget, chunks[0]);
+            } else {
+                let msg_list = List::new(visible).block(
+                    Block::default()
+                        .title(title)
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(Color::DarkGray)),
+                );
+                f.render_widget(msg_list, chunks[0]);
+            }
 
             // Render only the visible slice of wrapped input rows.
             let end = (state.input_row_scroll + visible_input_lines).min(total_input_rows);
@@ -421,6 +448,8 @@ pub async fn run(
                 Err(mpsc::error::TryRecvError::Disconnected) => break 'main,
             }
         }
+
+        frame_count = frame_count.wrapping_add(1);
     }
 
     disable_raw_mode()?;
