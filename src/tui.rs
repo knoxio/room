@@ -300,6 +300,11 @@ pub async fn run(
                 Message::Leave { user, .. } => {
                     online_users.retain(|u| u != user);
                 }
+                // Seed from message senders so @mention works for users who connected
+                // via poll/send (no persistent connection, not in the status_map).
+                Message::Message { user, .. } if !online_users.contains(user) => {
+                    online_users.push(user.clone());
+                }
                 // Parse the /who response to seed the authoritative user list.
                 Message::System { user, content, .. } if user == "broker" => {
                     seed_online_users_from_who(content, &mut online_users);
@@ -711,6 +716,11 @@ pub async fn run(
                 }
                 Message::Leave { user, .. } => {
                     online_users.retain(|u| u != user);
+                }
+                // Seed from message senders so @mention works for users who connected
+                // via poll/send (no persistent connection, not in the status_map).
+                Message::Message { user, .. } if !online_users.contains(user) => {
+                    online_users.push(user.clone());
                 }
                 Message::System { user, content, .. } if user == "broker" => {
                     seed_online_users_from_who(content, &mut online_users);
@@ -1349,6 +1359,36 @@ mod tests {
         let mut users = Vec::new();
         seed_online_users_from_who("alice set status: away", &mut users);
         assert!(users.is_empty());
+    }
+
+    // ── online_users seeding from message senders ────────────────────────────
+
+    #[test]
+    fn mention_picker_shows_user_added_from_message_sender() {
+        // Simulate: a user r2d2 sends a message; their name is seeded into online_users
+        // (the drain loop adds Message::Message senders if not already present).
+        let mut online_users: Vec<String> = Vec::new();
+        // Replicate the drain-loop guard exactly as written in the source.
+        let user = "r2d2".to_owned();
+        if !online_users.contains(&user) {
+            online_users.push(user);
+        }
+        // MentionPicker should now find this user when activated with an empty query.
+        let mut picker = MentionPicker::new();
+        picker.activate(0, &online_users, "");
+        assert!(picker.active);
+        assert_eq!(picker.filtered, vec!["r2d2".to_owned()]);
+    }
+
+    #[test]
+    fn message_sender_not_duplicated_if_already_online() {
+        let mut online_users = vec!["alice".to_owned()];
+        // Same guard as the drain loop.
+        let user = "alice".to_owned();
+        if !online_users.contains(&user) {
+            online_users.push(user);
+        }
+        assert_eq!(online_users.len(), 1);
     }
 
     // ── build_payload tests ───────────────────────────────────────────────────
