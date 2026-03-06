@@ -7,7 +7,7 @@ use crossterm::{
 };
 use ratatui::{
     backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph},
@@ -234,6 +234,9 @@ pub async fn run(
                 )
             });
 
+            let version_title =
+                Line::from(format!(" v{} ", env!("CARGO_PKG_VERSION"))).alignment(Alignment::Right);
+
             if !has_chat {
                 let splash_width = chunks[0].width.saturating_sub(2) as usize;
                 let splash = welcome_splash(frame_count, splash_width);
@@ -241,15 +244,17 @@ pub async fn run(
                     .block(
                         Block::default()
                             .title(title.clone())
+                            .title_top(version_title)
                             .borders(Borders::ALL)
                             .border_style(Style::default().fg(Color::DarkGray)),
                     )
-                    .alignment(ratatui::layout::Alignment::Left);
+                    .alignment(Alignment::Left);
                 f.render_widget(splash_widget, chunks[0]);
             } else {
                 let msg_list = List::new(visible).block(
                     Block::default()
                         .title(title)
+                        .title_top(version_title)
                         .borders(Borders::ALL)
                         .border_style(Style::default().fg(Color::DarkGray)),
                 );

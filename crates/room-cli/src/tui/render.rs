@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
+use chrono::Local;
 use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
@@ -63,6 +64,8 @@ const DM_ARROW: &str = "\u{2192}";
 /// - An antenna light on top blinks between ✦ (bright) and · (dim).
 /// - The right eye winks every other cycle (◉ → ‿).
 /// - The "room" label pulses between bright cyan and dim gray.
+///
+/// Below the logo: tagline, version, and today's date.
 pub(super) fn welcome_splash(frame: usize, width: usize) -> Text<'static> {
     const BLINK_INTERVAL: usize = 10; // ~500ms at 50ms/frame
     let phase = frame / BLINK_INTERVAL;
@@ -123,6 +126,27 @@ pub(super) fn welcome_splash(frame: usize, width: usize) -> Text<'static> {
             Span::styled(raw.to_string(), *style),
         ]));
     }
+
+    // Blank separator
+    lines.push(Line::from(""));
+
+    // Tagline
+    let tagline = "Agent coordination for humans";
+    let tagline_pad = " ".repeat(width.saturating_sub(tagline.len()) / 2);
+    lines.push(Line::from(vec![
+        Span::raw(tagline_pad),
+        Span::styled(tagline.to_string(), Style::default().fg(Color::DarkGray)),
+    ]));
+
+    // Version + date
+    let version = env!("CARGO_PKG_VERSION");
+    let today = Local::now().format("%Y-%m-%d");
+    let info = format!("v{version}  ·  {today}");
+    let info_pad = " ".repeat(width.saturating_sub(info.len()) / 2);
+    lines.push(Line::from(vec![
+        Span::raw(info_pad),
+        Span::styled(info, Style::default().fg(Color::DarkGray)),
+    ]));
 
     Text::from(lines)
 }
@@ -654,6 +678,88 @@ mod tests {
     fn find_view_start_empty_heights() {
         let heights: [usize; 0] = [];
         assert_eq!(find_view_start(&heights, 0), (0, 0));
+    }
+
+    // ── welcome_splash tests ──────────────────────────────────────────────
+
+    #[test]
+    fn welcome_splash_contains_tagline() {
+        let text = welcome_splash(0, 60);
+        let content: String = text
+            .lines
+            .iter()
+            .flat_map(|line| line.spans.iter().map(|s| s.content.to_string()))
+            .collect::<Vec<_>>()
+            .join("");
+        assert!(
+            content.contains("Agent coordination for humans"),
+            "splash should contain tagline"
+        );
+    }
+
+    #[test]
+    fn welcome_splash_contains_version() {
+        let text = welcome_splash(0, 60);
+        let content: String = text
+            .lines
+            .iter()
+            .flat_map(|line| line.spans.iter().map(|s| s.content.to_string()))
+            .collect::<Vec<_>>()
+            .join("");
+        let version = env!("CARGO_PKG_VERSION");
+        assert!(
+            content.contains(&format!("v{version}")),
+            "splash should contain version"
+        );
+    }
+
+    #[test]
+    fn welcome_splash_contains_date() {
+        let text = welcome_splash(0, 60);
+        let content: String = text
+            .lines
+            .iter()
+            .flat_map(|line| line.spans.iter().map(|s| s.content.to_string()))
+            .collect::<Vec<_>>()
+            .join("");
+        let today = Local::now().format("%Y-%m-%d").to_string();
+        assert!(
+            content.contains(&today),
+            "splash should contain today's date"
+        );
+    }
+
+    #[test]
+    fn welcome_splash_animation_changes_between_phases() {
+        let frame_a = welcome_splash(0, 60);
+        let frame_b = welcome_splash(10, 60); // one BLINK_INTERVAL later
+        let content_a: String = frame_a
+            .lines
+            .iter()
+            .flat_map(|line| line.spans.iter().map(|s| s.content.to_string()))
+            .collect::<Vec<_>>()
+            .join("");
+        let content_b: String = frame_b
+            .lines
+            .iter()
+            .flat_map(|line| line.spans.iter().map(|s| s.content.to_string()))
+            .collect::<Vec<_>>()
+            .join("");
+        assert_ne!(
+            content_a, content_b,
+            "animation should change between phases"
+        );
+    }
+
+    #[test]
+    fn welcome_splash_has_more_lines_than_logo() {
+        let text = welcome_splash(0, 60);
+        // Logo is 7 lines + 1 vpad + 1 blank separator + tagline + version/date = 12 min
+        assert!(
+            text.lines.len() >= 11,
+            "splash should have logo + tagline + version lines, got {}",
+            text.lines.len()
+        );
     }
 
     #[test]
