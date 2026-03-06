@@ -1518,6 +1518,62 @@ async fn admin_exit_shuts_down_broker() {
     );
 }
 
+
+/// After `/exit`, connected clients receive EOF (Ok(0)) on their socket read,
+/// which the TUI detects to exit cleanly without requiring Ctrl-C.
+#[tokio::test]
+async fn exit_causes_broker_to_close_client_connections() {
+    let broker = TestBroker::start("t_exit_eof").await;
+    let mut admin = TestClient::connect(&broker.socket_path, "admin").await;
+    admin
+        .recv_until(|m| matches!(m, Message::Join { .. }))
+        .await;
+
+    // A second client to verify all connections are closed, not just admin's.
+    let mut alice = TestClient::connect(&broker.socket_path, "alice").await;
+    alice
+        .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "alice"))
+        .await;
+
+    admin
+        .send_json(r#"{"type":"command","cmd":"exit","params":[]}"#)
+        .await;
+
+    // Both clients should see the shutdown message.
+    admin
+        .recv_until(
+            |m| matches!(m, Message::System { content, .. } if content.contains("shutting down")),
+        )
+        .await;
+    alice
+        .recv_until(
+            |m| matches!(m, Message::System { content, .. } if content.contains("shutting down")),
+        )
+        .await;
+
+    // After the shutdown message the broker closes the sockets. Both clients
+    // should get EOF (read returns 0 bytes) within a short window.
+    let admin_eof = tokio::time::timeout(Duration::from_millis(500), async {
+        let mut buf = String::new();
+        admin.reader.read_line(&mut buf).await.unwrap_or(0)
+    })
+    .await;
+    assert!(
+        matches!(admin_eof, Ok(0)),
+        "admin socket should receive EOF after /exit"
+    );
+
+    let alice_eof = tokio::time::timeout(Duration::from_millis(500), async {
+        let mut buf = String::new();
+        alice.reader.read_line(&mut buf).await.unwrap_or(0)
+    })
+    .await;
+    assert!(
+        matches!(alice_eof, Ok(0)),
+        "alice socket should receive EOF after /exit"
+    );
+}
+
 // ── pull_messages tests ────────────────────────────────────────────────────────
 
 /// `pull_messages` returns the last N messages from history.

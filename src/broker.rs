@@ -240,21 +240,41 @@ async fn handle_client(
     // Wrap write half in Arc<Mutex> for shared use by outbound and inbound tasks
     let write_half = Arc::new(Mutex::new(write_half));
 
-    // Outbound: receive from broadcast channel, forward to client socket
+    // Outbound: receive from broadcast channel, forward to client socket.
+    // Also listens for the shutdown signal; drains the channel first so the
+    // client sees the shutdown system message before receiving EOF.
     let write_half_out = write_half.clone();
+    let shutdown_out = state.shutdown.clone();
     let outbound = tokio::spawn(async move {
         loop {
-            match rx.recv().await {
-                Ok(line) => {
-                    let mut wh = write_half_out.lock().await;
-                    if wh.write_all(line.as_bytes()).await.is_err() {
-                        break;
+            tokio::select! {
+                result = rx.recv() => {
+                    match result {
+                        Ok(line) => {
+                            let mut wh = write_half_out.lock().await;
+                            if wh.write_all(line.as_bytes()).await.is_err() {
+                                break;
+                            }
+                        }
+                        Err(broadcast::error::RecvError::Lagged(n)) => {
+                            eprintln!("[broker] cid={cid} lagged by {n}");
+                        }
+                        Err(broadcast::error::RecvError::Closed) => break,
                     }
                 }
-                Err(broadcast::error::RecvError::Lagged(n)) => {
-                    eprintln!("[broker] cid={cid} lagged by {n}");
+                _ = shutdown_out.notified() => {
+                    // Drain any messages already queued (e.g. the shutdown notice)
+                    // before closing so the client sees them before receiving EOF.
+                    while let Ok(line) = rx.try_recv() {
+                        let mut wh = write_half_out.lock().await;
+                        let _ = wh.write_all(line.as_bytes()).await;
+                    }
+                    // Explicitly shut down the write side to send EOF to the client,
+                    // even though write_half_in (in the inbound task) still holds
+                    // the Arc — without this, the socket stays open.
+                    let _ = write_half_out.lock().await.shutdown().await;
+                    break;
                 }
-                Err(broadcast::error::RecvError::Closed) => break,
             }
         }
     });
@@ -614,7 +634,8 @@ async fn handle_admin_cmd(cmd_line: &str, issuer: &str, state: &RoomState) -> Op
             let content = format!("{issuer} is shutting down the room");
             let msg = make_system(room_id, "broker", content);
             let _ = broadcast_and_persist(&msg, clients, chat_path, seq_counter).await;
-            shutdown.notify_one();
+            // Wake the main accept loop AND all outbound tasks simultaneously.
+            shutdown.notify_waiters();
         }
         "clear" => {
             // Truncate the history file.

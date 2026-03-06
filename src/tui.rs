@@ -291,27 +291,34 @@ pub async fn run(
         .await?;
 
     'main: loop {
-        // Drain pending messages from the socket reader
-        while let Ok(msg) = msg_rx.try_recv() {
-            match &msg {
-                Message::Join { user, .. } if !online_users.contains(user) => {
-                    online_users.push(user.clone());
+        // Drain pending messages from the socket reader.
+        // Break 'main when the broker disconnects (sender dropped).
+        loop {
+            match msg_rx.try_recv() {
+                Ok(msg) => {
+                    match &msg {
+                        Message::Join { user, .. } if !online_users.contains(user) => {
+                            online_users.push(user.clone());
+                        }
+                        Message::Leave { user, .. } => {
+                            online_users.retain(|u| u != user);
+                        }
+                        // Seed from message senders so @mention works for users who connected
+                        // via poll/send (no persistent connection, not in the status_map).
+                        Message::Message { user, .. } if !online_users.contains(user) => {
+                            online_users.push(user.clone());
+                        }
+                        // Parse the /who response to seed the authoritative user list.
+                        Message::System { user, content, .. } if user == "broker" => {
+                            seed_online_users_from_who(content, &mut online_users);
+                        }
+                        _ => {}
+                    }
+                    messages.push(msg);
                 }
-                Message::Leave { user, .. } => {
-                    online_users.retain(|u| u != user);
-                }
-                // Seed from message senders so @mention works for users who connected
-                // via poll/send (no persistent connection, not in the status_map).
-                Message::Message { user, .. } if !online_users.contains(user) => {
-                    online_users.push(user.clone());
-                }
-                // Parse the /who response to seed the authoritative user list.
-                Message::System { user, content, .. } if user == "broker" => {
-                    seed_online_users_from_who(content, &mut online_users);
-                }
-                _ => {}
+                Err(mpsc::error::TryRecvError::Empty) => break,
+                Err(mpsc::error::TryRecvError::Disconnected) => break 'main,
             }
-            messages.push(msg);
         }
 
         let term_area = terminal.size()?;
@@ -708,26 +715,33 @@ pub async fn run(
             }
         }
 
-        // Drain any messages that arrived during the poll
-        while let Ok(msg) = msg_rx.try_recv() {
-            match &msg {
-                Message::Join { user, .. } if !online_users.contains(user) => {
-                    online_users.push(user.clone());
+        // Drain any messages that arrived during the poll.
+        // Break 'main when the broker disconnects (sender dropped).
+        loop {
+            match msg_rx.try_recv() {
+                Ok(msg) => {
+                    match &msg {
+                        Message::Join { user, .. } if !online_users.contains(user) => {
+                            online_users.push(user.clone());
+                        }
+                        Message::Leave { user, .. } => {
+                            online_users.retain(|u| u != user);
+                        }
+                        // Seed from message senders so @mention works for users who connected
+                        // via poll/send (no persistent connection, not in the status_map).
+                        Message::Message { user, .. } if !online_users.contains(user) => {
+                            online_users.push(user.clone());
+                        }
+                        Message::System { user, content, .. } if user == "broker" => {
+                            seed_online_users_from_who(content, &mut online_users);
+                        }
+                        _ => {}
+                    }
+                    messages.push(msg);
                 }
-                Message::Leave { user, .. } => {
-                    online_users.retain(|u| u != user);
-                }
-                // Seed from message senders so @mention works for users who connected
-                // via poll/send (no persistent connection, not in the status_map).
-                Message::Message { user, .. } if !online_users.contains(user) => {
-                    online_users.push(user.clone());
-                }
-                Message::System { user, content, .. } if user == "broker" => {
-                    seed_online_users_from_who(content, &mut online_users);
-                }
-                _ => {}
+                Err(mpsc::error::TryRecvError::Empty) => break,
+                Err(mpsc::error::TryRecvError::Disconnected) => break 'main,
             }
-            messages.push(msg);
         }
     }
 
