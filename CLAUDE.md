@@ -136,6 +136,14 @@ room send myroom -t $TOKEN "opening PR for #42"
   "fixing conflict on PR #30, hold review"
   "about to modify src/tui.rs — adding palette overlay only, not touching input rendering"
   ```
+- **Fix commits, CI failures, and rebases require the same announce-first discipline.**
+  Do not silently push a fix. Announce before you start, then again when pushed:
+  ```
+  "clippy error on PR #42 — fixing, hold review"
+  "rebase conflict on PR #38, resolving now"
+  "addressing review feedback on PR #55 — touching broker.rs only"
+  ```
+  After the fix is pushed: `"fix pushed, PR #42 ready for re-review"`
 - **Poll and send a milestone update at natural breakpoints:**
   - After reading the target file (before writing any code)
   - After completing a first working draft (before running tests)
