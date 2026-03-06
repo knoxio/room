@@ -226,3 +226,253 @@ pub(crate) async fn handle_admin_cmd(
     }
     None
 }
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::{handle_admin_cmd, route_command, CommandResult};
+    use crate::{
+        broker::state::RoomState,
+        message::{make_command, make_dm, make_message},
+    };
+    use std::{
+        collections::HashMap,
+        sync::{atomic::AtomicU64, Arc},
+    };
+    use tempfile::NamedTempFile;
+    use tokio::sync::{watch, Mutex};
+
+    fn make_state(chat_path: std::path::PathBuf) -> Arc<RoomState> {
+        let (shutdown_tx, _) = watch::channel(false);
+        Arc::new(RoomState {
+            clients: Arc::new(Mutex::new(HashMap::new())),
+            status_map: Arc::new(Mutex::new(HashMap::new())),
+            host_user: Arc::new(Mutex::new(None)),
+            token_map: Arc::new(Mutex::new(HashMap::new())),
+            chat_path: Arc::new(chat_path),
+            room_id: Arc::new("test-room".to_owned()),
+            shutdown: Arc::new(shutdown_tx),
+            seq_counter: Arc::new(AtomicU64::new(0)),
+        })
+    }
+
+    // ── route_command: passthrough ─────────────────────────────────────────
+
+    #[tokio::test]
+    async fn route_command_regular_message_is_passthrough() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+        let msg = make_message("test-room", "alice", "hello");
+        let result = route_command(msg, "alice", &state).await.unwrap();
+        assert!(matches!(result, CommandResult::Passthrough(_)));
+    }
+
+    #[tokio::test]
+    async fn route_command_dm_message_is_passthrough() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+        let msg = make_dm("test-room", "alice", "bob", "secret");
+        let result = route_command(msg, "alice", &state).await.unwrap();
+        assert!(matches!(result, CommandResult::Passthrough(_)));
+    }
+
+    // ── route_command: set_status ──────────────────────────────────────────
+
+    #[tokio::test]
+    async fn route_command_set_status_returns_handled_and_updates_map() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+        let msg = make_command("test-room", "alice", "set_status", vec!["busy".to_owned()]);
+        let result = route_command(msg, "alice", &state).await.unwrap();
+        assert!(matches!(result, CommandResult::Handled));
+        assert_eq!(
+            state.status_map.lock().await.get("alice").map(String::as_str),
+            Some("busy")
+        );
+    }
+
+    #[tokio::test]
+    async fn route_command_set_status_empty_params_clears_status() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+        state
+            .status_map
+            .lock()
+            .await
+            .insert("alice".to_owned(), "busy".to_owned());
+        let msg = make_command("test-room", "alice", "set_status", vec![]);
+        let result = route_command(msg, "alice", &state).await.unwrap();
+        assert!(matches!(result, CommandResult::Handled));
+        assert_eq!(
+            state.status_map.lock().await.get("alice").map(String::as_str),
+            Some("")
+        );
+    }
+
+    // ── route_command: who ─────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn route_command_who_with_online_user_in_reply() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+        state
+            .status_map
+            .lock()
+            .await
+            .insert("alice".to_owned(), String::new());
+        let msg = make_command("test-room", "alice", "who", vec![]);
+        let result = route_command(msg, "alice", &state).await.unwrap();
+        let CommandResult::Reply(json) = result else {
+            panic!("expected Reply");
+        };
+        assert!(json.contains("alice"), "reply should list alice");
+    }
+
+    #[tokio::test]
+    async fn route_command_who_empty_room_says_no_users_online() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+        let msg = make_command("test-room", "alice", "who", vec![]);
+        let result = route_command(msg, "alice", &state).await.unwrap();
+        let CommandResult::Reply(json) = result else {
+            panic!("expected Reply");
+        };
+        assert!(json.contains("no users online"));
+    }
+
+    #[tokio::test]
+    async fn route_command_who_shows_status_alongside_name() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+        state
+            .status_map
+            .lock()
+            .await
+            .insert("alice".to_owned(), "reviewing PR".to_owned());
+        let msg = make_command("test-room", "alice", "who", vec![]);
+        let CommandResult::Reply(json) = route_command(msg, "alice", &state).await.unwrap() else {
+            panic!("expected Reply");
+        };
+        assert!(json.contains("reviewing PR"));
+    }
+
+    // ── route_command: admin permission gating ────────────────────────────
+
+    #[tokio::test]
+    async fn route_command_admin_as_non_host_gets_permission_denied_reply() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+        *state.host_user.lock().await = Some("host-user".to_owned());
+        let msg = make_command("test-room", "alice", "kick", vec!["bob".to_owned()]);
+        let CommandResult::Reply(json) = route_command(msg, "alice", &state).await.unwrap() else {
+            panic!("expected Reply");
+        };
+        assert!(json.contains("permission denied"));
+    }
+
+    #[tokio::test]
+    async fn route_command_admin_when_no_host_set_gets_permission_denied() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+        // host_user is None
+        let msg = make_command("test-room", "alice", "exit", vec![]);
+        let CommandResult::Reply(json) = route_command(msg, "alice", &state).await.unwrap() else {
+            panic!("expected Reply");
+        };
+        assert!(json.contains("permission denied"));
+    }
+
+    // ── route_command: admin commands as host ─────────────────────────────
+
+    #[tokio::test]
+    async fn route_command_kick_as_host_returns_handled_and_invalidates_token() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+        *state.host_user.lock().await = Some("alice".to_owned());
+        state
+            .token_map
+            .lock()
+            .await
+            .insert("some-uuid".to_owned(), "bob".to_owned());
+        let msg = make_command("test-room", "alice", "kick", vec!["bob".to_owned()]);
+        let result = route_command(msg, "alice", &state).await.unwrap();
+        assert!(matches!(result, CommandResult::Handled));
+        let guard = state.token_map.lock().await;
+        assert!(
+            !guard.contains_key("some-uuid"),
+            "original token must be revoked"
+        );
+        assert_eq!(
+            guard.get("KICKED:bob").map(String::as_str),
+            Some("bob"),
+            "KICKED sentinel must be inserted"
+        );
+    }
+
+    #[tokio::test]
+    async fn route_command_exit_as_host_returns_shutdown() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+        *state.host_user.lock().await = Some("alice".to_owned());
+        let msg = make_command("test-room", "alice", "exit", vec![]);
+        let result = route_command(msg, "alice", &state).await.unwrap();
+        assert!(matches!(result, CommandResult::Shutdown));
+    }
+
+    // ── handle_admin_cmd directly ─────────────────────────────────────────
+
+    #[tokio::test]
+    async fn handle_admin_cmd_reauth_removes_token_and_sentinel() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+        *state.host_user.lock().await = Some("alice".to_owned());
+        {
+            let mut guard = state.token_map.lock().await;
+            guard.insert("uuid-bob".to_owned(), "bob".to_owned());
+            guard.insert("KICKED:bob".to_owned(), "bob".to_owned());
+        }
+        let err = handle_admin_cmd("reauth bob", "alice", &state).await;
+        assert!(err.is_none(), "reauth should succeed");
+        let guard = state.token_map.lock().await;
+        assert!(
+            !guard.values().any(|u| u == "bob"),
+            "all bob entries must be removed after reauth"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_admin_cmd_clear_tokens_empties_the_map() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+        *state.host_user.lock().await = Some("alice".to_owned());
+        {
+            let mut guard = state.token_map.lock().await;
+            guard.insert("t1".to_owned(), "alice".to_owned());
+            guard.insert("t2".to_owned(), "bob".to_owned());
+        }
+        let err = handle_admin_cmd("clear-tokens", "alice", &state).await;
+        assert!(err.is_none(), "clear-tokens should succeed");
+        assert!(
+            state.token_map.lock().await.is_empty(),
+            "token map must be empty after clear-tokens"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_admin_cmd_clear_removes_prior_history() {
+        let tmp = NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), b"some existing history\n").unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+        *state.host_user.lock().await = Some("alice".to_owned());
+        let err = handle_admin_cmd("clear", "alice", &state).await;
+        assert!(err.is_none(), "clear should succeed");
+        // The file is truncated first then a "cleared" notice is appended;
+        // old content must not be present.
+        let contents = std::fs::read_to_string(tmp.path()).unwrap();
+        assert!(
+            !contents.contains("some existing history"),
+            "prior history must be gone after clear"
+        );
+    }
+}
