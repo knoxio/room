@@ -137,8 +137,8 @@ assert_exit "should_restart: empty defaults to 0" \
   1 should_restart ""
 
 # Custom threshold
-CONTEXT_LIMIT=100000
-CONTEXT_THRESHOLD=50
+export CONTEXT_LIMIT=100000
+export CONTEXT_THRESHOLD=50
 assert_exit "should_restart: custom 50K threshold, 60K tokens" \
   0 should_restart 60000
 
@@ -161,7 +161,7 @@ assert_eq "context_usage_pct: 100%" \
 assert_eq "context_usage_pct: 0 tokens" \
   "0" "$(context_usage_pct 0)"
 
-CONTEXT_LIMIT=100000
+export CONTEXT_LIMIT=100000
 assert_eq "context_usage_pct: custom limit 60%" \
   "60" "$(context_usage_pct 60000)"
 unset CONTEXT_LIMIT
@@ -208,7 +208,7 @@ assert_exit "log_usage: empty path returns 1" \
 
 # Test: CONTEXT_LOG_FILE
 log_file="$tmpdir/usage.log"
-CONTEXT_LOG_FILE="$log_file"
+export CONTEXT_LOG_FILE="$log_file"
 log_progress="$tmpdir/log-test.md"
 log_usage 120000 "$log_progress" 1000
 assert_eq "log_usage: writes to CONTEXT_LOG_FILE" \

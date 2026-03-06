@@ -21,3 +21,17 @@ jobs:
         run: cargo clippy -- -D warnings
       - name: Tests
         run: cargo test
+
+  scripts:
+    name: Shell Scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install shellcheck
+        run: sudo apt-get install -y shellcheck
+      - name: Shellcheck
+        run: shellcheck --exclude=SC1091 scripts/*.sh
+      - name: Shell tests
+        run: |
+          bash scripts/test-context-monitor.sh
+          bash scripts/test-ralph-room.sh

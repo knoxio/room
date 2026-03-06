@@ -44,4 +44,4 @@ step "cargo test"
 cargo test 2>&1 || fail "cargo test"
 pass "cargo test"
 
-printf "\n${GREEN}${BOLD}[pre-push] All checks passed.${RESET}\n"
+printf '\n%s%s[pre-push] All checks passed.%s\n' "$GREEN" "$BOLD" "$RESET"
