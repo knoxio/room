@@ -850,50 +850,52 @@ const DM_ARROW: &str = "\u{2192}";
 
 /// Word-wrap `text` so that no line exceeds `width` characters.
 ///
+/// Explicit `\n` characters in `text` are preserved as hard line breaks.
 /// Words longer than `width` are hard-split at the column boundary.
 /// If `width` is 0 the text is returned as a single unsplit chunk.
 fn wrap_words(text: &str, width: usize) -> Vec<String> {
     if width == 0 {
         return vec![text.to_string()];
     }
-    let mut lines: Vec<String> = Vec::new();
-    let mut current = String::new();
-
-    for word in text.split_whitespace() {
-        if current.is_empty() {
-            // Hard-split any word that is longer than the available width.
-            let mut w = word;
-            while w.chars().count() > width {
-                let split_idx = w
-                    .char_indices()
-                    .nth(width)
-                    .map(|(i, _)| i)
-                    .unwrap_or(w.len());
-                lines.push(w[..split_idx].to_string());
-                w = &w[split_idx..];
+    let mut all_chunks: Vec<String> = Vec::new();
+    for logical_line in text.split('\n') {
+        let mut current = String::new();
+        for word in logical_line.split_whitespace() {
+            if current.is_empty() {
+                // Hard-split any word that is longer than the available width.
+                let mut w = word;
+                while w.chars().count() > width {
+                    let split_idx = w
+                        .char_indices()
+                        .nth(width)
+                        .map(|(i, _)| i)
+                        .unwrap_or(w.len());
+                    all_chunks.push(w[..split_idx].to_string());
+                    w = &w[split_idx..];
+                }
+                current = w.to_string();
+            } else if current.chars().count() + 1 + word.chars().count() <= width {
+                current.push(' ');
+                current.push_str(word);
+            } else {
+                all_chunks.push(std::mem::take(&mut current));
+                let mut w = word;
+                while w.chars().count() > width {
+                    let split_idx = w
+                        .char_indices()
+                        .nth(width)
+                        .map(|(i, _)| i)
+                        .unwrap_or(w.len());
+                    all_chunks.push(w[..split_idx].to_string());
+                    w = &w[split_idx..];
+                }
+                current = w.to_string();
             }
-            current = w.to_string();
-        } else if current.chars().count() + 1 + word.chars().count() <= width {
-            current.push(' ');
-            current.push_str(word);
-        } else {
-            lines.push(std::mem::take(&mut current));
-            let mut w = word;
-            while w.chars().count() > width {
-                let split_idx = w
-                    .char_indices()
-                    .nth(width)
-                    .map(|(i, _)| i)
-                    .unwrap_or(w.len());
-                lines.push(w[..split_idx].to_string());
-                w = &w[split_idx..];
-            }
-            current = w.to_string();
         }
+        // Push remaining content for this logical line (may be empty for blank lines).
+        all_chunks.push(current);
     }
-
-    lines.push(current); // may be empty for empty input — that's fine
-    lines
+    all_chunks
 }
 
 fn format_message(msg: &Message, available_width: usize) -> Text<'static> {
@@ -1431,6 +1433,40 @@ mod tests {
         let payload = build_payload("/dm bob hello   world");
         let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
         assert_eq!(v["content"], "hello   world");
+    }
+
+    // ── wrap_words tests ──────────────────────────────────────────────────────
+
+    #[test]
+    fn wrap_words_preserves_explicit_newline() {
+        let chunks = wrap_words("hello\nworld", 40);
+        assert_eq!(chunks, ["hello", "world"]);
+    }
+
+    #[test]
+    fn wrap_words_double_newline_produces_blank_line() {
+        let chunks = wrap_words("first\n\nsecond", 40);
+        assert_eq!(chunks, ["first", "", "second"]);
+    }
+
+    #[test]
+    fn wrap_words_newline_with_wrapping() {
+        // Each logical line is word-wrapped independently.
+        let chunks = wrap_words("short\na b c d e", 5);
+        // "short" fits in 5 chars; "a b c d e" wraps as "a b c", "d e"
+        assert_eq!(chunks, ["short", "a b c", "d e"]);
+    }
+
+    #[test]
+    fn wrap_words_no_newline_unchanged() {
+        let chunks = wrap_words("hello world", 40);
+        assert_eq!(chunks, ["hello world"]);
+    }
+
+    #[test]
+    fn wrap_words_trailing_newline_produces_blank_chunk() {
+        let chunks = wrap_words("hello\n", 40);
+        assert_eq!(chunks, ["hello", ""]);
     }
 
     // ── wrap_input_display and cursor_display_pos tests (from #17) ─────────
