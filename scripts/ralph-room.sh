@@ -10,6 +10,10 @@
 #   - anthropics/claude-code ralph-wiggum plugin: stop-hook in-session loop
 #   - frankbria/ralph-claude-code: rate limiting + exit detection
 #
+# Integrates:
+#   - scripts/context-monitor.sh: proactive token usage monitoring (r2d2, #188)
+#   - scripts/progress-template.md: structured progress file format (sonnet-2, #187)
+#
 # This script takes the outer-loop approach (vs the stop-hook approach) because:
 #   1. Each iteration gets a clean context window — no accumulated drift
 #   2. Progress files are the single source of truth across restarts
@@ -439,11 +443,32 @@ run_loop() {
         local response
         response="$(extract_response "$output_file")"
 
-        # detect context exhaustion
-        if detect_context_exhaustion "$exit_code" "$response"; then
-            log "context exhaustion detected, writing progress file"
+        # context monitoring: parse token usage from raw JSON output
+        local input_tokens=0 output_tokens=0
+        if type parse_usage &>/dev/null && [[ -f "$output_file" && -s "$output_file" ]]; then
+            local raw_json
+            raw_json="$(cat "$output_file")"
+            input_tokens="$(parse_usage "$raw_json")"
+            output_tokens="$(parse_output_tokens "$raw_json")"
+            log "$(format_usage_summary "$input_tokens" "$output_tokens")"
+            log_usage "$input_tokens" "$PROGRESS_FILE" "$output_tokens" "$ITER"
+        fi
+
+        # detect context exhaustion — two paths:
+        # 1. proactive: token usage exceeds threshold (from context-monitor.sh)
+        # 2. reactive: claude crashed with context-related error message
+        local should_cycle=false
+        if type should_restart &>/dev/null && should_restart "$input_tokens"; then
+            log "proactive restart: token usage ($input_tokens) exceeds threshold"
+            should_cycle=true
+        elif detect_context_exhaustion "$exit_code" "$response"; then
+            log "reactive restart: context exhaustion detected in output"
+            should_cycle=true
+        fi
+
+        if $should_cycle; then
             write_progress_file "$PROGRESS_FILE" "$ITER" "$ISSUE" "$response"
-            room send "$room_id" -t "$TOKEN" "context exhausted at iteration $ITER, restarting with fresh context" 2>/dev/null || true
+            room send "$room_id" -t "$TOKEN" "context limit at iteration $ITER (tokens: $input_tokens), restarting with fresh context" 2>/dev/null || true
         elif [[ "$exit_code" -ne 0 ]]; then
             log "claude failed (exit $exit_code), will retry after cooldown"
             room send "$room_id" -t "$TOKEN" "claude exited with error (code $exit_code), retrying in ${COOLDOWN}s" 2>/dev/null || true
@@ -477,6 +502,17 @@ main() {
 
     # dependency check
     check_dependencies || exit 1
+
+    # source context monitoring library
+    local script_dir
+    script_dir="$(cd "$(dirname "$0")" && pwd)"
+    if [[ -f "$script_dir/context-monitor.sh" ]]; then
+        # shellcheck source=context-monitor.sh
+        source "$script_dir/context-monitor.sh"
+        log "context-monitor.sh loaded (threshold: $(get_threshold_tokens) tokens)"
+    else
+        log "warning: context-monitor.sh not found, token monitoring disabled"
+    fi
 
     # tmux mode
     if $USE_TMUX; then
