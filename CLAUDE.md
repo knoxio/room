@@ -286,19 +286,43 @@ justification. Types of tests expected:
 
 ### Agent memory convention
 
-Each agent stores persistent notes in its auto-memory directory
-(`~/.claude/projects/<project>/memory/`). Structure memories by topic:
+Agents have three types of persistent state, each serving a different purpose:
+
+| Type | Location | Lifespan | Purpose |
+|---|---|---|---|
+| **Memory files** | `~/.claude/projects/<project>/memory/` | Permanent (across sprints) | Stable patterns, preferences, architecture |
+| **Progress files** | `/tmp/room-progress-<issue>.md` | Per-issue (delete on merge) | Cross-session state for active work |
+| **Room messages** | Room chat log | Per-broker session | Coordination, announcements, decisions |
+
+#### Memory files
+
+Structure memories by topic in the auto-memory directory:
 
 - `MEMORY.md` — concise index (loaded into every conversation, keep under 200 lines)
 - Topic files (e.g. `debugging.md`, `patterns.md`) — detailed notes linked from MEMORY.md
 
 **What to store:** stable patterns confirmed across multiple sessions, key file paths,
-user preferences, solutions to recurring problems, architectural decisions.
+user preferences, solutions to recurring problems, architectural decisions, sprint state
+(current version, test count, team roster).
 
 **What NOT to store:** session-specific state, in-progress task details, speculative
 conclusions from a single file read.
 
-When the user corrects something you stated from memory, update the memory file immediately.
+**When to update:**
+- After every significant discovery — do not wait until session end
+- When the user corrects something you stated from memory — fix it immediately
+- After each sprint closes — update version, test count, team changes
+- When you discover a workaround to a recurring problem — save it for next time
+
+**Cleanup:** Remove memories that are outdated or contradicted by new evidence. Check
+existing memories before writing new ones to avoid duplicates.
+
+#### Progress files
+
+See the [Progress file convention](#progress-file-convention) section below for format
+and lifecycle. Progress files complement memory files: memories are for stable knowledge
+that persists across sprints, progress files are for volatile state during active work
+on a specific issue.
 
 ### Progress file convention
 
@@ -451,6 +475,28 @@ All tests must remain green. Add tests for any new behaviour.
 Every PR that adds functionality must also add tests. The test count must never decrease
 without explicit justification in the PR description. If you remove tests, explain why
 and ensure coverage is not regressed.
+
+## Post-sprint update convention
+
+After each sprint closes, the following sections of this file must be updated. The BA
+owns this update unless explicitly delegated.
+
+| Section | What to update |
+|---|---|
+| Baseline test count | New test total and breakdown |
+| Codebase overview | New modules, renamed files, removed files |
+| Key invariants | Any new invariants discovered during the sprint |
+| Wire format | New message types or changed fields |
+| TL;DR | If new rules were adopted (e.g. from retro action items) |
+
+**Process:**
+1. BA creates a single commit updating all stale sections after the last sprint PR merges
+2. The commit message references the sprint: `docs(claude): post-sprint-N update`
+3. Other agents should verify their memory files match the updated CLAUDE.md
+
+This prevents CLAUDE.md from drifting out of date between sprints. If an agent notices
+a stale section mid-sprint, flag it in the room — do not silently update it yourself
+unless you own that section.
 
 ## Release process
 
