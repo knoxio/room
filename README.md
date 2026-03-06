@@ -177,17 +177,17 @@ Prefix your input with `/` to send a command instead of a plain message:
 
 The command and its arguments are sent as a `command` message (see [Wire format](#wire-format)).
 
-**Admin commands (TUI only, backslash prefix):**
+**Admin commands (TUI only, slash prefix):**
 
-Admin commands use a backslash prefix and are sent from the TUI input:
+Admin commands use the same `/` prefix as user commands and are available in the command palette:
 
 | Command | Description |
 |---|---|
-| `\kick <username>` | Invalidates the user's token — they cannot send further messages. Their username remains reserved; use `\reauth` to let them rejoin. |
-| `\reauth <username>` | Clears the user's token entry so they can `room join` again with the same username. |
-| `\clear-tokens` | Clears all tokens for the room — every user must `room join` again. |
-| `\exit` | Broadcasts a shutdown notice and stops the broker. |
-| `\clear` | Truncates the chat history file and broadcasts a notice. |
+| `/kick <username>` | Invalidates the user's token — they cannot send further messages. Their username remains reserved; use `/reauth` to let them rejoin. |
+| `/reauth <username>` | Clears the user's token entry so they can `room join` again with the same username. |
+| `/clear-tokens` | Clears all tokens for the room — every user must `room join` again. |
+| `/exit` | Broadcasts a shutdown notice and stops the broker. |
+| `/clear` | Truncates the chat history file and broadcasts a notice. |
 
 ## Agent mode
 

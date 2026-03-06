@@ -37,6 +37,10 @@ type HostUser = Arc<Mutex<Option<String>>>;
 /// Cleared when the broker process exits; token files on disk survive restarts.
 type TokenMap = Arc<Mutex<HashMap<String, String>>>;
 
+/// Admin command names — routed through `handle_admin_cmd` when received as
+/// a `Message::Command` with one of these cmd values.
+const ADMIN_CMD_NAMES: &[&str] = &["kick", "reauth", "clear-tokens", "exit", "clear"];
+
 /// Shared broker state passed to every client handler.
 struct RoomState {
     clients: ClientMap,
@@ -45,7 +49,7 @@ struct RoomState {
     token_map: TokenMap,
     chat_path: Arc<PathBuf>,
     room_id: Arc<String>,
-    /// Signalled by the `\exit` admin command to shut down the broker run loop.
+    /// Signalled by the `/exit` admin command to shut down the broker run loop.
     shutdown: Arc<Notify>,
     /// Monotonically-increasing sequence counter. Incremented for every message
     /// broadcast or persisted by the broker, starting at 1.
@@ -276,22 +280,6 @@ async fn handle_client(
                     if trimmed.is_empty() {
                         continue;
                     }
-                    // Admin commands: lines starting with `\`
-                    if let Some(admin_line) = trimmed.strip_prefix('\\') {
-                        if let Some(err) =
-                            handle_admin_cmd(admin_line, &username_in, &state_in).await
-                        {
-                            let sys = make_system(&room_id_in, "broker", err);
-                            if let Ok(json) = serde_json::to_string(&sys) {
-                                let _ = write_half_in
-                                    .lock()
-                                    .await
-                                    .write_all(format!("{json}\n").as_bytes())
-                                    .await;
-                            }
-                        }
-                        continue;
-                    }
                     match parse_client_line(trimmed, &room_id_in, &username_in) {
                         Ok(msg) => {
                             // Handle status commands privately (no broadcast of the Command itself)
@@ -350,6 +338,21 @@ async fn handle_client(
                                             .await
                                             .write_all(format!("{json}\n").as_bytes())
                                             .await;
+                                    }
+                                    continue;
+                                } else if ADMIN_CMD_NAMES.contains(&cmd.as_str()) {
+                                    let cmd_line = format!("{cmd} {}", params.join(" "));
+                                    if let Some(err) =
+                                        handle_admin_cmd(&cmd_line, &username_in, &state_in).await
+                                    {
+                                        let sys = make_system(&room_id_in, "broker", err);
+                                        if let Ok(json) = serde_json::to_string(&sys) {
+                                            let _ = write_half_in
+                                                .lock()
+                                                .await
+                                                .write_all(format!("{json}\n").as_bytes())
+                                                .await;
+                                        }
                                     }
                                     continue;
                                 }
@@ -421,20 +424,14 @@ async fn handle_oneshot_send(
     if trimmed.is_empty() {
         return Ok(());
     }
-    // Admin commands: lines starting with `\`
-    if let Some(admin_line) = trimmed.strip_prefix('\\') {
-        let content = match handle_admin_cmd(admin_line, &username, state).await {
-            None => "command executed".to_string(),
-            Some(err) => err,
-        };
-        let reply = make_system(&state.room_id, "broker", content);
-        let json = serde_json::to_string(&reply)?;
-        write_half.write_all(format!("{json}\n").as_bytes()).await?;
-        return Ok(());
-    }
     let msg = parse_client_line(trimmed, &state.room_id, &username)?;
     // Handle /who privately in oneshot context: return the user list without broadcasting.
-    if let Message::Command { ref cmd, .. } = msg {
+    if let Message::Command {
+        ref cmd,
+        ref params,
+        ..
+    } = msg
+    {
         if cmd == "who" {
             let map = state.status_map.lock().await;
             let mut entries: Vec<String> = map
@@ -456,6 +453,16 @@ async fn handle_oneshot_send(
             };
             let sys = make_system(&state.room_id, "broker", content);
             let json = serde_json::to_string(&sys)?;
+            write_half.write_all(format!("{json}\n").as_bytes()).await?;
+            return Ok(());
+        } else if ADMIN_CMD_NAMES.contains(&cmd.as_str()) {
+            let cmd_line = format!("{cmd} {}", params.join(" "));
+            let content = match handle_admin_cmd(&cmd_line, &username, state).await {
+                None => "command executed".to_string(),
+                Some(err) => err,
+            };
+            let reply = make_system(&state.room_id, "broker", content);
+            let json = serde_json::to_string(&reply)?;
             write_half.write_all(format!("{json}\n").as_bytes()).await?;
             return Ok(());
         }
@@ -516,13 +523,13 @@ async fn handle_oneshot_join(
 /// authorised to run admin commands. All other callers receive a permission denied error.
 ///
 /// Supported commands:
-/// - `\kick <username>`      — invalidates the user's token so they cannot issue further
+/// - `/kick <username>`      — invalidates the user's token so they cannot issue further
 ///   authenticated requests; the username remains reserved so they cannot rejoin without `\reauth`.
 ///   Also removes them from the status map so `/who` no longer shows them as online.
-/// - `\reauth <username>`    — removes the user's token entirely so they can `room join` again.
-/// - `\clear-tokens`         — removes every token for this room (all users must rejoin).
-/// - `\exit`                 — broadcasts a shutdown notice then signals the broker to stop.
-/// - `\clear`                — truncates the chat history file and broadcasts a notice.
+/// - `/reauth <username>`    — removes the user's token entirely so they can `room join` again.
+/// - `/clear-tokens`         — removes every token for this room (all users must rejoin).
+/// - `/exit`                 — broadcasts a shutdown notice then signals the broker to stop.
+/// - `/clear`                — truncates the chat history file and broadcasts a notice.
 async fn handle_admin_cmd(cmd_line: &str, issuer: &str, state: &RoomState) -> Option<String> {
     // Auth: only the room host may run admin commands.
     let host = state.host_user.lock().await.clone();

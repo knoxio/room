@@ -1314,7 +1314,9 @@ async fn admin_kick_invalidates_token() {
         .expect("join failed");
 
     // Admin kicks victim
-    admin.send_text(r"\kick victim").await;
+    admin
+        .send_json(r#"{"type":"command","cmd":"kick","params":["victim"]}"#)
+        .await;
 
     // Kick produces a system broadcast
     let sys = admin
@@ -1352,12 +1354,16 @@ async fn admin_kick_two_users_both_blocked() {
         .await
         .unwrap();
 
-    admin.send_text(r"\kick alice").await;
+    admin
+        .send_json(r#"{"type":"command","cmd":"kick","params":["alice"]}"#)
+        .await;
     admin
         .recv_until(|m| matches!(m, Message::System { .. }))
         .await;
 
-    admin.send_text(r"\kick bob").await;
+    admin
+        .send_json(r#"{"type":"command","cmd":"kick","params":["bob"]}"#)
+        .await;
     admin
         .recv_until(|m| matches!(m, Message::System { .. }))
         .await;
@@ -1372,7 +1378,7 @@ async fn admin_kick_two_users_both_blocked() {
     }
 }
 
-/// `\reauth <username>` removes the token so the user can rejoin.
+/// `/reauth <username>` removes the token so the user can rejoin.
 #[tokio::test]
 async fn admin_reauth_allows_rejoin() {
     let broker = TestBroker::start("t_reauth").await;
@@ -1393,7 +1399,9 @@ async fn admin_reauth_allows_rejoin() {
     assert!(err.to_string().contains("username_taken") || err.to_string().contains("alice"));
 
     // Admin reauthenticates alice
-    admin.send_text(r"\reauth alice").await;
+    admin
+        .send_json(r#"{"type":"command","cmd":"reauth","params":["alice"]}"#)
+        .await;
     admin
         .recv_until(|m| matches!(m, Message::System { .. }))
         .await;
@@ -1406,7 +1414,7 @@ async fn admin_reauth_allows_rejoin() {
     );
 }
 
-/// `\clear-tokens` removes all tokens; no user can send until they rejoin.
+/// `/clear-tokens` removes all tokens; no user can send until they rejoin.
 #[tokio::test]
 async fn admin_clear_tokens_blocks_all_sends() {
     let broker = TestBroker::start("t_clear_tokens").await;
@@ -1422,7 +1430,9 @@ async fn admin_clear_tokens_blocks_all_sends() {
         .await
         .unwrap();
 
-    admin.send_text(r"\clear-tokens").await;
+    admin
+        .send_json(r#"{"type":"command","cmd":"clear-tokens","params":[]}"#)
+        .await;
     admin
         .recv_until(|m| matches!(m, Message::System { content, .. } if content.contains("cleared all tokens")))
         .await;
@@ -1437,7 +1447,7 @@ async fn admin_clear_tokens_blocks_all_sends() {
     }
 }
 
-/// `\clear` truncates the history file and broadcasts a system message.
+/// `/clear` truncates the history file and broadcasts a system message.
 #[tokio::test]
 async fn admin_clear_history() {
     let broker = TestBroker::start("t_clear_history").await;
@@ -1459,12 +1469,14 @@ async fn admin_clear_history() {
         "history should have at least join + message"
     );
 
-    admin.send_text(r"\clear").await;
+    admin
+        .send_json(r#"{"type":"command","cmd":"clear","params":[]}"#)
+        .await;
     admin
         .recv_until(|m| matches!(m, Message::System { content, .. } if content.contains("cleared chat history")))
         .await;
 
-    // The \clear system message itself is written after truncation, so history
+    // The /clear system message itself is written after truncation, so history
     // should contain only that one entry now.
     let after = history::load(&broker.chat_path).await.unwrap();
     assert_eq!(
@@ -1477,7 +1489,7 @@ async fn admin_clear_history() {
     );
 }
 
-/// `\exit` broadcasts a shutdown notice and the broker stops accepting connections.
+/// `/exit` broadcasts a shutdown notice and the broker stops accepting connections.
 #[tokio::test]
 async fn admin_exit_shuts_down_broker() {
     let broker = TestBroker::start("t_exit").await;
@@ -1486,7 +1498,9 @@ async fn admin_exit_shuts_down_broker() {
         .recv_until(|m| matches!(m, Message::Join { .. }))
         .await;
 
-    admin.send_text(r"\exit").await;
+    admin
+        .send_json(r#"{"type":"command","cmd":"exit","params":[]}"#)
+        .await;
     admin
         .recv_until(
             |m| matches!(m, Message::System { content, .. } if content.contains("shutting down")),
@@ -1500,7 +1514,7 @@ async fn admin_exit_shuts_down_broker() {
     let result = UnixStream::connect(&broker.socket_path).await;
     assert!(
         result.is_err(),
-        "broker should have stopped accepting connections after \\exit"
+        "broker should have stopped accepting connections after /exit"
     );
 }
 
@@ -1722,7 +1736,7 @@ async fn pull_messages_filters_dms_for_viewer() {
     );
 }
 
-/// After `\kick`, the kicked user must not appear in subsequent `/who` responses.
+/// After `/kick`, the kicked user must not appear in subsequent `/who` responses.
 #[tokio::test]
 async fn kick_removes_user_from_who() {
     let broker = TestBroker::start("t_kick_who").await;
@@ -1737,7 +1751,9 @@ async fn kick_removes_user_from_who() {
         .await;
 
     // Admin kicks victim
-    admin.send_text(r"\kick victim").await;
+    admin
+        .send_json(r#"{"type":"command","cmd":"kick","params":["victim"]}"#)
+        .await;
     admin
         .recv_until(|m| matches!(m, Message::System { .. }))
         .await;
@@ -1821,13 +1837,17 @@ async fn non_host_admin_cmd_is_rejected() {
     bob.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "bob"))
         .await;
 
-    // bot joins via token (oneshot JOIN), then attempts \kick alice
+    // bot joins via token (oneshot JOIN), then attempts /kick alice
     let (_, tok) = room::oneshot::join_session(&broker.socket_path, "bot")
         .await
         .unwrap();
-    let msg = room::oneshot::send_message_with_token(&broker.socket_path, &tok, r"\kick alice")
-        .await
-        .expect("oneshot send should succeed even when permission is denied");
+    let msg = room::oneshot::send_message_with_token(
+        &broker.socket_path,
+        &tok,
+        r#"{"type":"command","cmd":"kick","params":["alice"]}"#,
+    )
+    .await
+    .expect("oneshot send should succeed even when permission is denied");
 
     let Message::System { content, .. } = msg else {
         panic!("expected system message, got: {msg:?}");
@@ -1871,8 +1891,10 @@ async fn host_can_run_admin_commands() {
         .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "victim"))
         .await;
 
-    // alice (host) kicks victim via the TUI interactive path
-    alice.send_text(r"\kick victim").await;
+    // alice (host) kicks via JSON command (matching TUI build_payload output)
+    alice
+        .send_json(r#"{"type":"command","cmd":"kick","params":["victim"]}"#)
+        .await;
 
     // broadcast: all connected users receive the kick system message
     let sys = alice
