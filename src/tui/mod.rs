@@ -1,7 +1,7 @@
 use std::io;
 
 use crossterm::{
-    event::{self, Event},
+    event::{self, DisableBracketedPaste, EnableBracketedPaste, Event},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -89,7 +89,7 @@ pub async fn run(
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, EnableBracketedPaste)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -358,6 +358,11 @@ pub async fn run(
                         None => {}
                     }
                 }
+                Event::Paste(text) => {
+                    state.input.insert_str(state.cursor_pos, &text);
+                    state.cursor_pos += text.len();
+                    state.mention.active = false;
+                }
                 Event::Resize(_, _) => {}
                 _ => {}
             }
@@ -394,7 +399,11 @@ pub async fn run(
     }
 
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    execute!(
+        terminal.backend_mut(),
+        DisableBracketedPaste,
+        LeaveAlternateScreen
+    )?;
     terminal.show_cursor()?;
 
     result
