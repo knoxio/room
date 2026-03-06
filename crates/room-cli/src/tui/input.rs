@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use unicode_width::UnicodeWidthChar;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -500,20 +502,45 @@ pub(super) fn build_payload(input: &str) -> String {
     }
 }
 
-/// Seed `online_users` from the broker's `/who` response content.
+/// Seed `online_users` and `user_statuses` from the broker's `/who` response content.
 ///
 /// The broker sends `"online — alice, bob: away, charlie"` (or `"no users online"`).
-/// Each entry is either a bare username or `username: status`; we extract the username part.
+/// Each entry is either a bare username or `username: status`.
 /// Merges into the existing list without removing users added by Join events.
-pub(super) fn seed_online_users_from_who(content: &str, online_users: &mut Vec<String>) {
+pub(super) fn seed_online_users_from_who(
+    content: &str,
+    online_users: &mut Vec<String>,
+    user_statuses: &mut HashMap<String, String>,
+) {
     if let Some(rest) = content.strip_prefix("online \u{2014} ") {
         for entry in rest.split(", ") {
-            let username = entry.split(':').next().unwrap_or(entry).trim().to_owned();
-            if !username.is_empty() && !online_users.contains(&username) {
-                online_users.push(username);
+            let (username, status) = match entry.split_once(": ") {
+                Some((u, s)) => (u.trim().to_owned(), s.trim().to_owned()),
+                None => (entry.trim().to_owned(), String::new()),
+            };
+            if !username.is_empty() {
+                if !online_users.contains(&username) {
+                    online_users.push(username.clone());
+                }
+                user_statuses.insert(username, status);
             }
         }
     }
+}
+
+/// Parse a `/set_status` system broadcast into `(username, status)`.
+///
+/// The broker broadcasts either:
+/// - `"alice set status: busy"` → `Some(("alice", "busy"))`
+/// - `"alice cleared their status"` → `Some(("alice", ""))`
+pub(super) fn parse_status_broadcast(content: &str) -> Option<(String, String)> {
+    if let Some(rest) = content.strip_suffix(" cleared their status") {
+        return Some((rest.to_owned(), String::new()));
+    }
+    if let Some((name, status)) = content.split_once(" set status: ") {
+        return Some((name.to_owned(), status.to_owned()));
+    }
+    None
 }
 
 /// Move the cursor to the start of the previous word.
@@ -589,36 +616,84 @@ mod tests {
     #[test]
     fn seed_who_populates_users() {
         let mut users = Vec::new();
-        seed_online_users_from_who("online \u{2014} alice, bob, charlie", &mut users);
+        let mut statuses = HashMap::new();
+        seed_online_users_from_who(
+            "online \u{2014} alice, bob, charlie",
+            &mut users,
+            &mut statuses,
+        );
         assert_eq!(users, ["alice", "bob", "charlie"]);
+        assert_eq!(statuses.get("alice").unwrap(), "");
     }
 
     #[test]
-    fn seed_who_strips_status_suffix() {
+    fn seed_who_extracts_statuses() {
         let mut users = Vec::new();
-        seed_online_users_from_who("online \u{2014} alice: away, bob: coding", &mut users);
-        assert_eq!(users, ["alice", "bob"]);
+        let mut statuses = HashMap::new();
+        seed_online_users_from_who(
+            "online \u{2014} alice: away, bob: coding, charlie",
+            &mut users,
+            &mut statuses,
+        );
+        assert_eq!(users, ["alice", "bob", "charlie"]);
+        assert_eq!(statuses.get("alice").unwrap(), "away");
+        assert_eq!(statuses.get("bob").unwrap(), "coding");
+        assert_eq!(statuses.get("charlie").unwrap(), "");
     }
 
     #[test]
     fn seed_who_no_users_online_is_noop() {
         let mut users = Vec::new();
-        seed_online_users_from_who("no users online", &mut users);
+        let mut statuses = HashMap::new();
+        seed_online_users_from_who("no users online", &mut users, &mut statuses);
         assert!(users.is_empty());
+        assert!(statuses.is_empty());
     }
 
     #[test]
     fn seed_who_does_not_duplicate_existing_users() {
         let mut users = vec!["alice".to_owned()];
-        seed_online_users_from_who("online \u{2014} alice, bob", &mut users);
+        let mut statuses = HashMap::new();
+        seed_online_users_from_who("online \u{2014} alice, bob", &mut users, &mut statuses);
         assert_eq!(users, ["alice", "bob"]);
     }
 
     #[test]
     fn seed_who_unrelated_system_message_is_noop() {
         let mut users = Vec::new();
-        seed_online_users_from_who("alice set status: away", &mut users);
+        let mut statuses = HashMap::new();
+        seed_online_users_from_who("alice set status: away", &mut users, &mut statuses);
         assert!(users.is_empty());
+        assert!(statuses.is_empty());
+    }
+
+    // ── parse_status_broadcast tests ─────────────────────────────────────────
+
+    #[test]
+    fn parse_status_set() {
+        let result = parse_status_broadcast("alice set status: busy");
+        assert_eq!(result, Some(("alice".to_owned(), "busy".to_owned())));
+    }
+
+    #[test]
+    fn parse_status_cleared() {
+        let result = parse_status_broadcast("alice cleared their status");
+        assert_eq!(result, Some(("alice".to_owned(), String::new())));
+    }
+
+    #[test]
+    fn parse_status_unrelated_message() {
+        assert!(parse_status_broadcast("alice joined").is_none());
+        assert!(parse_status_broadcast("hello world").is_none());
+    }
+
+    #[test]
+    fn parse_status_with_spaces_in_name() {
+        let result = parse_status_broadcast("my-agent set status: reviewing PR");
+        assert_eq!(
+            result,
+            Some(("my-agent".to_owned(), "reviewing PR".to_owned()))
+        );
     }
 
     // ── build_payload tests ───────────────────────────────────────────────────

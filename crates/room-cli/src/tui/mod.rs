@@ -24,8 +24,8 @@ mod widgets;
 
 use crate::message::Message;
 use input::{
-    build_payload, cursor_display_pos, handle_key, seed_online_users_from_who, wrap_input_display,
-    Action, InputState,
+    build_payload, cursor_display_pos, handle_key, parse_status_broadcast,
+    seed_online_users_from_who, wrap_input_display, Action, InputState,
 };
 use render::{assign_color, find_view_start, format_message, user_color, welcome_splash, ColorMap};
 
@@ -95,6 +95,8 @@ pub async fn run(
 
     let mut messages: Vec<Message> = Vec::new();
     let mut online_users: Vec<String> = Vec::new();
+    let mut user_statuses: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
     let mut color_map = ColorMap::new();
     let mut state = InputState::new();
     let mut result: anyhow::Result<()> = Ok(());
@@ -120,6 +122,7 @@ pub async fn run(
                         }
                         Message::Leave { user, .. } => {
                             online_users.retain(|u| u != user);
+                            user_statuses.remove(user);
                         }
                         // Seed from message senders so @mention works for users who connected
                         // via poll/send (no persistent connection, not in the status_map).
@@ -133,7 +136,14 @@ pub async fn run(
                         }
                         // Parse the /who response to seed the authoritative user list.
                         Message::System { user, content, .. } if user == "broker" => {
-                            seed_online_users_from_who(content, &mut online_users);
+                            seed_online_users_from_who(
+                                content,
+                                &mut online_users,
+                                &mut user_statuses,
+                            );
+                            if let Some((name, status)) = parse_status_broadcast(content) {
+                                user_statuses.insert(name, status);
+                            }
                             for u in &online_users {
                                 assign_color(u, &mut color_map);
                             }
@@ -280,6 +290,70 @@ pub async fn run(
             let cursor_x = chunks[1].x + 1 + cursor_col as u16;
             let cursor_y = chunks[1].y + 1 + visible_cursor_row as u16;
             f.set_cursor_position((cursor_x, cursor_y));
+
+            // Render floating member status panel (top-right of message area).
+            // Hidden when terminal is too narrow (< 80 cols) or no users online.
+            const PANEL_MIN_TERM_WIDTH: u16 = 80;
+            if f.area().width >= PANEL_MIN_TERM_WIDTH && !online_users.is_empty() {
+                let panel_items: Vec<ListItem> = online_users
+                    .iter()
+                    .map(|u| {
+                        let status = user_statuses.get(u).map(|s| s.as_str()).unwrap_or("");
+                        let mut spans = vec![Span::styled(
+                            format!(" {u}"),
+                            Style::default()
+                                .fg(user_color(u, &color_map))
+                                .add_modifier(Modifier::BOLD),
+                        )];
+                        if !status.is_empty() {
+                            spans.push(Span::styled(
+                                format!("  {status}"),
+                                Style::default().fg(Color::DarkGray),
+                            ));
+                        }
+                        spans.push(Span::raw(" "));
+                        ListItem::new(Line::from(spans))
+                    })
+                    .collect();
+
+                let panel_content_width = online_users
+                    .iter()
+                    .map(|u| {
+                        let status = user_statuses.get(u).map(|s| s.as_str()).unwrap_or("");
+                        let status_len = if status.is_empty() {
+                            0
+                        } else {
+                            status.len() + 2 // "  " + status
+                        };
+                        u.len() + 1 + status_len + 1 // " " + name + status_part + " "
+                    })
+                    .max()
+                    .unwrap_or(10);
+                let panel_width = (panel_content_width as u16 + 2)
+                    .min(chunks[0].width / 3)
+                    .max(12);
+                let panel_height =
+                    (online_users.len() as u16 + 2).min(chunks[0].height.saturating_sub(1));
+
+                let panel_x = chunks[0].x + chunks[0].width - panel_width - 1;
+                let panel_y = chunks[0].y + 1;
+
+                let panel_rect = Rect {
+                    x: panel_x,
+                    y: panel_y,
+                    width: panel_width,
+                    height: panel_height,
+                };
+
+                f.render_widget(Clear, panel_rect);
+                let panel = List::new(panel_items).block(
+                    Block::default()
+                        .title(" members ")
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(Color::DarkGray)),
+                );
+                f.render_widget(panel, panel_rect);
+            }
 
             // Render the command palette popup above the input box when active.
             if state.palette.active && !state.palette.filtered.is_empty() {
@@ -433,6 +507,7 @@ pub async fn run(
                         }
                         Message::Leave { user, .. } => {
                             online_users.retain(|u| u != user);
+                            user_statuses.remove(user);
                         }
                         Message::Message { user, .. } if !online_users.contains(user) => {
                             assign_color(user, &mut color_map);
@@ -442,7 +517,14 @@ pub async fn run(
                             assign_color(user, &mut color_map);
                         }
                         Message::System { user, content, .. } if user == "broker" => {
-                            seed_online_users_from_who(content, &mut online_users);
+                            seed_online_users_from_who(
+                                content,
+                                &mut online_users,
+                                &mut user_statuses,
+                            );
+                            if let Some((name, status)) = parse_status_broadcast(content) {
+                                user_statuses.insert(name, status);
+                            }
                             for u in &online_users {
                                 assign_color(u, &mut color_map);
                             }
