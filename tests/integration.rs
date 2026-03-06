@@ -1886,3 +1886,130 @@ async fn host_can_run_admin_commands() {
         "kick message should name the victim, got: {content}"
     );
 }
+// ── seq numbering tests ───────────────────────────────────────────────────────
+
+/// Every broadcast message carries a monotonically increasing seq number.
+#[tokio::test]
+async fn broadcast_messages_have_monotonically_increasing_seq() {
+    let broker = TestBroker::start("t_seq_mono").await;
+    let mut alice = TestClient::connect(&broker.socket_path, "alice").await;
+    alice
+        .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "alice"))
+        .await;
+
+    alice.send_text("first").await;
+    let m1 = alice
+        .recv_until(|m| matches!(m, Message::Message { content, .. } if content == "first"))
+        .await;
+
+    alice.send_text("second").await;
+    let m2 = alice
+        .recv_until(|m| matches!(m, Message::Message { content, .. } if content == "second"))
+        .await;
+
+    alice.send_text("third").await;
+    let m3 = alice
+        .recv_until(|m| matches!(m, Message::Message { content, .. } if content == "third"))
+        .await;
+
+    let s1 = m1.seq().expect("first message must have seq");
+    let s2 = m2.seq().expect("second message must have seq");
+    let s3 = m3.seq().expect("third message must have seq");
+
+    assert!(s1 < s2, "seq must be strictly increasing: {s1} < {s2}");
+    assert!(s2 < s3, "seq must be strictly increasing: {s2} < {s3}");
+    assert!(s1 >= 1, "seq must start at 1 or higher");
+}
+
+/// Join and leave events also receive seq numbers.
+#[tokio::test]
+async fn join_and_leave_events_have_seq() {
+    let broker = TestBroker::start("t_seq_join_leave").await;
+    let mut alice = TestClient::connect(&broker.socket_path, "alice").await;
+    let join_msg = alice
+        .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "alice"))
+        .await;
+    assert!(
+        join_msg.seq().is_some(),
+        "join event must carry a seq number"
+    );
+
+    // Connect bob then disconnect to generate a leave event.
+    let mut bob = TestClient::connect(&broker.socket_path, "bob").await;
+    bob.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "bob"))
+        .await;
+    drop(bob);
+
+    let leave_msg = alice
+        .recv_until(|m| matches!(m, Message::Leave { user, .. } if user == "bob"))
+        .await;
+    assert!(
+        leave_msg.seq().is_some(),
+        "leave event must carry a seq number"
+    );
+
+    let join_seq = join_msg.seq().unwrap();
+    let leave_seq = leave_msg.seq().unwrap();
+    // There may be intervening messages (bob's join), but leave must be strictly after alice's join.
+    assert!(
+        leave_seq > join_seq,
+        "leave seq ({leave_seq}) must be greater than alice's join seq ({join_seq})"
+    );
+}
+
+/// Messages persisted to the chat file include seq numbers.
+#[tokio::test]
+async fn persisted_messages_have_seq_in_history() {
+    let broker = TestBroker::start("t_seq_persist").await;
+    let mut alice = TestClient::connect(&broker.socket_path, "alice").await;
+    alice
+        .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "alice"))
+        .await;
+
+    alice.send_text("check seq").await;
+    alice
+        .recv_until(|m| matches!(m, Message::Message { content, .. } if content == "check seq"))
+        .await;
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let history = history::load(&broker.chat_path).await.unwrap();
+    for msg in &history {
+        assert!(
+            msg.seq().is_some(),
+            "every persisted message must have seq, but {:?} does not",
+            msg
+        );
+    }
+
+    // Verify strictly increasing order.
+    let seqs: Vec<u64> = history.iter().map(|m| m.seq().unwrap()).collect();
+    for pair in seqs.windows(2) {
+        assert!(
+            pair[0] < pair[1],
+            "history seq must be strictly increasing: {} then {}",
+            pair[0],
+            pair[1]
+        );
+    }
+}
+
+/// History files without seq fields (old format) are still parsed without error.
+#[tokio::test]
+async fn history_without_seq_parses_as_none() {
+    let raw = r#"{"type":"message","id":"abc","room":"r","user":"alice","ts":"2026-03-05T10:00:00Z","content":"hi"}
+{"type":"join","id":"def","room":"r","user":"bob","ts":"2026-03-05T10:00:01Z"}
+"#;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("old.chat");
+    std::fs::write(&path, raw).unwrap();
+
+    let msgs = history::load(&path).await.unwrap();
+    assert_eq!(msgs.len(), 2, "both lines should parse");
+    for msg in &msgs {
+        assert!(
+            msg.seq().is_none(),
+            "old messages without seq should deserialize to seq=None"
+        );
+    }
+}

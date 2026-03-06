@@ -1,7 +1,10 @@
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
 };
 
 use tokio::{
@@ -44,6 +47,9 @@ struct RoomState {
     room_id: Arc<String>,
     /// Signalled by the `\exit` admin command to shut down the broker run loop.
     shutdown: Arc<Notify>,
+    /// Monotonically-increasing sequence counter. Incremented for every message
+    /// broadcast or persisted by the broker, starting at 1.
+    seq_counter: Arc<AtomicU64>,
 }
 
 pub struct Broker {
@@ -81,6 +87,7 @@ impl Broker {
             chat_path: Arc::new(self.chat_path.clone()),
             room_id: Arc::new(self.room_id.clone()),
             shutdown: shutdown.clone(),
+            seq_counter: Arc::new(AtomicU64::new(0)),
         });
         let mut next_id: u64 = 0;
 
@@ -130,6 +137,7 @@ async fn handle_client(
     let token_map = state.token_map.clone();
     let chat_path = state.chat_path.clone();
     let room_id = state.room_id.clone();
+    let seq_counter = state.seq_counter.clone();
 
     let (read_half, mut write_half) = stream.into_split();
     let mut reader = BufReader::new(read_half);
@@ -220,7 +228,7 @@ async fn handle_client(
 
     // Broadcast join event (also persists it)
     let join_msg = make_join(room_id.as_str(), &username);
-    if let Err(e) = broadcast_and_persist(&join_msg, &clients, &chat_path).await {
+    if let Err(e) = broadcast_and_persist(&join_msg, &clients, &chat_path, &seq_counter).await {
         eprintln!("[broker] broadcast_and_persist(join) failed: {e:#}");
         return Ok(());
     }
@@ -254,6 +262,7 @@ async fn handle_client(
     let status_map_in = status_map.clone();
     let host_user_in = host_user.clone();
     let chat_path_in = chat_path.clone();
+    let seq_counter_in = seq_counter.clone();
     let write_half_in = write_half.clone();
     let state_in = state.clone();
     let inbound = tokio::spawn(async move {
@@ -304,9 +313,13 @@ async fn handle_client(
                                         format!("{username_in} set status: {status}")
                                     };
                                     let sys = make_system(&room_id_in, "broker", display);
-                                    if let Err(e) =
-                                        broadcast_and_persist(&sys, &clients_in, &chat_path_in)
-                                            .await
+                                    if let Err(e) = broadcast_and_persist(
+                                        &sys,
+                                        &clients_in,
+                                        &chat_path_in,
+                                        &seq_counter_in,
+                                    )
+                                    .await
                                     {
                                         eprintln!("[broker] persist error: {e:#}");
                                     }
@@ -351,10 +364,19 @@ async fn handle_client(
                                         &host_user_in,
                                         &clients_in,
                                         &chat_path_in,
+                                        &seq_counter_in,
                                     )
                                     .await
                                 }
-                                _ => broadcast_and_persist(&msg, &clients_in, &chat_path_in).await,
+                                _ => {
+                                    broadcast_and_persist(
+                                        &msg,
+                                        &clients_in,
+                                        &chat_path_in,
+                                        &seq_counter_in,
+                                    )
+                                    .await
+                                }
                             };
                             if let Err(e) = result {
                                 eprintln!("[broker] persist error: {e:#}");
@@ -378,7 +400,7 @@ async fn handle_client(
 
     // Broadcast leave event
     let leave_msg = make_leave(room_id.as_str(), &username);
-    let _ = broadcast_and_persist(&leave_msg, &clients, &chat_path).await;
+    let _ = broadcast_and_persist(&leave_msg, &clients, &chat_path, &seq_counter).await;
     eprintln!("[broker] {username} left (cid={cid})");
 
     Ok(())
@@ -447,13 +469,16 @@ async fn handle_oneshot_send(
                 &state.host_user,
                 &state.clients,
                 &state.chat_path,
+                &state.seq_counter,
             )
             .await
         }
-        _ => broadcast_and_persist(&msg, &state.clients, &state.chat_path).await,
+        _ => {
+            broadcast_and_persist(&msg, &state.clients, &state.chat_path, &state.seq_counter).await
+        }
     };
-    result?;
-    let echo = format!("{}\n", serde_json::to_string(&msg)?);
+    let seq_msg = result?;
+    let echo = format!("{}\n", serde_json::to_string(&seq_msg)?);
     write_half.write_all(echo.as_bytes()).await?;
     Ok(())
 }
@@ -513,7 +538,7 @@ async fn handle_admin_cmd(cmd_line: &str, issuer: &str, state: &RoomState) -> Op
     let status_map = &state.status_map;
     let chat_path = &state.chat_path;
     let shutdown = &state.shutdown;
-
+    let seq_counter = &state.seq_counter;
     let mut parts = cmd_line.splitn(2, ' ');
     let cmd = parts.next().unwrap_or("").trim();
     let arg = parts.next().unwrap_or("").trim();
@@ -535,7 +560,7 @@ async fn handle_admin_cmd(cmd_line: &str, issuer: &str, state: &RoomState) -> Op
             status_map.lock().await.remove(&target);
             let content = format!("{issuer} kicked {target} (token invalidated)");
             let msg = make_system(room_id, "broker", content);
-            let _ = broadcast_and_persist(&msg, clients, chat_path).await;
+            let _ = broadcast_and_persist(&msg, clients, chat_path, seq_counter).await;
         }
         "reauth" => {
             if arg.is_empty() {
@@ -559,7 +584,7 @@ async fn handle_admin_cmd(cmd_line: &str, issuer: &str, state: &RoomState) -> Op
             }
             let content = format!("{issuer} reauthed {target} (token cleared, can rejoin)");
             let msg = make_system(room_id, "broker", content);
-            let _ = broadcast_and_persist(&msg, clients, chat_path).await;
+            let _ = broadcast_and_persist(&msg, clients, chat_path, seq_counter).await;
         }
         "clear-tokens" => {
             token_map.lock().await.clear();
@@ -576,12 +601,12 @@ async fn handle_admin_cmd(cmd_line: &str, issuer: &str, state: &RoomState) -> Op
             }
             let content = format!("{issuer} cleared all tokens (all users must rejoin)");
             let msg = make_system(room_id, "broker", content);
-            let _ = broadcast_and_persist(&msg, clients, chat_path).await;
+            let _ = broadcast_and_persist(&msg, clients, chat_path, seq_counter).await;
         }
         "exit" => {
             let content = format!("{issuer} is shutting down the room");
             let msg = make_system(room_id, "broker", content);
-            let _ = broadcast_and_persist(&msg, clients, chat_path).await;
+            let _ = broadcast_and_persist(&msg, clients, chat_path, seq_counter).await;
             shutdown.notify_one();
         }
         "clear" => {
@@ -592,7 +617,7 @@ async fn handle_admin_cmd(cmd_line: &str, issuer: &str, state: &RoomState) -> Op
             }
             let content = format!("{issuer} cleared chat history");
             let msg = make_system(room_id, "broker", content);
-            let _ = broadcast_and_persist(&msg, clients, chat_path).await;
+            let _ = broadcast_and_persist(&msg, clients, chat_path, seq_counter).await;
         }
         _ => {
             eprintln!("[broker] unknown admin command from {issuer}: \\{cmd_line}");
@@ -601,23 +626,31 @@ async fn handle_admin_cmd(cmd_line: &str, issuer: &str, state: &RoomState) -> Op
     None
 }
 
-/// Persist a message and fan it out to all connected clients.
+/// Assign the next sequence number, persist a message, and fan it out to all connected clients.
+///
+/// Returns the message with its `seq` field populated so callers can echo it to one-shot senders.
 async fn broadcast_and_persist(
     msg: &Message,
     clients: &ClientMap,
     chat_path: &Path,
-) -> anyhow::Result<()> {
-    history::append(chat_path, msg).await?;
+    seq_counter: &Arc<AtomicU64>,
+) -> anyhow::Result<Message> {
+    let seq = seq_counter.fetch_add(1, Ordering::SeqCst) + 1;
+    let mut msg = msg.clone();
+    msg.set_seq(seq);
 
-    let line = format!("{}\n", serde_json::to_string(msg)?);
+    history::append(chat_path, &msg).await?;
+
+    let line = format!("{}\n", serde_json::to_string(&msg)?);
     let map = clients.lock().await;
     for (_, tx) in map.values() {
         let _ = tx.send(line.clone());
     }
-    Ok(())
+    Ok(msg)
 }
 
-/// Persist a DM and deliver it only to the sender, the recipient, and the host.
+/// Assign the next sequence number, persist a DM, and deliver it only to the sender,
+/// the recipient, and the host.
 /// If the recipient is offline the message is still persisted and the sender
 /// receives their own echo; no error is returned.
 async fn dm_and_persist(
@@ -627,10 +660,15 @@ async fn dm_and_persist(
     host_user: &HostUser,
     clients: &ClientMap,
     chat_path: &Path,
-) -> anyhow::Result<()> {
-    history::append(chat_path, msg).await?;
+    seq_counter: &Arc<AtomicU64>,
+) -> anyhow::Result<Message> {
+    let seq = seq_counter.fetch_add(1, Ordering::SeqCst) + 1;
+    let mut msg = msg.clone();
+    msg.set_seq(seq);
 
-    let line = format!("{}\n", serde_json::to_string(msg)?);
+    history::append(chat_path, &msg).await?;
+
+    let line = format!("{}\n", serde_json::to_string(&msg)?);
     let host = host_user.lock().await;
     let host_name = host.as_deref();
     let map = clients.lock().await;
@@ -639,5 +677,5 @@ async fn dm_and_persist(
             let _ = tx.send(line.clone());
         }
     }
-    Ok(())
+    Ok(msg)
 }

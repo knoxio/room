@@ -15,18 +15,24 @@ pub enum Message {
         room: String,
         user: String,
         ts: DateTime<Utc>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        seq: Option<u64>,
     },
     Leave {
         id: String,
         room: String,
         user: String,
         ts: DateTime<Utc>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        seq: Option<u64>,
     },
     Message {
         id: String,
         room: String,
         user: String,
         ts: DateTime<Utc>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        seq: Option<u64>,
         content: String,
     },
     Reply {
@@ -34,6 +40,8 @@ pub enum Message {
         room: String,
         user: String,
         ts: DateTime<Utc>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        seq: Option<u64>,
         reply_to: String,
         content: String,
     },
@@ -42,6 +50,8 @@ pub enum Message {
         room: String,
         user: String,
         ts: DateTime<Utc>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        seq: Option<u64>,
         cmd: String,
         params: Vec<String>,
     },
@@ -50,6 +60,8 @@ pub enum Message {
         room: String,
         user: String,
         ts: DateTime<Utc>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        seq: Option<u64>,
         content: String,
     },
     /// A private direct message. Delivered only to sender, recipient, and the
@@ -61,6 +73,8 @@ pub enum Message {
         /// Sender username (set by the broker).
         user: String,
         ts: DateTime<Utc>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        seq: Option<u64>,
         /// Recipient username.
         to: String,
         content: String,
@@ -115,6 +129,34 @@ impl Message {
             | Self::DirectMessage { ts, .. } => ts,
         }
     }
+
+    /// Returns the sequence number assigned by the broker, or `None` for
+    /// messages loaded from history files that predate this feature.
+    pub fn seq(&self) -> Option<u64> {
+        match self {
+            Self::Join { seq, .. }
+            | Self::Leave { seq, .. }
+            | Self::Message { seq, .. }
+            | Self::Reply { seq, .. }
+            | Self::Command { seq, .. }
+            | Self::System { seq, .. }
+            | Self::DirectMessage { seq, .. } => *seq,
+        }
+    }
+
+    /// Assign a broker-issued sequence number to this message.
+    pub fn set_seq(&mut self, seq: u64) {
+        let n = Some(seq);
+        match self {
+            Self::Join { seq, .. } => *seq = n,
+            Self::Leave { seq, .. } => *seq = n,
+            Self::Message { seq, .. } => *seq = n,
+            Self::Reply { seq, .. } => *seq = n,
+            Self::Command { seq, .. } => *seq = n,
+            Self::System { seq, .. } => *seq = n,
+            Self::DirectMessage { seq, .. } => *seq = n,
+        }
+    }
 }
 
 // ── Constructors ─────────────────────────────────────────────────────────────
@@ -129,6 +171,7 @@ pub fn make_join(room: &str, user: &str) -> Message {
         room: room.to_owned(),
         user: user.to_owned(),
         ts: Utc::now(),
+        seq: None,
     }
 }
 
@@ -138,6 +181,7 @@ pub fn make_leave(room: &str, user: &str) -> Message {
         room: room.to_owned(),
         user: user.to_owned(),
         ts: Utc::now(),
+        seq: None,
     }
 }
 
@@ -148,6 +192,7 @@ pub fn make_message(room: &str, user: &str, content: impl Into<String>) -> Messa
         user: user.to_owned(),
         ts: Utc::now(),
         content: content.into(),
+        seq: None,
     }
 }
 
@@ -164,6 +209,7 @@ pub fn make_reply(
         ts: Utc::now(),
         reply_to: reply_to.into(),
         content: content.into(),
+        seq: None,
     }
 }
 
@@ -180,6 +226,7 @@ pub fn make_command(
         ts: Utc::now(),
         cmd: cmd.into(),
         params,
+        seq: None,
     }
 }
 
@@ -190,6 +237,7 @@ pub fn make_system(room: &str, user: &str, content: impl Into<String>) -> Messag
         user: user.to_owned(),
         ts: Utc::now(),
         content: content.into(),
+        seq: None,
     }
 }
 
@@ -201,6 +249,7 @@ pub fn make_dm(room: &str, user: &str, to: &str, content: impl Into<String>) -> 
         ts: Utc::now(),
         to: to.to_owned(),
         content: content.into(),
+        seq: None,
     }
 }
 
@@ -267,6 +316,7 @@ mod tests {
             room: "r".into(),
             user: "alice".into(),
             ts: fixed_ts(),
+            seq: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         let back: Message = serde_json::from_str(&json).unwrap();
@@ -280,6 +330,7 @@ mod tests {
             room: "r".into(),
             user: "bob".into(),
             ts: fixed_ts(),
+            seq: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         let back: Message = serde_json::from_str(&json).unwrap();
@@ -294,6 +345,7 @@ mod tests {
             user: "alice".into(),
             ts: fixed_ts(),
             content: "hello world".into(),
+            seq: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         let back: Message = serde_json::from_str(&json).unwrap();
@@ -309,6 +361,7 @@ mod tests {
             ts: fixed_ts(),
             reply_to: "ffffffff-0000-0000-0000-000000000000".into(),
             content: "pong".into(),
+            seq: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         let back: Message = serde_json::from_str(&json).unwrap();
@@ -324,6 +377,7 @@ mod tests {
             ts: fixed_ts(),
             cmd: "claim".into(),
             params: vec!["task-123".into(), "fix the bug".into()],
+            seq: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         let back: Message = serde_json::from_str(&json).unwrap();
@@ -338,6 +392,7 @@ mod tests {
             user: "broker".into(),
             ts: fixed_ts(),
             content: "5 users online".into(),
+            seq: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         let back: Message = serde_json::from_str(&json).unwrap();
@@ -353,6 +408,7 @@ mod tests {
             room: "r".into(),
             user: "alice".into(),
             ts: fixed_ts(),
+            seq: None,
         };
         let v: serde_json::Value = serde_json::to_value(&msg).unwrap();
         assert_eq!(v["type"], "join");
@@ -372,6 +428,7 @@ mod tests {
             user: "alice".into(),
             ts: fixed_ts(),
             content: "hi".into(),
+            seq: None,
         };
         let v: serde_json::Value = serde_json::to_value(&msg).unwrap();
         assert_eq!(v["type"], "message");
@@ -462,6 +519,7 @@ mod tests {
             ts: fixed_ts(),
             to: "bob".into(),
             content: "secret".into(),
+            seq: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         let back: Message = serde_json::from_str(&json).unwrap();
@@ -477,6 +535,7 @@ mod tests {
             ts: fixed_ts(),
             to: "bob".into(),
             content: "hi".into(),
+            seq: None,
         };
         let v: serde_json::Value = serde_json::to_value(&msg).unwrap();
         assert_eq!(v["type"], "dm");
@@ -495,6 +554,7 @@ mod tests {
             user: "carol".into(),
             ts,
             content: "x".into(),
+            seq: None,
         };
         assert_eq!(msg.id(), fixed_id());
         assert_eq!(msg.room(), "testroom");
