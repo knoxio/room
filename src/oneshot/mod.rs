@@ -1,69 +1,14 @@
+pub mod token;
 pub mod transport;
 
+pub use token::{cmd_join, token_file_path, username_from_token};
 pub use transport::{join_session, send_message, send_message_with_token};
 
 use std::path::{Path, PathBuf};
 
 use crate::{history, message::Message};
-
-/// Returns the canonical token file path: `/tmp/room-<room_id>-<username>.token`.
-///
-/// One file per (room, user) pair — multiple agents on the same machine never
-/// overwrite each other's tokens.
-pub fn token_file_path(room_id: &str, username: &str) -> PathBuf {
-    PathBuf::from(format!("/tmp/room-{room_id}-{username}.token"))
-}
-
-/// One-shot join subcommand: register username, receive token, write token file.
-///
-/// Writes to `/tmp/room-<room_id>-<username>.token` so agents sharing a machine
-/// do not clobber each other. Subsequent `send`, `poll`, and `watch` calls find
-/// the file automatically (single-agent) or via `--user <username>` (multi-agent).
-pub async fn cmd_join(room_id: &str, username: &str) -> anyhow::Result<()> {
-    let socket_path = PathBuf::from(format!("/tmp/room-{room_id}.sock"));
-    let (returned_user, token) = join_session(&socket_path, username).await?;
-    let token_data = serde_json::json!({"username": returned_user, "token": token});
-    let token_path = token_file_path(room_id, &returned_user);
-    std::fs::write(&token_path, format!("{token_data}\n"))?;
-    println!("{token_data}");
-    Ok(())
-}
-
-/// Look up the username associated with `token` by scanning stored token files for `room_id`.
-///
-/// `room join` writes `/tmp/room-<room_id>-<username>.token` for each session.
-/// This function finds the file whose `token` field matches the given value and
-/// returns the corresponding username. Used by `poll` and `watch` to resolve the
-/// cursor file path without requiring the caller to pass a username explicitly.
-pub fn username_from_token(room_id: &str, token: &str) -> anyhow::Result<String> {
-    let prefix = format!("room-{room_id}-");
-    let suffix = ".token";
-    let files: Vec<PathBuf> = std::fs::read_dir("/tmp")
-        .map_err(|e| anyhow::anyhow!("cannot read /tmp: {e}"))?
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| {
-            p.file_name()
-                .and_then(|n| n.to_str())
-                .map(|n| n.starts_with(&prefix) && n.ends_with(suffix))
-                .unwrap_or(false)
-        })
-        .collect();
-
-    for path in files {
-        if let Ok(data) = std::fs::read_to_string(&path) {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(data.trim()) {
-                if v["token"].as_str() == Some(token) {
-                    if let Some(u) = v["username"].as_str() {
-                        return Ok(u.to_owned());
-                    }
-                }
-            }
-        }
-    }
-
-    anyhow::bail!("token not recognised — run: room join {room_id} <username> to get a fresh token")
-}
+use token::{read_cursor, write_cursor};
+use transport::send_message_with_token as transport_send;
 
 /// One-shot send subcommand: connect, send, print echo JSON to stdout, exit.
 ///
@@ -83,7 +28,7 @@ pub async fn cmd_send(
         }
         None => serde_json::json!({"type": "message", "content": content}).to_string(),
     };
-    let msg = send_message_with_token(&socket_path, token, &wire)
+    let msg = transport_send(&socket_path, token, &wire)
         .await
         .map_err(|e| {
             if e.to_string().contains("invalid token") {
@@ -244,130 +189,4 @@ fn chat_path_from_meta(room_id: &str, meta_path: &Path) -> PathBuf {
         }
     }
     history::default_chat_path(room_id)
-}
-
-fn read_cursor(cursor_path: &Path) -> Option<String> {
-    std::fs::read_to_string(cursor_path)
-        .ok()
-        .map(|s| s.trim().to_owned())
-        .filter(|s| !s.is_empty())
-}
-
-fn write_cursor(cursor_path: &Path, id: &str) -> anyhow::Result<()> {
-    std::fs::write(cursor_path, id)?;
-    Ok(())
-}
-
-#[cfg(test)]
-mod token_tests {
-    use super::*;
-    use std::fs;
-    use tempfile::TempDir;
-
-    /// Write a token file into a temp dir and return the token string.
-    fn write_token_file(dir: &std::path::Path, room_id: &str, username: &str, token: &str) {
-        let name = format!("room-{room_id}-{username}.token");
-        let data = serde_json::json!({"username": username, "token": token});
-        fs::write(dir.join(name), format!("{data}\n")).unwrap();
-    }
-
-    /// A version of username_from_token that scans a custom directory (for hermetic tests).
-    fn username_from_token_in(
-        dir: &std::path::Path,
-        room_id: &str,
-        token: &str,
-    ) -> anyhow::Result<String> {
-        let prefix = format!("room-{room_id}-");
-        let suffix = ".token";
-        let files: Vec<PathBuf> = fs::read_dir(dir)
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .filter(|p| {
-                p.file_name()
-                    .and_then(|n| n.to_str())
-                    .map(|n| n.starts_with(&prefix) && n.ends_with(suffix))
-                    .unwrap_or(false)
-            })
-            .collect();
-
-        for path in files {
-            if let Ok(data) = fs::read_to_string(&path) {
-                if let Ok(v) = serde_json::from_str::<serde_json::Value>(data.trim()) {
-                    if v["token"].as_str() == Some(token) {
-                        if let Some(u) = v["username"].as_str() {
-                            return Ok(u.to_owned());
-                        }
-                    }
-                }
-            }
-        }
-        anyhow::bail!("token not recognised — run: room join {room_id} <username>")
-    }
-
-    /// token_file_path produces a per-user path that differs between users.
-    #[test]
-    fn token_file_path_is_per_user() {
-        let alice = token_file_path("myroom", "alice");
-        let bob = token_file_path("myroom", "bob");
-        assert_ne!(alice, bob);
-        assert!(alice.to_str().unwrap().contains("alice"));
-        assert!(bob.to_str().unwrap().contains("bob"));
-    }
-
-    /// Given a valid token, username_from_token returns the correct username.
-    #[test]
-    fn username_from_token_finds_correct_user() {
-        let dir = TempDir::new().unwrap();
-        write_token_file(dir.path(), "r1", "alice", "tok-alice");
-        let user = username_from_token_in(dir.path(), "r1", "tok-alice").unwrap();
-        assert_eq!(user, "alice");
-    }
-
-    /// Multiple token files coexist — each resolves to the right username.
-    #[test]
-    fn username_from_token_disambiguates_multiple_users() {
-        let dir = TempDir::new().unwrap();
-        write_token_file(dir.path(), "r2", "alice", "tok-alice");
-        write_token_file(dir.path(), "r2", "bob", "tok-bob");
-
-        assert_eq!(
-            username_from_token_in(dir.path(), "r2", "tok-alice").unwrap(),
-            "alice"
-        );
-        assert_eq!(
-            username_from_token_in(dir.path(), "r2", "tok-bob").unwrap(),
-            "bob"
-        );
-    }
-
-    /// Unknown token → clear error with join hint.
-    #[test]
-    fn username_from_token_unknown_errors_with_join_hint() {
-        let dir = TempDir::new().unwrap();
-        let err = username_from_token_in(dir.path(), "r3", "not-a-real-token").unwrap_err();
-        assert!(
-            err.to_string().contains("room join"),
-            "expected 'room join' hint in: {err}"
-        );
-    }
-
-    /// Two agents joining the same room write independent token files and neither
-    /// overwrites the other — core regression for issue #40.
-    #[test]
-    fn two_agents_tokens_do_not_collide() {
-        let dir = TempDir::new().unwrap();
-        write_token_file(dir.path(), "r4", "alice", "tok-alice");
-        write_token_file(dir.path(), "r4", "bob", "tok-bob");
-
-        // Both files survive; each resolves to the right user via their token.
-        assert_eq!(
-            username_from_token_in(dir.path(), "r4", "tok-alice").unwrap(),
-            "alice"
-        );
-        assert_eq!(
-            username_from_token_in(dir.path(), "r4", "tok-bob").unwrap(),
-            "bob"
-        );
-    }
 }
