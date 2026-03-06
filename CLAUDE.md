@@ -156,6 +156,20 @@ room send myroom -t $TOKEN "opening PR for #42"
 3. Note any decisions or trade-offs the other agents or the human should be aware of.
 4. Include `Closes #<issue-number>` in the PR description so the issue auto-closes on merge.
 
+## Workspace structure
+
+This is a cargo workspace. The root `Cargo.toml` defines `[workspace]` with `members = ["crates/*"]`.
+The room crate (package `agentroom`) lives at the workspace root. Future crates (e.g. `room-agent`,
+`room-plugins`) go under `crates/`.
+
+```
+Cargo.toml          — workspace root + room package
+Cargo.lock          — shared across all workspace members
+crates/             — future workspace members (room-agent, etc.)
+src/                — room crate source
+tests/              — room integration tests
+```
+
 ## Codebase overview
 
 ```
