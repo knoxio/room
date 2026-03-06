@@ -3,9 +3,9 @@
 ## What is `room`?
 
 `room` is a CLI tool that lets multiple Claude agents and humans share a group chat over
-Unix domain sockets. It is the coordination layer for this project. When you are working
-on a feature, you are expected to join the shared room and stay connected for the duration
-of your work.
+Unix domain sockets or WebSocket/REST. It is the coordination layer for this project.
+When you are working on a feature, you are expected to join the shared room and stay
+connected for the duration of your work.
 
 ## Communicating from Claude Code (sequential tool model)
 
@@ -93,6 +93,64 @@ Every message is a JSON object with a `type` field:
 ```
 
 To send structured input via `--agent` stdin or `room send`, plain text is also accepted.
+
+## HTTP/WebSocket transport
+
+The broker optionally serves a WebSocket + REST API alongside the Unix domain socket.
+Start it with `--ws-port <port>`:
+
+```bash
+room myroom myuser --ws-port 4200
+```
+
+### WebSocket endpoint
+
+Connect to `ws://host:port/ws/<room_id>`. The handshake protocol mirrors UDS — send one
+of these as the first text frame:
+
+| First frame | Behaviour |
+|---|---|
+| `<username>` | Interactive session (history replay, broadcast, join/leave events) |
+| `JOIN:<username>` | Register username, receive `{"type":"token","token":"<uuid>"}`, close |
+| `TOKEN:<uuid>` | Authenticated one-shot — send message as next frame, receive echo, close |
+| `SEND:<username>` | Legacy unauthenticated one-shot send |
+
+After the interactive handshake, send plain text or JSON envelopes as text frames.
+Messages are broadcast to all connected clients (UDS and WS).
+
+### REST API
+
+All REST endpoints require the room to be running with `--ws-port`.
+
+| Method | Endpoint | Auth | Description |
+|---|---|---|---|
+| `POST` | `/api/<room_id>/join` | None | `{"username":"x"}` → `{"type":"token","token":"<uuid>"}` |
+| `POST` | `/api/<room_id>/send` | `Bearer <token>` | `{"content":"msg","to":"user"}` → broadcast JSON |
+| `GET` | `/api/<room_id>/poll` | `Bearer <token>` | `?since=<msg-id>` → `{"messages":[...]}` |
+| `GET` | `/api/health` | None | `{"status":"ok","room":"<id>","users":<n>}` |
+
+REST poll is stateless — no server-side cursor. The caller tracks the last seen message ID
+and passes it via `?since=`. DM filtering applies: only messages where the caller is sender,
+recipient, or host are returned.
+
+### Example: REST agent workflow
+
+```bash
+# Join and get a token
+TOKEN=$(curl -s -X POST http://localhost:4200/api/myroom/join \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"my-agent"}' | jq -r .token)
+
+# Send a message
+curl -s -X POST http://localhost:4200/api/myroom/send \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"content":"hello from REST"}'
+
+# Poll for new messages
+curl -s http://localhost:4200/api/myroom/poll \
+  -H "Authorization: Bearer $TOKEN"
+```
 
 ## Message content
 
@@ -185,18 +243,24 @@ src/
     auth.rs            — Token issuance (issue_token) and validation (validate_token)
     commands.rs        — Unified command routing (route_command, handle_admin_cmd)
     fanout.rs          — broadcast_and_persist, dm_and_persist
+    ws.rs              — WebSocket upgrade, REST endpoints, WS session lifecycle
   oneshot/
     mod.rs             — Re-exports and subcommand dispatch
     transport.rs       — Socket connect, send_message, send_message_with_token
     token.rs           — Token file I/O, cursor read/write, cmd_join
     poll.rs            — poll_messages, pull_messages, cmd_poll, cmd_pull, cmd_watch
+  plugin/
+    mod.rs             — Plugin trait, PluginRegistry, HistoryReader, ChatWriter
+    help.rs            — Built-in /help command
+    stats.rs           — Built-in /stats command
   tui/
     mod.rs             — Main run() loop and TUI state
     input.rs           — InputState, handle_key, Action enum
     render.rs          — format_message, wrap_words, rendering helpers
     widgets.rs         — CommandPalette, MentionPicker
 tests/
-  integration.rs       — Integration tests against a live broker
+  integration.rs       — Integration tests against a live broker (UDS + WS)
+  ws_smoke.rs          — End-to-end smoke tests spawning the real binary with --ws-port
 ```
 
 Key invariants to preserve:
@@ -244,7 +308,7 @@ All tests must remain green. Add tests for any new behaviour.
 
 ## Baseline test count
 
-**Current baseline: 251 tests (195 unit + 56 integration)**
+**Current baseline: 307 tests (231 unit + 71 integration + 5 smoke)**
 
 Every PR that adds functionality must also add tests. The test count must never decrease
 without explicit justification in the PR description. If you remove tests, explain why
