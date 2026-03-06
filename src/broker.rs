@@ -269,7 +269,18 @@ async fn handle_client(
                     }
                     // Admin commands: lines starting with `\`
                     if let Some(admin_line) = trimmed.strip_prefix('\\') {
-                        handle_admin_cmd(admin_line, &username_in, &state_in).await;
+                        if let Some(err) =
+                            handle_admin_cmd(admin_line, &username_in, &state_in).await
+                        {
+                            let sys = make_system(&room_id_in, "broker", err);
+                            if let Ok(json) = serde_json::to_string(&sys) {
+                                let _ = write_half_in
+                                    .lock()
+                                    .await
+                                    .write_all(format!("{json}\n").as_bytes())
+                                    .await;
+                            }
+                        }
                         continue;
                     }
                     match parse_client_line(trimmed, &room_id_in, &username_in) {
@@ -390,9 +401,13 @@ async fn handle_oneshot_send(
     }
     // Admin commands: lines starting with `\`
     if let Some(admin_line) = trimmed.strip_prefix('\\') {
-        handle_admin_cmd(admin_line, &username, state).await;
-        let ack = serde_json::json!({"type":"system","user":"broker","content":"command executed"});
-        write_half.write_all(format!("{ack}\n").as_bytes()).await?;
+        let content = match handle_admin_cmd(admin_line, &username, state).await {
+            None => "command executed".to_string(),
+            Some(err) => err,
+        };
+        let reply = make_system(&state.room_id, "broker", content);
+        let json = serde_json::to_string(&reply)?;
+        write_half.write_all(format!("{json}\n").as_bytes()).await?;
         return Ok(());
     }
     let msg = parse_client_line(trimmed, &state.room_id, &username)?;
@@ -469,6 +484,12 @@ async fn handle_oneshot_join(
 
 /// Dispatch a `\command [arg]` line sent from a connected client.
 ///
+/// Returns `None` on success or `Some(error_message)` if the command was rejected.
+/// The caller is responsible for delivering any error message back to the issuer.
+///
+/// Only the room host (the first user to complete the interactive join handshake) is
+/// authorised to run admin commands. All other callers receive a permission denied error.
+///
 /// Supported commands:
 /// - `\kick <username>`      — invalidates the user's token so they cannot issue further
 ///   authenticated requests; the username remains reserved so they cannot rejoin without `\reauth`.
@@ -477,7 +498,15 @@ async fn handle_oneshot_join(
 /// - `\clear-tokens`         — removes every token for this room (all users must rejoin).
 /// - `\exit`                 — broadcasts a shutdown notice then signals the broker to stop.
 /// - `\clear`                — truncates the chat history file and broadcasts a notice.
-async fn handle_admin_cmd(cmd_line: &str, issuer: &str, state: &RoomState) {
+async fn handle_admin_cmd(cmd_line: &str, issuer: &str, state: &RoomState) -> Option<String> {
+    // Auth: only the room host may run admin commands.
+    let host = state.host_user.lock().await.clone();
+    if host.as_deref() != Some(issuer) {
+        return Some(
+            "permission denied: admin commands are restricted to the room host".to_string(),
+        );
+    }
+
     let room_id = state.room_id.as_str();
     let clients = &state.clients;
     let token_map = &state.token_map;
@@ -492,7 +521,7 @@ async fn handle_admin_cmd(cmd_line: &str, issuer: &str, state: &RoomState) {
     match cmd {
         "kick" => {
             if arg.is_empty() {
-                return;
+                return None;
             }
             let target = arg.to_owned();
             let mut map = token_map.lock().await;
@@ -510,7 +539,7 @@ async fn handle_admin_cmd(cmd_line: &str, issuer: &str, state: &RoomState) {
         }
         "reauth" => {
             if arg.is_empty() {
-                return;
+                return None;
             }
             let target = arg.to_owned();
             let mut map = token_map.lock().await;
@@ -559,7 +588,7 @@ async fn handle_admin_cmd(cmd_line: &str, issuer: &str, state: &RoomState) {
             // Truncate the history file.
             if let Err(e) = std::fs::write(chat_path.as_ref(), "") {
                 eprintln!("[broker] \\clear failed: {e}");
-                return;
+                return None;
             }
             let content = format!("{issuer} cleared chat history");
             let msg = make_system(room_id, "broker", content);
@@ -569,6 +598,7 @@ async fn handle_admin_cmd(cmd_line: &str, issuer: &str, state: &RoomState) {
             eprintln!("[broker] unknown admin command from {issuer}: \\{cmd_line}");
         }
     }
+    None
 }
 
 /// Persist a message and fan it out to all connected clients.

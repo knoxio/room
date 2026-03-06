@@ -1800,3 +1800,89 @@ async fn oneshot_who_returns_user_list() {
         "/who command should not be broadcast to other clients"
     );
 }
+
+/// A non-host user sending an admin command receives a private "permission denied"
+/// system message. The command is not executed and no broadcast is sent.
+#[tokio::test]
+async fn non_host_admin_cmd_is_rejected() {
+    let broker = TestBroker::start("t_admin_auth_reject").await;
+
+    // alice is host (first to join)
+    let mut alice = TestClient::connect(&broker.socket_path, "alice").await;
+    alice
+        .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "alice"))
+        .await;
+
+    // bob joins — not the host
+    let mut bob = TestClient::connect(&broker.socket_path, "bob").await;
+    alice
+        .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "bob"))
+        .await;
+    bob.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "bob"))
+        .await;
+
+    // bot joins via token (oneshot JOIN), then attempts \kick alice
+    let (_, tok) = room::oneshot::join_session(&broker.socket_path, "bot")
+        .await
+        .unwrap();
+    let msg = room::oneshot::send_message_with_token(&broker.socket_path, &tok, r"\kick alice")
+        .await
+        .expect("oneshot send should succeed even when permission is denied");
+
+    let Message::System { content, .. } = msg else {
+        panic!("expected system message, got: {msg:?}");
+    };
+    assert!(
+        content.contains("permission denied"),
+        "non-host admin cmd should return permission denied, got: {content}"
+    );
+
+    // alice must NOT have received a kick broadcast
+    let got_kick = tokio::time::timeout(Duration::from_millis(200), async {
+        alice
+            .recv_until(
+                |m| matches!(m, Message::System { content, .. } if content.contains("kicked")),
+            )
+            .await
+    })
+    .await;
+    assert!(
+        got_kick.is_err(),
+        "kick must not execute; alice should not see a kick system message"
+    );
+}
+
+/// The room host (first interactive user) can execute admin commands.
+#[tokio::test]
+async fn host_can_run_admin_commands() {
+    let broker = TestBroker::start("t_admin_auth_host").await;
+
+    // alice is host (first to join)
+    let mut alice = TestClient::connect(&broker.socket_path, "alice").await;
+    alice
+        .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "alice"))
+        .await;
+
+    let mut victim = TestClient::connect(&broker.socket_path, "victim").await;
+    alice
+        .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "victim"))
+        .await;
+    victim
+        .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "victim"))
+        .await;
+
+    // alice (host) kicks victim via the TUI interactive path
+    alice.send_text(r"\kick victim").await;
+
+    // broadcast: all connected users receive the kick system message
+    let sys = alice
+        .recv_until(|m| matches!(m, Message::System { content, .. } if content.contains("kicked")))
+        .await;
+    let Message::System { content, .. } = &sys else {
+        panic!("expected system message");
+    };
+    assert!(
+        content.contains("victim"),
+        "kick message should name the victim, got: {content}"
+    );
+}
