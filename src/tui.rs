@@ -45,42 +45,79 @@ const PALETTE_COMMANDS: &[PaletteItem] = &[
         description: "Reply to a message",
     },
     PaletteItem {
+        cmd: "set_status",
+        usage: "/set_status <status>",
+        description: "Set your presence status",
+    },
+    PaletteItem {
         cmd: "who",
         usage: "/who",
         description: "List users in the room",
     },
 ];
 
+const ADMIN_COMMANDS: &[PaletteItem] = &[
+    PaletteItem {
+        cmd: "kick",
+        usage: "\\kick <user>",
+        description: "Kick a user from the room",
+    },
+    PaletteItem {
+        cmd: "reauth",
+        usage: "\\reauth <user>",
+        description: "Invalidate a user's token",
+    },
+    PaletteItem {
+        cmd: "clear-tokens",
+        usage: "\\clear-tokens",
+        description: "Revoke all session tokens",
+    },
+    PaletteItem {
+        cmd: "exit",
+        usage: "\\exit",
+        description: "Shut down the broker",
+    },
+    PaletteItem {
+        cmd: "clear",
+        usage: "\\clear",
+        description: "Clear the room history",
+    },
+];
+
 struct CommandPalette {
     active: bool,
     selected: usize,
-    /// Indices into `PALETTE_COMMANDS` that match the current query.
+    /// Indices into `commands` that match the current query.
     filtered: Vec<usize>,
+    /// The command list this palette draws from.
+    commands: &'static [PaletteItem],
 }
 
 impl CommandPalette {
-    fn new() -> Self {
+    fn new(commands: &'static [PaletteItem]) -> Self {
         Self {
             active: false,
             selected: 0,
-            filtered: (0..PALETTE_COMMANDS.len()).collect(),
+            filtered: (0..commands.len()).collect(),
+            commands,
         }
     }
 
     fn activate(&mut self) {
         self.active = true;
         self.selected = 0;
-        self.filtered = (0..PALETTE_COMMANDS.len()).collect();
+        self.filtered = (0..self.commands.len()).collect();
     }
 
     fn deactivate(&mut self) {
         self.active = false;
     }
 
-    /// Update the filtered list based on text typed after the leading `/`.
+    /// Update the filtered list based on the query typed after the trigger character.
     fn update_filter(&mut self, query: &str) {
         let q = query.to_ascii_lowercase();
-        self.filtered = PALETTE_COMMANDS
+        self.filtered = self
+            .commands
             .iter()
             .enumerate()
             .filter(|(_, item)| {
@@ -104,11 +141,11 @@ impl CommandPalette {
         }
     }
 
-    /// The full usage string (including leading `/`) of the selected entry.
+    /// The full usage string (e.g. `/dm <user>` or `\kick <user>`) of the selected entry.
     fn selected_usage(&self) -> Option<&'static str> {
         self.filtered
             .get(self.selected)
-            .map(|&i| PALETTE_COMMANDS[i].usage)
+            .map(|&i| self.commands[i].usage)
     }
 }
 
@@ -244,7 +281,8 @@ pub async fn run(
     let mut cursor_pos: usize = 0; // byte index into `input`, always on a char boundary
     let mut input_row_scroll: usize = 0; // vertical scroll within the input box
     let mut scroll_offset: usize = 0;
-    let mut palette = CommandPalette::new();
+    let mut palette = CommandPalette::new(PALETTE_COMMANDS);
+    let mut admin_palette = CommandPalette::new(ADMIN_COMMANDS);
     let mut mention = MentionPicker::new();
     let mut result: anyhow::Result<()> = Ok(());
 
@@ -367,7 +405,7 @@ pub async fn run(
                     .iter()
                     .enumerate()
                     .map(|(row, &idx)| {
-                        let item = &PALETTE_COMMANDS[idx];
+                        let item = &palette.commands[idx];
                         let style = if row == palette.selected {
                             Style::default()
                                 .fg(Color::Black)
@@ -460,6 +498,58 @@ pub async fn run(
                 );
                 f.render_widget(mention_list, popup_rect);
             }
+
+            // Render the admin command palette popup when `\` trigger is active.
+            if admin_palette.active && !admin_palette.filtered.is_empty() {
+                let admin_items: Vec<ListItem> = admin_palette
+                    .filtered
+                    .iter()
+                    .enumerate()
+                    .map(|(row, &idx)| {
+                        let item = &admin_palette.commands[idx];
+                        let style = if row == admin_palette.selected {
+                            Style::default()
+                                .fg(Color::Black)
+                                .bg(Color::Red)
+                                .add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default().fg(Color::White)
+                        };
+                        ListItem::new(Line::from(vec![
+                            Span::styled(
+                                format!("{:<20}", item.usage),
+                                style.add_modifier(Modifier::BOLD),
+                            ),
+                            Span::styled(
+                                format!("  {}", item.description),
+                                if row == admin_palette.selected {
+                                    Style::default().fg(Color::Black).bg(Color::Red)
+                                } else {
+                                    Style::default().fg(Color::DarkGray)
+                                },
+                            ),
+                        ]))
+                    })
+                    .collect();
+
+                let popup_height = (admin_palette.filtered.len() as u16 + 2).min(chunks[0].height);
+                let popup_y = chunks[1].y.saturating_sub(popup_height);
+                let popup_rect = Rect {
+                    x: chunks[1].x,
+                    y: popup_y,
+                    width: chunks[1].width,
+                    height: popup_height,
+                };
+
+                f.render_widget(Clear, popup_rect);
+                let admin_list = List::new(admin_items).block(
+                    Block::default()
+                        .title(" admin ")
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(Color::Red)),
+                );
+                f.render_widget(admin_list, popup_rect);
+            }
         })?;
 
         if event::poll(std::time::Duration::from_millis(50))? {
@@ -470,6 +560,8 @@ pub async fn run(
                             mention.deactivate();
                         } else if palette.active {
                             palette.deactivate();
+                        } else if admin_palette.active {
+                            admin_palette.deactivate();
                         }
                     }
                     KeyCode::Tab if mention.active => {
@@ -493,6 +585,14 @@ pub async fn run(
                         }
                         palette.deactivate();
                     }
+                    KeyCode::Tab if admin_palette.active => {
+                        if let Some(usage) = admin_palette.selected_usage() {
+                            input = usage.to_owned();
+                            cursor_pos = input.len();
+                            input_row_scroll = 0;
+                        }
+                        admin_palette.deactivate();
+                    }
                     KeyCode::Enter => {
                         if mention.active {
                             if let Some(user) = mention.selected_user() {
@@ -513,6 +613,13 @@ pub async fn run(
                                 input_row_scroll = 0;
                             }
                             palette.deactivate();
+                        } else if admin_palette.active {
+                            if let Some(usage) = admin_palette.selected_usage() {
+                                input = usage.to_owned();
+                                cursor_pos = input.len();
+                                input_row_scroll = 0;
+                            }
+                            admin_palette.deactivate();
                         } else if key.modifiers.contains(KeyModifiers::SHIFT) {
                             // Shift+Enter: insert a newline at the cursor.
                             input.insert(cursor_pos, '\n');
@@ -541,6 +648,8 @@ pub async fn run(
                             mention.move_up();
                         } else if palette.active {
                             palette.move_up();
+                        } else if admin_palette.active {
+                            admin_palette.move_up();
                         } else {
                             scroll_offset = scroll_offset.saturating_add(1);
                         }
@@ -550,6 +659,8 @@ pub async fn run(
                             mention.move_down();
                         } else if palette.active {
                             palette.move_down();
+                        } else if admin_palette.active {
+                            admin_palette.move_down();
                         } else {
                             scroll_offset = scroll_offset.saturating_sub(1);
                         }
@@ -571,7 +682,7 @@ pub async fn run(
                         } else {
                             mention.deactivate();
                         }
-                        // Activate palette when `/` is typed at the start of an otherwise empty input.
+                        // Activate slash palette when `/` is typed into an empty input.
                         if c == '/' && input == "/" {
                             palette.activate();
                         } else if palette.active {
@@ -583,6 +694,18 @@ pub async fn run(
                                 }
                             } else {
                                 palette.deactivate();
+                            }
+                        } else if c == '\\' && input == "\\" {
+                            // Activate admin palette when `\` is typed into an empty input.
+                            admin_palette.activate();
+                        } else if admin_palette.active {
+                            if let Some(query) = input.strip_prefix('\\') {
+                                admin_palette.update_filter(query);
+                                if admin_palette.filtered.is_empty() {
+                                    admin_palette.deactivate();
+                                }
+                            } else {
+                                admin_palette.deactivate();
                             }
                         }
                     }
@@ -619,6 +742,17 @@ pub async fn run(
                                     }
                                 } else {
                                     palette.deactivate();
+                                }
+                            } else if admin_palette.active {
+                                if input.is_empty() {
+                                    admin_palette.deactivate();
+                                } else if let Some(query) = input.strip_prefix('\\') {
+                                    admin_palette.update_filter(query);
+                                    if admin_palette.filtered.is_empty() {
+                                        admin_palette.deactivate();
+                                    }
+                                } else {
+                                    admin_palette.deactivate();
                                 }
                             }
                         }
@@ -1070,25 +1204,25 @@ mod tests {
 
     #[test]
     fn palette_starts_inactive() {
-        let p = CommandPalette::new();
+        let p = CommandPalette::new(PALETTE_COMMANDS);
         assert!(!p.active);
-        assert_eq!(p.filtered.len(), PALETTE_COMMANDS.len());
+        assert_eq!(p.filtered.len(), p.commands.len());
     }
 
     #[test]
     fn palette_activate_resets_state() {
-        let mut p = CommandPalette::new();
+        let mut p = CommandPalette::new(PALETTE_COMMANDS);
         p.selected = 2;
         p.filtered = vec![1];
         p.activate();
         assert!(p.active);
         assert_eq!(p.selected, 0);
-        assert_eq!(p.filtered.len(), PALETTE_COMMANDS.len());
+        assert_eq!(p.filtered.len(), p.commands.len());
     }
 
     #[test]
     fn palette_deactivate_clears_active() {
-        let mut p = CommandPalette::new();
+        let mut p = CommandPalette::new(PALETTE_COMMANDS);
         p.activate();
         p.deactivate();
         assert!(!p.active);
@@ -1096,48 +1230,48 @@ mod tests {
 
     #[test]
     fn palette_filter_by_cmd_prefix() {
-        let mut p = CommandPalette::new();
+        let mut p = CommandPalette::new(PALETTE_COMMANDS);
         p.update_filter("d");
         assert!(!p.filtered.is_empty());
         // All filtered entries must start with "d"
         for &i in &p.filtered {
-            assert!(PALETTE_COMMANDS[i].cmd.starts_with('d'));
+            assert!(p.commands[i].cmd.starts_with('d'));
         }
     }
 
     #[test]
     fn palette_filter_dm_exact() {
-        let mut p = CommandPalette::new();
+        let mut p = CommandPalette::new(PALETTE_COMMANDS);
         p.update_filter("dm");
         assert_eq!(p.filtered.len(), 1);
-        assert_eq!(PALETTE_COMMANDS[p.filtered[0]].cmd, "dm");
+        assert_eq!(p.commands[p.filtered[0]].cmd, "dm");
     }
 
     #[test]
     fn palette_filter_empty_query_shows_all() {
-        let mut p = CommandPalette::new();
+        let mut p = CommandPalette::new(PALETTE_COMMANDS);
         p.update_filter("");
-        assert_eq!(p.filtered.len(), PALETTE_COMMANDS.len());
+        assert_eq!(p.filtered.len(), p.commands.len());
     }
 
     #[test]
     fn palette_filter_no_match_returns_empty() {
-        let mut p = CommandPalette::new();
+        let mut p = CommandPalette::new(PALETTE_COMMANDS);
         p.update_filter("zzz_no_match");
         assert!(p.filtered.is_empty());
     }
 
     #[test]
     fn palette_filter_by_description_keyword() {
-        let mut p = CommandPalette::new();
+        let mut p = CommandPalette::new(PALETTE_COMMANDS);
         p.update_filter("private");
         // Should match "dm" whose description is "Send a private message"
-        assert!(p.filtered.iter().any(|&i| PALETTE_COMMANDS[i].cmd == "dm"));
+        assert!(p.filtered.iter().any(|&i| p.commands[i].cmd == "dm"));
     }
 
     #[test]
     fn palette_move_up_clamps_at_zero() {
-        let mut p = CommandPalette::new();
+        let mut p = CommandPalette::new(PALETTE_COMMANDS);
         p.activate();
         p.move_up();
         assert_eq!(p.selected, 0);
@@ -1145,17 +1279,17 @@ mod tests {
 
     #[test]
     fn palette_move_down_clamps_at_end() {
-        let mut p = CommandPalette::new();
+        let mut p = CommandPalette::new(PALETTE_COMMANDS);
         p.activate();
         for _ in 0..100 {
             p.move_down();
         }
-        assert_eq!(p.selected, PALETTE_COMMANDS.len() - 1);
+        assert_eq!(p.selected, p.commands.len() - 1);
     }
 
     #[test]
     fn palette_move_up_down_navigate() {
-        let mut p = CommandPalette::new();
+        let mut p = CommandPalette::new(PALETTE_COMMANDS);
         p.activate();
         p.move_down();
         p.move_down();
@@ -1166,7 +1300,7 @@ mod tests {
 
     #[test]
     fn palette_selected_usage_returns_usage_string() {
-        let mut p = CommandPalette::new();
+        let mut p = CommandPalette::new(PALETTE_COMMANDS);
         p.activate();
         // First entry in unfiltered list
         let usage = p.selected_usage().unwrap();
@@ -1175,24 +1309,92 @@ mod tests {
 
     #[test]
     fn palette_selected_usage_empty_when_no_filtered() {
-        let mut p = CommandPalette::new();
+        let mut p = CommandPalette::new(PALETTE_COMMANDS);
         p.filtered.clear();
         assert!(p.selected_usage().is_none());
     }
 
     #[test]
     fn palette_selected_clamps_after_filter_narrows() {
-        let mut p = CommandPalette::new();
+        let mut p = CommandPalette::new(PALETTE_COMMANDS);
         p.activate();
         // Navigate to last entry
         for _ in 0..100 {
             p.move_down();
         }
-        assert_eq!(p.selected, PALETTE_COMMANDS.len() - 1);
+        assert_eq!(p.selected, p.commands.len() - 1);
         // Now narrow filter so fewer entries remain
         p.update_filter("dm");
         assert_eq!(p.filtered.len(), 1);
         assert_eq!(p.selected, 0); // clamped
+    }
+
+    // ── PALETTE_COMMANDS completeness tests ───────────────────────────────────
+
+    #[test]
+    fn palette_commands_contains_set_status() {
+        assert!(
+            PALETTE_COMMANDS.iter().any(|c| c.cmd == "set_status"),
+            "PALETTE_COMMANDS must include set_status"
+        );
+    }
+
+    #[test]
+    fn palette_filter_set_status() {
+        let mut p = CommandPalette::new(PALETTE_COMMANDS);
+        p.update_filter("set");
+        assert!(
+            p.filtered
+                .iter()
+                .any(|&i| p.commands[i].cmd == "set_status"),
+            "filter 'set' must match set_status"
+        );
+    }
+
+    // ── ADMIN_COMMANDS palette tests ──────────────────────────────────────────
+
+    #[test]
+    fn admin_palette_starts_inactive() {
+        let p = CommandPalette::new(ADMIN_COMMANDS);
+        assert!(!p.active);
+        assert_eq!(p.filtered.len(), ADMIN_COMMANDS.len());
+    }
+
+    #[test]
+    fn admin_palette_contains_all_five_commands() {
+        let cmds: Vec<&str> = ADMIN_COMMANDS.iter().map(|c| c.cmd).collect();
+        assert!(cmds.contains(&"kick"));
+        assert!(cmds.contains(&"reauth"));
+        assert!(cmds.contains(&"clear-tokens"));
+        assert!(cmds.contains(&"exit"));
+        assert!(cmds.contains(&"clear"));
+    }
+
+    #[test]
+    fn admin_palette_usages_use_backslash_prefix() {
+        for item in ADMIN_COMMANDS {
+            assert!(
+                item.usage.starts_with('\\'),
+                "admin command '{}' usage must start with \\",
+                item.cmd
+            );
+        }
+    }
+
+    #[test]
+    fn admin_palette_filter_kick() {
+        let mut p = CommandPalette::new(ADMIN_COMMANDS);
+        p.update_filter("ki");
+        assert_eq!(p.filtered.len(), 1);
+        assert_eq!(p.commands[p.filtered[0]].cmd, "kick");
+    }
+
+    #[test]
+    fn admin_palette_selected_usage_backslash() {
+        let mut p = CommandPalette::new(ADMIN_COMMANDS);
+        p.activate();
+        let usage = p.selected_usage().unwrap();
+        assert!(usage.starts_with('\\'));
     }
 
     // ── build_payload tests ───────────────────────────────────────────────────
