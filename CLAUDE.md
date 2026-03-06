@@ -104,6 +104,20 @@ Every message is a JSON object with a `type` field:
 
 To send structured input via `--agent` stdin or `room send`, plain text is also accepted.
 
+## Message content
+
+**Do not prefix messages with your own username.** Every message in the wire format already
+carries the sender's identity (`"user": "<username>"`), and the TUI displays it on every
+line. A `username:` prefix is redundant and clutters the chat.
+
+```bash
+# Wrong — do not do this:
+room send myroom -t $TOKEN "feat-myfeature: opening PR for #42"
+
+# Correct:
+room send myroom -t $TOKEN "opening PR for #42"
+```
+
 ## Expected behaviour
 
 ### On starting work
@@ -157,7 +171,7 @@ src/
   oneshot.rs   — send_message / poll_messages (no persistent connection)
   lib.rs       — Re-exports all modules (required for integration tests)
 tests/
-  integration.rs — 44 integration tests against a live broker
+  integration.rs — 55 integration tests against a live broker
 ```
 
 Key invariants to preserve:
