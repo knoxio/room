@@ -378,26 +378,30 @@ recovery, not for replacing room announcements. Still announce milestones in the
 
 ## Workspace structure
 
-This is a cargo workspace. The root `Cargo.toml` defines `[workspace]` with `members = ["crates/*"]`.
-The room crate (package `agentroom`) lives at the workspace root. Future crates (e.g. `room-agent`,
-`room-plugins`) go under `crates/`.
+This is a cargo workspace with a virtual root (no root package). The root `Cargo.toml`
+defines `[workspace]` with `members = ["crates/*"]`. All packages live under `crates/`.
 
 ```
-Cargo.toml          — workspace root + room package
-Cargo.lock          — shared across all workspace members
-crates/             — future workspace members (room-agent, etc.)
-src/                — room crate source
-tests/              — room integration tests
+Cargo.toml                — virtual workspace root (no [package])
+Cargo.lock                — shared across all workspace members
+crates/
+  room-protocol/          — wire format types (lib, package: room-protocol)
+  room-cli/               — broker + TUI + oneshot (bin: room, package: room-cli)
+  room-ralph/             — agent wrapper (bin: room-ralph, package: room-ralph)
+scripts/                  — shell scripts (pre-push, tests, legacy ralph wrapper)
 ```
 
 ## Codebase overview
 
 ```
-src/
-  main.rs              — CLI parsing, subcommand dispatch (join / send / poll / watch)
+crates/room-protocol/src/
+  lib.rs               — Message enum, constructors, serde impls, parse_client_line
+
+crates/room-cli/src/
+  main.rs              — CLI parsing, subcommand dispatch (join / send / poll / watch / list)
   lib.rs               — Re-exports all modules (required for integration tests)
   client.rs            — Connects to broker, runs TUI or agent mode
-  message.rs           — Wire format enum, constructors, parse_client_line
+  message.rs           — Re-exports room_protocol::* + CLI-specific helpers
   history.rs           — NDJSON load/append
   broker/
     mod.rs             — Accept loop, handle_client, handle_oneshot_send
@@ -420,9 +424,27 @@ src/
     input.rs           — InputState, handle_key, Action enum
     render.rs          — format_message, wrap_words, rendering helpers
     widgets.rs         — CommandPalette, MentionPicker
-tests/
+crates/room-cli/tests/
   integration.rs       — Integration tests against a live broker (UDS + WS)
   ws_smoke.rs          — End-to-end smoke tests spawning the real binary with --ws-port
+
+crates/room-ralph/src/
+  main.rs              — CLI (clap), dependency check, tmux launch, main entry
+  lib.rs               — Module declarations, Cli struct
+  loop_runner.rs       — Iteration loop: spawn claude, check output, restart logic
+  monitor.rs           — Context monitoring: parse_usage, should_restart, threshold math
+  progress.rs          — Progress file I/O: write/read/delete, log usage
+  prompt.rs            — Prompt builder: custom prompts, progress inclusion
+  room.rs              — Room CLI wrapper: join/send/poll via Command::new
+  claude.rs            — Claude subprocess wrapper: spawn, parse output
+
+scripts/
+  pre-push.sh          — Git hook: check + fmt + clippy + test
+  ralph-room.sh        — Legacy shell agent wrapper (superseded by room-ralph)
+  context-monitor.sh   — Legacy shell context monitor (superseded by room-ralph)
+  test-ralph-room.sh   — Shell tests for ralph-room.sh (46 tests)
+  test-context-monitor.sh — Shell tests for context-monitor.sh (41 tests)
+  progress-template.md — Structured progress file template
 ```
 
 Key invariants to preserve:
@@ -431,7 +453,9 @@ Key invariants to preserve:
   `#[serde(tag)]`, it breaks deserialization.
 - **All file IO uses `std::fs` (synchronous) or explicit `spawn_blocking`** — `tokio::fs`
   wrappers get cancelled on runtime shutdown.
-- **`src/lib.rs` must export any new modules** so integration tests can import them.
+- **`crates/room-cli/src/lib.rs` must export any new modules** so integration tests can import them.
+- **room-ralph is a CLIENT** — it shells out to `room` and `claude` via `Command::new`.
+  It must NOT link room-cli transport or broker code. Depend on room-protocol only.
 - **All tests must pass** before committing: `cargo test`.
 
 ## Pre-push checklist
@@ -470,7 +494,16 @@ All tests must remain green. Add tests for any new behaviour.
 
 ## Baseline test count
 
-**Current baseline: 327 tests (251 unit + 71 integration + 5 smoke)**
+**Current baseline: 400 Rust tests + 87 shell tests**
+
+Rust breakdown:
+- room-protocol: 20 unit tests
+- room-cli: 231 unit + 71 integration + 5 smoke = 307 tests
+- room-ralph: 73 unit tests
+
+Shell breakdown:
+- test-context-monitor.sh: 41 tests
+- test-ralph-room.sh: 46 tests
 
 Every PR that adds functionality must also add tests. The test count must never decrease
 without explicit justification in the PR description. If you remove tests, explain why
