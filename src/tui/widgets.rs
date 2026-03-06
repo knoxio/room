@@ -101,18 +101,22 @@ impl CommandPalette {
     }
 
     /// Update the filtered list based on the query typed after the trigger character.
+    ///
+    /// Command-name prefix matches are ranked above description-only matches so
+    /// that e.g. `/help` appears before `/who` when the user types "he".
     pub(super) fn update_filter(&mut self, query: &str) {
         let q = query.to_ascii_lowercase();
-        self.filtered = self
-            .commands
-            .iter()
-            .enumerate()
-            .filter(|(_, item)| {
-                item.cmd.starts_with(q.as_str())
-                    || item.description.to_ascii_lowercase().contains(q.as_str())
-            })
-            .map(|(i, _)| i)
-            .collect();
+        let mut prefix_matches: Vec<usize> = Vec::new();
+        let mut desc_matches: Vec<usize> = Vec::new();
+        for (i, item) in self.commands.iter().enumerate() {
+            if item.cmd.starts_with(q.as_str()) {
+                prefix_matches.push(i);
+            } else if item.description.to_ascii_lowercase().contains(q.as_str()) {
+                desc_matches.push(i);
+            }
+        }
+        prefix_matches.extend(desc_matches);
+        self.filtered = prefix_matches;
         if self.selected >= self.filtered.len() {
             self.selected = self.filtered.len().saturating_sub(1);
         }
@@ -399,6 +403,70 @@ mod tests {
         // All commands use / prefix
         let usage = p.selected_usage().unwrap();
         assert!(usage.starts_with('/'));
+    }
+
+    // ── Filter ranking tests (#172) ────────────────────────────────────────────
+
+    #[test]
+    fn palette_filter_ranks_prefix_before_description() {
+        // "se" matches "set_status" by cmd prefix AND "dm" by description ("Send a private message").
+        // Prefix matches must appear first in the filtered list.
+        let mut p = CommandPalette::new(PALETTE_COMMANDS);
+        p.update_filter("se");
+        assert!(
+            p.filtered.len() >= 2,
+            "expected at least 2 matches for 'se', got {}",
+            p.filtered.len()
+        );
+        // First match must be the cmd-prefix match (set_status).
+        let first_cmd = p.commands[p.filtered[0]].cmd;
+        assert_eq!(
+            first_cmd, "set_status",
+            "first match should be 'set_status' (prefix), not '{}'",
+            first_cmd
+        );
+        // Description-only matches (like "dm" whose description starts with "Send") come after.
+        let prefix_count = p
+            .filtered
+            .iter()
+            .filter(|&&i| p.commands[i].cmd.starts_with("se"))
+            .count();
+        for (pos, &i) in p.filtered.iter().enumerate() {
+            if !p.commands[i].cmd.starts_with("se") {
+                assert!(
+                    pos >= prefix_count,
+                    "description-only match '{}' at position {} should come after {} prefix matches",
+                    p.commands[i].cmd,
+                    pos,
+                    prefix_count
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn palette_filter_description_match_appears_after_all_prefix_matches() {
+        // "re" matches "reply" and "reauth" by prefix. It also matches "set_status" by description
+        // ("Set your presence status"). Prefix matches must come first.
+        let mut p = CommandPalette::new(PALETTE_COMMANDS);
+        p.update_filter("re");
+        let prefix_count = p
+            .filtered
+            .iter()
+            .filter(|&&i| p.commands[i].cmd.starts_with("re"))
+            .count();
+        assert!(prefix_count >= 2, "expected at least reply + reauth");
+        for (pos, &i) in p.filtered.iter().enumerate() {
+            if !p.commands[i].cmd.starts_with("re") {
+                assert!(
+                    pos >= prefix_count,
+                    "description-only match '{}' at position {} should come after {} prefix matches",
+                    p.commands[i].cmd,
+                    pos,
+                    prefix_count
+                );
+            }
+        }
     }
 
     // ── MentionPicker tests ───────────────────────────────────────────────────

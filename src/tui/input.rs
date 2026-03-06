@@ -170,31 +170,8 @@ pub(super) fn handle_key(
             if word_start < state.cursor_pos {
                 state.input.drain(word_start..state.cursor_pos);
                 state.cursor_pos = word_start;
-                // Sync mention/palette after deletion.
-                if state.mention.active {
-                    if let Some((at_byte, query)) = find_at_context(&state.input, state.cursor_pos)
-                    {
-                        state.mention.at_byte = at_byte;
-                        state.mention.update_filter(online_users, query);
-                        if state.mention.filtered.is_empty() {
-                            state.mention.deactivate();
-                        }
-                    } else {
-                        state.mention.deactivate();
-                    }
-                }
-                if state.palette.active {
-                    if state.input.is_empty() {
-                        state.palette.deactivate();
-                    } else if let Some(query) = state.input.strip_prefix('/') {
-                        state.palette.update_filter(query);
-                        if state.palette.filtered.is_empty() {
-                            state.palette.deactivate();
-                        }
-                    } else {
-                        state.palette.deactivate();
-                    }
-                }
+                sync_mention_after_delete(state, online_users);
+                sync_palette_after_delete(state);
             }
         }
         KeyCode::Char(c) => {
@@ -234,32 +211,8 @@ pub(super) fn handle_key(
                     .unwrap_or(0);
                 state.input.remove(prev);
                 state.cursor_pos = prev;
-                // Sync mention picker after deletion.
-                if state.mention.active {
-                    if let Some((at_byte, query)) = find_at_context(&state.input, state.cursor_pos)
-                    {
-                        state.mention.at_byte = at_byte;
-                        state.mention.update_filter(online_users, query);
-                        if state.mention.filtered.is_empty() {
-                            state.mention.deactivate();
-                        }
-                    } else {
-                        state.mention.deactivate();
-                    }
-                }
-                // Sync palette state after deletion.
-                if state.palette.active {
-                    if state.input.is_empty() {
-                        state.palette.deactivate();
-                    } else if let Some(query) = state.input.strip_prefix('/') {
-                        state.palette.update_filter(query);
-                        if state.palette.filtered.is_empty() {
-                            state.palette.deactivate();
-                        }
-                    } else {
-                        state.palette.deactivate();
-                    }
-                }
+                sync_mention_after_delete(state, online_users);
+                sync_palette_after_delete(state);
             }
         }
         KeyCode::Left if key.modifiers.contains(KeyModifiers::ALT) => {
@@ -456,6 +409,54 @@ fn sync_mention_after_cursor_move(state: &mut InputState, online_users: &[String
         }
     } else {
         state.mention.deactivate();
+    }
+}
+
+/// Re-evaluate the mention picker after a deletion (Backspace / Alt+Backspace).
+///
+/// If the picker is active, updates the filter or deactivates if the `@` context
+/// is gone. If the picker is inactive, reactivates it when the cursor is inside
+/// a valid `@` context with at least one match — this handles the case where the
+/// picker was auto-dismissed because all matches disappeared, and a subsequent
+/// deletion restores a matching prefix.
+fn sync_mention_after_delete(state: &mut InputState, online_users: &[String]) {
+    if let Some((at_byte, query)) = find_at_context(&state.input, state.cursor_pos) {
+        if state.mention.active {
+            state.mention.at_byte = at_byte;
+            state.mention.update_filter(online_users, query);
+            if state.mention.filtered.is_empty() {
+                state.mention.deactivate();
+            }
+        } else {
+            state.mention.activate(at_byte, online_users, query);
+            if state.mention.filtered.is_empty() {
+                state.mention.deactivate();
+            }
+        }
+    } else {
+        state.mention.deactivate();
+    }
+}
+
+/// Re-evaluate the command palette after a deletion (Backspace / Alt+Backspace).
+///
+/// If the palette is active, updates the filter or deactivates. If inactive,
+/// reactivates when input starts with `/` and the query matches at least one
+/// command — this handles the case where the palette was auto-dismissed and a
+/// backspace restores a matching query.
+fn sync_palette_after_delete(state: &mut InputState) {
+    if state.input.is_empty() {
+        state.palette.deactivate();
+    } else if let Some(query) = state.input.strip_prefix('/') {
+        state.palette.update_filter(query);
+        if state.palette.filtered.is_empty() {
+            state.palette.deactivate();
+        } else if !state.palette.active {
+            state.palette.active = true;
+            state.palette.selected = 0;
+        }
+    } else {
+        state.palette.deactivate();
     }
 }
 
@@ -1588,6 +1589,105 @@ mod tests {
         );
         // Cursor is now at the '@' position (byte 3). find_at_context with cursor
         // at '@' returns None (no query between '@' and cursor).
+        assert!(!state.mention.active);
+    }
+
+    // ── Palette reactivation on backspace (#172) ─────────────────────────────
+
+    #[test]
+    fn palette_reactivates_on_backspace_after_auto_dismiss() {
+        let mut state = InputState::new();
+        // Type "/he" — palette activates and filters.
+        for c in "/he".chars() {
+            handle_key(make_key(KeyCode::Char(c)), &mut state, &[], 10, 80);
+        }
+        assert!(state.palette.active);
+        // Type "zzz" — no matches, palette auto-dismisses.
+        for c in "zzz".chars() {
+            handle_key(make_key(KeyCode::Char(c)), &mut state, &[], 10, 80);
+        }
+        assert!(!state.palette.active);
+        assert_eq!(state.input, "/hezzz");
+        // Backspace 3 times to get back to "/he" — palette should reactivate.
+        for _ in 0..3 {
+            handle_key(make_key(KeyCode::Backspace), &mut state, &[], 10, 80);
+        }
+        assert_eq!(state.input, "/he");
+        assert!(
+            state.palette.active,
+            "palette should reactivate when backspace restores a matching query"
+        );
+        assert!(
+            !state.palette.filtered.is_empty(),
+            "palette should have matches for 'he'"
+        );
+    }
+
+    #[test]
+    fn palette_stays_dismissed_when_backspace_query_has_no_matches() {
+        let mut state = InputState::new();
+        // Type "/zzz" — no matches, palette dismissed.
+        for c in "/zzz".chars() {
+            handle_key(make_key(KeyCode::Char(c)), &mut state, &[], 10, 80);
+        }
+        assert!(!state.palette.active);
+        // Backspace to "/zz" — still no matches, stays dismissed.
+        handle_key(make_key(KeyCode::Backspace), &mut state, &[], 10, 80);
+        assert!(!state.palette.active);
+    }
+
+    #[test]
+    fn palette_deactivates_when_slash_is_deleted() {
+        let mut state = InputState::new();
+        // Type "/" — palette activates.
+        handle_key(make_key(KeyCode::Char('/')), &mut state, &[], 10, 80);
+        assert!(state.palette.active);
+        // Backspace removes "/" — palette deactivates.
+        handle_key(make_key(KeyCode::Backspace), &mut state, &[], 10, 80);
+        assert!(state.input.is_empty());
+        assert!(!state.palette.active);
+    }
+
+    // ── Mention picker reactivation on backspace (#172) ──────────────────────
+
+    #[test]
+    fn mention_picker_reactivates_on_backspace_after_auto_dismiss() {
+        let mut state = InputState::new();
+        let users = vec!["alice".to_owned()];
+        // Type "@ali" — picker activates, "alice" matches.
+        for c in "@ali".chars() {
+            handle_key(make_key(KeyCode::Char(c)), &mut state, &users, 10, 80);
+        }
+        assert!(state.mention.active);
+        // Type "zzz" — no matches, picker auto-dismisses.
+        for c in "zzz".chars() {
+            handle_key(make_key(KeyCode::Char(c)), &mut state, &users, 10, 80);
+        }
+        assert!(!state.mention.active);
+        assert_eq!(state.input, "@alizzz");
+        // Backspace 3 times to get back to "@ali" — picker should reactivate.
+        for _ in 0..3 {
+            handle_key(make_key(KeyCode::Backspace), &mut state, &users, 10, 80);
+        }
+        assert_eq!(state.input, "@ali");
+        assert!(
+            state.mention.active,
+            "mention picker should reactivate when backspace restores a matching query"
+        );
+        assert_eq!(state.mention.filtered, vec!["alice".to_owned()]);
+    }
+
+    #[test]
+    fn mention_picker_stays_dismissed_when_no_user_matches() {
+        let mut state = InputState::new();
+        let users = vec!["alice".to_owned()];
+        // Type "@zzz" — no matches, picker dismissed.
+        for c in "@zzz".chars() {
+            handle_key(make_key(KeyCode::Char(c)), &mut state, &users, 10, 80);
+        }
+        assert!(!state.mention.active);
+        // Backspace to "@zz" — still no user matches "zz".
+        handle_key(make_key(KeyCode::Backspace), &mut state, &users, 10, 80);
         assert!(!state.mention.active);
     }
 }
