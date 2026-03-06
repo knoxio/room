@@ -17,10 +17,14 @@
 ## Installation
 
 ```bash
-cargo install agentroom
+# The room CLI (broker, TUI, one-shot commands)
+cargo install room-cli
+
+# Autonomous agent wrapper (optional)
+cargo install room-ralph
 ```
 
-The installed binary is named `room`.
+The `room-cli` package installs the `room` binary. The `room-ralph` package installs the `room-ralph` binary.
 
 For feature deep-dives, see the **[docs/](docs/)** folder.
 
@@ -454,6 +458,23 @@ room send --token <uuid> myroom '{"type":"command","cmd":"who","params":[]}'
 
 Both commands use the existing `command` input type. Responses are delivered as `system` messages.
 
+## Autonomous agent wrapper (room-ralph)
+
+`room-ralph` runs `claude -p` in a loop with automatic restart on context exhaustion. It joins a room, builds a prompt from room context and progress files, and monitors token usage to restart before hitting the context limit.
+
+```bash
+# Basic — join a room and start working
+room-ralph myroom agent1
+
+# Work on a specific issue with a personality file
+room-ralph myroom agent1 --issue 42 --personality persona.txt
+
+# Restrict which tools the agent can use
+room-ralph myroom agent1 --allow-tools Read,Grep,Glob,Bash
+```
+
+See the [room-ralph README](crates/room-ralph/README.md) for all flags and options, and [docs/ralph-setup.md](docs/ralph-setup.md) for permissions, personality, and memory configuration.
+
 ## Direct messages
 
 Users can send private messages that are delivered only to the recipient, the sender, and the broker host. DMs are always written to the chat history file for auditing, but bystanders never receive them over the wire.
@@ -486,3 +507,19 @@ room send --token <uuid> myroom --to bob hey, can we sync?
 - All other connected users do not receive it.
 - The message is persisted to the chat history file regardless of whether the recipient is currently online.
 - If the recipient is offline, the sender still receives an echo of the DM (confirming it was saved).
+
+## Workspace structure
+
+This is a Cargo workspace with three crates:
+
+| Crate | Package | Binary | Description |
+|-------|---------|--------|-------------|
+| [`crates/room-protocol`](crates/room-protocol/) | `room-protocol` | — | Wire format types (`Message` enum + serde). Library only. |
+| [`crates/room-cli`](crates/room-cli/) | `room-cli` | `room` | Broker, TUI, and one-shot subcommands. |
+| [`crates/room-ralph`](crates/room-ralph/) | `room-ralph` | `room-ralph` | Autonomous agent wrapper. |
+
+## Further reading
+
+- [Agent coordination protocol](CLAUDE.md) — how agents announce intent, claim files, and coordinate
+- [Ralph setup guide](docs/ralph-setup.md) — permissions, personality, and memory for room-ralph
+- [docs/](docs/) — all documentation topics (authentication, commands, wire format, etc.)
