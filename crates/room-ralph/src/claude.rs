@@ -1,6 +1,50 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// Safe default tools that ralph passes to claude when no explicit
+/// --allow-tools flag or RALPH_ALLOWED_TOOLS env var is set.
+pub const DEFAULT_ALLOWED_TOOLS: &[&str] = &[
+    "Read",
+    "Glob",
+    "Grep",
+    "WebSearch",
+    "Bash(room *)",
+    "Bash(git status)",
+    "Bash(git log)",
+    "Bash(git diff)",
+];
+
+/// Resolve the effective allowed-tools list.
+///
+/// Precedence: CLI --allow-tools > RALPH_ALLOWED_TOOLS env > defaults.
+/// Special value "none" (case-insensitive) disables tool restrictions entirely.
+pub fn resolve_allowed_tools(cli_tools: &[String]) -> Vec<String> {
+    // CLI takes highest precedence
+    if !cli_tools.is_empty() {
+        if cli_tools.len() == 1 && cli_tools[0].eq_ignore_ascii_case("none") {
+            return Vec::new();
+        }
+        return cli_tools.to_vec();
+    }
+
+    // Check env var
+    if let Ok(env_val) = std::env::var("RALPH_ALLOWED_TOOLS") {
+        let trimmed = env_val.trim();
+        if trimmed.eq_ignore_ascii_case("none") {
+            return Vec::new();
+        }
+        if !trimmed.is_empty() {
+            return trimmed.split(',').map(|s| s.trim().to_string()).collect();
+        }
+    }
+
+    // Fall back to defaults
+    DEFAULT_ALLOWED_TOOLS
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect()
+}
+
 /// Output from a claude -p invocation.
 pub struct ClaudeOutput {
     /// Raw JSON output from claude --output-format json
@@ -245,5 +289,85 @@ mod tests {
                 "Bash"
             ]
         );
+    }
+
+    #[test]
+    fn resolve_defaults_when_empty() {
+        // Clear env to ensure defaults apply
+        std::env::remove_var("RALPH_ALLOWED_TOOLS");
+        let result = resolve_allowed_tools(&[]);
+        assert_eq!(result.len(), DEFAULT_ALLOWED_TOOLS.len());
+        assert!(result.contains(&"Read".to_string()));
+        assert!(result.contains(&"Glob".to_string()));
+        assert!(result.contains(&"Bash(room *)".to_string()));
+    }
+
+    #[test]
+    fn resolve_cli_overrides_defaults() {
+        std::env::remove_var("RALPH_ALLOWED_TOOLS");
+        let cli = vec!["Write".to_string(), "Edit".to_string()];
+        let result = resolve_allowed_tools(&cli);
+        assert_eq!(result, vec!["Write", "Edit"]);
+    }
+
+    #[test]
+    fn resolve_cli_none_disables_restrictions() {
+        std::env::remove_var("RALPH_ALLOWED_TOOLS");
+        let cli = vec!["none".to_string()];
+        let result = resolve_allowed_tools(&cli);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn resolve_cli_none_case_insensitive() {
+        std::env::remove_var("RALPH_ALLOWED_TOOLS");
+        let cli = vec!["NONE".to_string()];
+        let result = resolve_allowed_tools(&cli);
+        assert!(result.is_empty());
+
+        let cli = vec!["None".to_string()];
+        let result = resolve_allowed_tools(&cli);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn resolve_env_overrides_defaults() {
+        std::env::set_var("RALPH_ALLOWED_TOOLS", "Bash,Read,WebSearch");
+        let result = resolve_allowed_tools(&[]);
+        assert_eq!(result, vec!["Bash", "Read", "WebSearch"]);
+        std::env::remove_var("RALPH_ALLOWED_TOOLS");
+    }
+
+    #[test]
+    fn resolve_env_none_disables_restrictions() {
+        std::env::set_var("RALPH_ALLOWED_TOOLS", "none");
+        let result = resolve_allowed_tools(&[]);
+        assert!(result.is_empty());
+        std::env::remove_var("RALPH_ALLOWED_TOOLS");
+    }
+
+    #[test]
+    fn resolve_cli_takes_precedence_over_env() {
+        std::env::set_var("RALPH_ALLOWED_TOOLS", "Bash,Read");
+        let cli = vec!["Write".to_string()];
+        let result = resolve_allowed_tools(&cli);
+        assert_eq!(result, vec!["Write"]);
+        std::env::remove_var("RALPH_ALLOWED_TOOLS");
+    }
+
+    #[test]
+    fn resolve_env_trims_whitespace() {
+        std::env::set_var("RALPH_ALLOWED_TOOLS", " Bash , Read , Grep ");
+        let result = resolve_allowed_tools(&[]);
+        assert_eq!(result, vec!["Bash", "Read", "Grep"]);
+        std::env::remove_var("RALPH_ALLOWED_TOOLS");
+    }
+
+    #[test]
+    fn resolve_env_empty_string_uses_defaults() {
+        std::env::set_var("RALPH_ALLOWED_TOOLS", "");
+        let result = resolve_allowed_tools(&[]);
+        assert_eq!(result.len(), DEFAULT_ALLOWED_TOOLS.len());
+        std::env::remove_var("RALPH_ALLOWED_TOOLS");
     }
 }

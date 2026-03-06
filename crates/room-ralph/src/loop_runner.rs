@@ -63,8 +63,9 @@ pub async fn run_loop(cli: &Cli, token: &str, running: &Arc<AtomicBool>) -> Resu
             cli.model,
             iteration
         );
+        let effective_tools = claude::resolve_allowed_tools(&cli.allow_tools);
         let claude_output =
-            match claude::spawn_claude(&cli.model, &prompt_file, &cli.add_dirs, &cli.allow_tools) {
+            match claude::spawn_claude(&cli.model, &prompt_file, &cli.add_dirs, &effective_tools) {
                 Ok(o) => o,
                 Err(e) => {
                     tracing::error!("failed to spawn claude: {}", e);
