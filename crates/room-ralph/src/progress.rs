@@ -78,74 +78,173 @@ pub fn log_usage_to_file(
 mod tests {
     use super::*;
 
+    // ── progress_file_path ──────────────────────────────────────────
+
     #[test]
     fn progress_file_path_with_issue() {
-        assert_eq!(
-            progress_file_path(Some("42"), "agent"),
-            PathBuf::from("/tmp/room-progress-42.md")
-        );
+        let path = progress_file_path(Some("42"), "saphire");
+        assert_eq!(path, PathBuf::from("/tmp/room-progress-42.md"));
     }
 
     #[test]
-    fn progress_file_path_without_issue() {
-        assert_eq!(
-            progress_file_path(None, "saphire"),
-            PathBuf::from("/tmp/room-progress-saphire.md")
-        );
+    fn progress_file_path_without_issue_uses_username() {
+        let path = progress_file_path(None, "saphire");
+        assert_eq!(path, PathBuf::from("/tmp/room-progress-saphire.md"));
     }
 
     #[test]
-    fn progress_file_path_empty_issue() {
-        assert_eq!(
-            progress_file_path(Some(""), "agent"),
-            PathBuf::from("/tmp/room-progress-agent.md")
-        );
+    fn progress_file_path_empty_issue_uses_username() {
+        let path = progress_file_path(Some(""), "bb");
+        assert_eq!(path, PathBuf::from("/tmp/room-progress-bb.md"));
+    }
+
+    // ── read_progress ───────────────────────────────────────────────
+
+    #[test]
+    fn read_progress_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("progress.md");
+        std::fs::write(&path, "# Progress\nSome content").unwrap();
+
+        let content = read_progress(&path);
+        assert!(content.is_some());
+        assert!(content.unwrap().contains("Some content"));
     }
 
     #[test]
-    fn write_and_read_progress() {
-        let path = PathBuf::from("/tmp/test-ralph-progress-wr.md");
-        write_progress(&path, 3, Some("99"), "line1\nline2\nline3").unwrap();
-        let content = read_progress(&path).unwrap();
+    fn read_progress_missing_file_returns_none() {
+        let path = Path::new("/tmp/nonexistent-bb-test-progress-8f3a.md");
+        assert!(read_progress(path).is_none());
+    }
+
+    #[test]
+    fn read_progress_empty_file_returns_some_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("progress.md");
+        std::fs::write(&path, "").unwrap();
+
+        let content = read_progress(&path);
+        assert!(content.is_some());
+        assert!(content.unwrap().is_empty());
+    }
+
+    // ── write_progress ──────────────────────────────────────────────
+
+    #[test]
+    fn write_progress_creates_file_with_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("progress.md");
+
+        write_progress(&path, 3, Some("42"), "some claude output").unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("# Progress"));
         assert!(content.contains("Iteration: 3"));
-        assert!(content.contains("Issue: 99"));
-        assert!(content.contains("line1"));
+        assert!(content.contains("Issue: 42"));
         assert!(content.contains("context exhaustion"));
-        std::fs::remove_file(&path).ok();
     }
 
     #[test]
-    fn read_progress_nonexistent() {
-        assert!(read_progress(Path::new("/tmp/nonexistent-ralph-test.md")).is_none());
+    fn write_progress_without_issue() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("progress.md");
+
+        write_progress(&path, 1, None, "output").unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("Issue: unassigned"));
     }
 
     #[test]
-    fn delete_progress_file() {
-        let path = PathBuf::from("/tmp/test-ralph-progress-del.md");
-        std::fs::write(&path, "test").unwrap();
-        assert!(path.exists());
+    fn write_progress_truncates_long_response() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("progress.md");
+
+        let lines: Vec<String> = (1..=100).map(|i| format!("line {}", i)).collect();
+        let long_response = lines.join("\n");
+
+        write_progress(&path, 1, Some("99"), &long_response).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        // Last 50 lines (51-100) should be present
+        assert!(content.contains("line 100"));
+        assert!(content.contains("line 51"));
+        // Line 50 is the boundary — should NOT be present (only last 50 kept)
+        assert!(!content.contains("\nline 50\n"));
+    }
+
+    #[test]
+    fn write_progress_short_response_not_truncated() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("progress.md");
+
+        write_progress(&path, 1, Some("1"), "short\nresponse").unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("short"));
+        assert!(content.contains("response"));
+    }
+
+    #[test]
+    fn write_progress_overwrites_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("progress.md");
+
+        write_progress(&path, 1, Some("1"), "first").unwrap();
+        write_progress(&path, 2, Some("1"), "second").unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("Iteration: 2"));
+        assert!(!content.contains("Iteration: 1"));
+    }
+
+    // ── delete_progress ─────────────────────────────────────────────
+
+    #[test]
+    fn delete_progress_removes_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("progress.md");
+        std::fs::write(&path, "content").unwrap();
+
         delete_progress(&path).unwrap();
         assert!(!path.exists());
     }
 
     #[test]
     fn delete_progress_nonexistent_is_ok() {
-        assert!(delete_progress(Path::new("/tmp/nonexistent-ralph-del.md")).is_ok());
+        let path = Path::new("/tmp/nonexistent-bb-test-delete-9c7b.md");
+        assert!(delete_progress(path).is_ok());
     }
 
+    // ── log_usage_to_file ───────────────────────────────────────────
+
     #[test]
-    fn write_progress_truncates_long_response() {
-        let path = PathBuf::from("/tmp/test-ralph-progress-trunc.md");
-        let long_response: String = (0..100)
-            .map(|i| format!("line {i}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        write_progress(&path, 1, None, &long_response).unwrap();
+    fn log_usage_to_file_delegates_to_monitor() {
+        std::env::remove_var("CONTEXT_LIMIT");
+        std::env::remove_var("CONTEXT_THRESHOLD");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("progress.md");
+
+        log_usage_to_file(&path, 150_000, 2_000, 3).unwrap();
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("## Context Usage"));
+        assert!(content.contains("input=150000"));
+        assert!(content.contains("iter=3"));
+    }
+
+    // ── write then read round-trip ──────────────────────────────────
+
+    #[test]
+    fn write_read_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("progress.md");
+
+        write_progress(&path, 5, Some("199"), "implementing monitor.rs").unwrap();
+
         let content = read_progress(&path).unwrap();
-        // Should contain the last 50 lines, not all 100
-        assert!(content.contains("line 99"));
-        assert!(content.contains("line 50"));
-        assert!(!content.contains("line 0\n"));
-        std::fs::remove_file(&path).ok();
+        assert!(content.contains("Iteration: 5"));
+        assert!(content.contains("Issue: 199"));
+        assert!(content.contains("implementing monitor.rs"));
     }
 }
