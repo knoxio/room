@@ -1,3 +1,5 @@
+pub(crate) mod state;
+
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
@@ -21,43 +23,11 @@ use crate::{
     history,
     message::{make_join, make_leave, make_system, parse_client_line, Message},
 };
-
-/// Maps client ID → (username, broadcast sender).
-/// Username is set after the handshake completes.
-type ClientMap = Arc<Mutex<HashMap<u64, (String, broadcast::Sender<String>)>>>;
-
-/// Maps username → status string. Status is ephemeral; cleared on disconnect.
-type StatusMap = Arc<Mutex<HashMap<String, String>>>;
-
-/// The username of the first client to complete the handshake.
-/// The host receives all DMs regardless of sender/recipient.
-type HostUser = Arc<Mutex<Option<String>>>;
-
-/// Maps token UUID → username. Populated by one-shot JOIN requests.
-/// Cleared when the broker process exits; token files on disk survive restarts.
-type TokenMap = Arc<Mutex<HashMap<String, String>>>;
+use state::{ClientMap, HostUser, RoomState, TokenMap};
 
 /// Admin command names — routed through `handle_admin_cmd` when received as
 /// a `Message::Command` with one of these cmd values.
 const ADMIN_CMD_NAMES: &[&str] = &["kick", "reauth", "clear-tokens", "exit", "clear"];
-
-/// Shared broker state passed to every client handler.
-struct RoomState {
-    clients: ClientMap,
-    status_map: StatusMap,
-    host_user: HostUser,
-    token_map: TokenMap,
-    chat_path: Arc<PathBuf>,
-    room_id: Arc<String>,
-    /// Set to `true` by the `/exit` admin command to shut down the broker.
-    /// Using watch so receivers that check after the fact see `true` immediately
-    /// — unlike `Notify`, this avoids the race where `notify_waiters()` fires
-    /// before a task's `.notified()` future is registered.
-    shutdown: Arc<watch::Sender<bool>>,
-    /// Monotonically-increasing sequence counter. Incremented for every message
-    /// broadcast or persisted by the broker, starting at 1.
-    seq_counter: Arc<AtomicU64>,
-}
 
 pub struct Broker {
     room_id: String,
