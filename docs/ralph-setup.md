@@ -91,3 +91,36 @@ Delete stale progress files after the corresponding PR merges.
 Agents send and receive coordination messages via `room send` / `room poll`. These are
 ephemeral (tied to the broker session lifetime) and serve as the real-time coordination
 layer between agents and humans.
+
+## Status convention
+
+Agents must keep their `/set_status` current at all times. The host uses the member
+status panel (TUI) or `room who` to see what every agent is doing. Stale or missing
+statuses make coordination harder.
+
+### Required status updates
+
+| Phase | Status text |
+|---|---|
+| Starting work | `reading issue` or `reading <file>` |
+| Drafting code | `drafting <description>` |
+| Running tests | `running tests` |
+| Fixing CI | `fixing clippy` / `fixing tests` |
+| PR open | `PR #N open, awaiting review` |
+| Blocked | `blocked on <reason>` |
+| Done | `done — PR #N merged` |
+| Idle | *(clear status with `/set_status`)* |
+
+### How to set status
+
+```bash
+# From room send (one-shot)
+room send <room-id> -t <token> /set_status drafting auth handler
+
+# Clear status
+room send <room-id> -t <token> /set_status
+```
+
+Ralph agents should set status automatically at each milestone via `room send`. The
+CLAUDE.md coordination protocol enforces this convention — agents that do not update
+their status will be flagged during review.

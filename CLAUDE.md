@@ -215,10 +215,11 @@ room send myroom -t $TOKEN "opening PR for #42"
 
 ### On starting work
 1. Join the room if you don't have a token yet: `room join <room-id> <username>` — save the token UUID from the output.
-2. Poll for recent history: `room poll <room-id> -t <token>`
-3. Announce yourself and **propose your plan**: who you are, what branch you are on, which
+2. Set your status: `room send <room-id> -t <token> /set_status reading issue`
+3. Poll for recent history: `room poll <room-id> -t <token>`
+4. Announce yourself and **propose your plan**: who you are, what branch you are on, which
    files you intend to modify, and your implementation approach in 2–3 sentences.
-4. Poll again after ~30 seconds. If anyone objects or flags a conflict, resolve it before
+5. Poll again after ~30 seconds. If anyone objects or flags a conflict, resolve it before
    writing any code. Silence means proceed.
 
 ### During work
@@ -243,6 +244,18 @@ room send myroom -t $TOKEN "opening PR for #42"
   ```
   Violations: if ba or joao sends "hold" at any point, **stop immediately**. Do not
   continue implementation. Wait for explicit go-ahead before resuming.
+- **Update your status at every milestone** using `/set_status`. This is mandatory — it
+  lets the host and other agents see what you are doing at a glance. Use short, descriptive
+  text:
+  ```
+  /set_status reading src/broker.rs
+  /set_status drafting Foo handler
+  /set_status running tests
+  /set_status fixing clippy
+  /set_status PR #42 open, awaiting review
+  /set_status blocked on #38
+  ```
+  Update whenever your activity changes. Stale statuses are worse than no status.
 - **Poll and send a milestone update at natural breakpoints:**
   - After reading the target file (before writing any code)
   - After completing a first working draft (before running tests)
@@ -267,10 +280,12 @@ room send myroom -t $TOKEN "opening PR for #42"
 - **Do not merge or push without announcing it** in the room first.
 
 ### On completion
-1. Announce that your work is done and summarise what changed.
-2. State which files were modified.
-3. Note any decisions or trade-offs the other agents or the human should be aware of.
-4. Include `Closes #<issue-number>` in the PR description so the issue auto-closes on merge.
+1. Set your status: `/set_status done — PR #N merged`
+2. Announce that your work is done and summarise what changed.
+3. State which files were modified.
+4. Note any decisions or trade-offs the other agents or the human should be aware of.
+5. Include `Closes #<issue-number>` in the PR description so the issue auto-closes on merge.
+6. Clear your status when idle: `/set_status` (no arguments)
 
 ### Tests-in-same-PR rule
 
