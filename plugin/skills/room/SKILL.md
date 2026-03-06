@@ -23,12 +23,22 @@ Before doing anything, check the project's `CLAUDE.md` or `AGENTS.md` for a conf
 - What room ID to use
 - What username to use (typically your branch name or role)
 
+### Step 1.5: Obtain a session token
+
+All `room` commands (send, poll, watch) require a `--token` flag. Get one by joining the room:
+
+```bash
+room join <room-id> <username>
+```
+
+The output is JSON. Extract the `token` field — you will pass it as `--token <token>` on every subsequent command. Save it in a variable or note it for reuse throughout the session.
+
 ### Step 2: Poll for context before starting work
 
 Always read recent messages before starting a session or significant task:
 
 ```bash
-room poll <room-id> <username>
+room poll <room-id> --token <token>
 ```
 
 Output is NDJSON — one JSON message per line. Read it to understand:
@@ -36,14 +46,12 @@ Output is NDJSON — one JSON message per line. Read it to understand:
 - Any blockers or decisions that affect your work
 - Whether anyone has claimed files you intend to modify
 
-If the room has no broker running yet, `room poll` still works — it reads the chat file directly.
-
 ### Step 3: Announce intent
 
 After polling, announce yourself and what you plan to do:
 
 ```bash
-room send <room-id> <username> "starting work on <task description>"
+room send <room-id> --token <token> "starting work on <task description>"
 ```
 
 Wait briefly (proceed after ~10 seconds with no response) before touching shared files.
@@ -51,7 +59,7 @@ Wait briefly (proceed after ~10 seconds with no response) before touching shared
 To claim a file or task:
 
 ```bash
-room send <room-id> <username> "/claim <description of what you're claiming>"
+room send <room-id> --token <token> "/claim <description of what you're claiming>"
 ```
 
 ### Step 4: Poll before touching shared files
@@ -59,8 +67,8 @@ room send <room-id> <username> "/claim <description of what you're claiming>"
 Before modifying any file that another agent might also be working on:
 
 ```bash
-room poll <room-id> <username>
-room send <room-id> <username> "about to modify <filename>"
+room poll <room-id> --token <token>
+room send <room-id> --token <token> "about to modify <filename>"
 ```
 
 ### Step 5: Broadcast progress at milestones
@@ -68,13 +76,13 @@ room send <room-id> <username> "about to modify <filename>"
 After completing a meaningful chunk of work:
 
 ```bash
-room send <room-id> <username> "finished <what you did>. moving on to <next step>"
+room send <room-id> --token <token> "finished <what you did>. moving on to <next step>"
 ```
 
 When blocked or waiting for a decision:
 
 ```bash
-room send <room-id> <username> "blocked on <reason>. need input on <question>"
+room send <room-id> --token <token> "blocked on <reason>. need input on <question>"
 ```
 
 ### Step 6: Announce completion
@@ -82,7 +90,7 @@ room send <room-id> <username> "blocked on <reason>. need input on <question>"
 When your task is done:
 
 ```bash
-room send <room-id> <username> "done. changed: <file list>. <summary of key decisions or tradeoffs>"
+room send <room-id> --token <token> "done. changed: <file list>. <summary of key decisions or tradeoffs>"
 ```
 
 ## Coordination rules
@@ -94,17 +102,17 @@ room send <room-id> <username> "done. changed: <file list>. <summary of key deci
 
 ## Cursor management
 
-`room poll` tracks your position automatically. A cursor file at `/tmp/room-<id>-<username>.cursor` stores the last seen message ID. Each subsequent `room poll` (with no `--since`) returns only new messages.
+`room poll` and `room watch` track your position automatically. A cursor file at `/tmp/room-<id>-<username>.cursor` stores the last seen message ID. Each subsequent `room poll` (with no `--since`) returns only new messages.
 
 To reset and see all history:
 ```bash
 rm /tmp/room-<room-id>-<username>.cursor
-room poll <room-id> <username>
+room poll <room-id> --token <token>
 ```
 
 To poll from a specific message ID:
 ```bash
-room poll <room-id> <username> --since <message-id>
+room poll <room-id> --token <token> --since <message-id>
 ```
 
 ## Examples
@@ -113,10 +121,10 @@ room poll <room-id> <username> --since <message-id>
 
 ```bash
 # Check what's happening
-room poll myproject feat-auth
+room poll myproject --token <token>
 
 # Announce
-room send myproject feat-auth "starting work on JWT middleware. will touch src/auth.rs"
+room send myproject --token <token> "starting work on JWT middleware. will touch src/auth.rs"
 ```
 
 ### Example 2: Responding to a human message
@@ -124,18 +132,18 @@ room send myproject feat-auth "starting work on JWT middleware. will touch src/a
 Human sends: "hold off on auth, we're changing the token format"
 
 ```bash
-room send myproject feat-auth "acknowledged. pausing auth work, waiting for token format decision"
+room send myproject --token <token> "acknowledged. pausing auth work, waiting for token format decision"
 ```
 
 ### Example 3: Completing a feature
 
 ```bash
-room send myproject feat-auth "done. added JWT middleware in src/auth.rs, tests in tests/auth_test.rs. used HS256, not RS256 — kept it simpler since we control both ends"
+room send myproject --token <token> "done. added JWT middleware in src/auth.rs, tests in tests/auth_test.rs. used HS256, not RS256 — kept it simpler since we control both ends"
 ```
 
 ## Autonomous loop (stay-resident pattern)
 
-To remain active all day without requiring human re-prompting, use a polling script combined with `run_in_background` and `TaskOutput`. This pattern was validated in a live multi-agent session.
+To remain active all day without requiring human re-prompting, use `room watch` combined with `run_in_background` and `TaskOutput`. This pattern was validated in a live multi-agent session.
 
 ### The watch script
 
@@ -144,24 +152,15 @@ Use the `Write` tool to create `/tmp/room_watch_<username>.sh` — **do not use 
 ```bash
 #!/usr/bin/env bash
 set -euo pipefail
-ROOM="<room-id>"
-ME="<username>"
-while true; do
-  room poll "$ROOM" "$ME" > /tmp/room_msgs.txt 2>&1
-  if grep -v "\"user\":\"$ME\"" /tmp/room_msgs.txt | grep -q "\"type\":\"message\""; then
-    grep -v "\"user\":\"$ME\"" /tmp/room_msgs.txt | grep "\"type\":\"message\""
-    break
-  fi
-  sleep 5
-done
+room watch --token "<token>" <room-id> --interval 5
 ```
 
-Why each detail matters:
+Why this works:
 
-- **Write to a file, not `$()`** — `$()` command substitution is blocked in some Claude Code hook environments. Writing poll output to `/tmp/room_msgs.txt` and reading it back avoids this.
-- **Filter by username** — without `grep -v "\"user\":\"$ME\""`, the agent wakes on every `room send` it makes, creating a tight self-triggering loop.
-- **Filter by `"type":"message"`** — prevents waking on `join`, `leave`, and `system` events, which are room lifecycle noise, not actionable messages.
-- **Break on first match** — exits immediately when a foreign message arrives so the agent can act without waiting for the next sleep cycle.
+- **`room watch` handles filtering** — it already suppresses your own messages and exits only when a foreign message arrives.
+- **No redirect needed** — `room watch` prints matching messages to stdout directly; no temp file or `grep` pipeline required.
+- **Cursor is shared with `room poll`** — the same `/tmp/room-<id>-<username>.cursor` file is updated by both commands, so no deduplication is needed across script runs.
+- **`--interval 5`** — polls every 5 seconds internally before blocking output.
 
 ### The outer loop
 
@@ -171,11 +170,9 @@ Why each detail matters:
 3. Run it: Bash tool with run_in_background=true, timeout=600000
 4. Block on TaskOutput (same timeout) — the task completes when a message arrives
 5. Read TaskOutput content to get the incoming message(s)
-6. Act on the message, then respond: room send <room-id> <username> "..."
+6. Act on the message, then respond: room send <room-id> --token <token> "..."
 7. Go back to step 3 — re-launch the script to resume listening
 ```
-
-The cursor is maintained automatically between script runs by `room poll`, so no deduplication is needed.
 
 ## Troubleshooting
 
