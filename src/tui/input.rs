@@ -129,6 +129,7 @@ pub(super) fn handle_key(
                 if cur_row > 0 {
                     state.cursor_pos =
                         byte_offset_at_display_pos(&state.input, cur_row - 1, cur_col, input_width);
+                    sync_mention_after_cursor_move(state, online_users);
                 } else {
                     state.scroll_offset = state.scroll_offset.saturating_add(1);
                 }
@@ -146,6 +147,7 @@ pub(super) fn handle_key(
                 if cur_row < last_row {
                     state.cursor_pos =
                         byte_offset_at_display_pos(&state.input, cur_row + 1, cur_col, input_width);
+                    sync_mention_after_cursor_move(state, online_users);
                 } else {
                     state.scroll_offset = state.scroll_offset.saturating_sub(1);
                 }
@@ -157,9 +159,11 @@ pub(super) fn handle_key(
         // Emacs-style word navigation (sent by macOS Terminal / iTerm2 for Option+arrow).
         KeyCode::Char('b') if key.modifiers.contains(KeyModifiers::ALT) => {
             state.cursor_pos = prev_word_start(&state.input, state.cursor_pos);
+            sync_mention_after_cursor_move(state, online_users);
         }
         KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::ALT) => {
             state.cursor_pos = next_word_end(&state.input, state.cursor_pos);
+            sync_mention_after_cursor_move(state, online_users);
         }
         KeyCode::Backspace if key.modifiers.contains(KeyModifiers::ALT) => {
             let word_start = prev_word_start(&state.input, state.cursor_pos);
@@ -260,9 +264,11 @@ pub(super) fn handle_key(
         }
         KeyCode::Left if key.modifiers.contains(KeyModifiers::ALT) => {
             state.cursor_pos = prev_word_start(&state.input, state.cursor_pos);
+            sync_mention_after_cursor_move(state, online_users);
         }
         KeyCode::Right if key.modifiers.contains(KeyModifiers::ALT) => {
             state.cursor_pos = next_word_end(&state.input, state.cursor_pos);
+            sync_mention_after_cursor_move(state, online_users);
         }
         KeyCode::Left => {
             if state.cursor_pos > 0 {
@@ -272,18 +278,22 @@ pub(super) fn handle_key(
                     .map(|(i, _)| i)
                     .unwrap_or(0);
             }
+            sync_mention_after_cursor_move(state, online_users);
         }
         KeyCode::Right => {
             if state.cursor_pos < state.input.len() {
                 let ch = state.input[state.cursor_pos..].chars().next().unwrap();
                 state.cursor_pos += ch.len_utf8();
             }
+            sync_mention_after_cursor_move(state, online_users);
         }
         KeyCode::Home => {
             state.cursor_pos = 0;
+            sync_mention_after_cursor_move(state, online_users);
         }
         KeyCode::End => {
             state.cursor_pos = state.input.len();
+            sync_mention_after_cursor_move(state, online_users);
         }
         KeyCode::PageUp => {
             state.scroll_offset = state.scroll_offset.saturating_add(visible_count);
@@ -427,6 +437,26 @@ pub(super) fn find_at_context(input: &str, cursor_pos: usize) -> Option<(usize, 
         return None;
     }
     Some((at_pos, query))
+}
+
+/// Re-evaluate the mention picker after the cursor moved.
+///
+/// If the picker is active, checks the `@` context at the new cursor position.
+/// Updates the filter if the context is still valid, or deactivates the picker
+/// if the cursor has moved away from the `@` trigger.
+fn sync_mention_after_cursor_move(state: &mut InputState, online_users: &[String]) {
+    if !state.mention.active {
+        return;
+    }
+    if let Some((at_byte, query)) = find_at_context(&state.input, state.cursor_pos) {
+        state.mention.at_byte = at_byte;
+        state.mention.update_filter(online_users, query);
+        if state.mention.filtered.is_empty() {
+            state.mention.deactivate();
+        }
+    } else {
+        state.mention.deactivate();
+    }
 }
 
 /// If the char immediately before `cursor_pos` in `buf` is `\`, removes it
@@ -1457,5 +1487,107 @@ mod tests {
         // drains bytes 6..8 ("γ"), leaving "α β "
         assert_eq!(state.input, "α β ");
         assert_eq!(state.cursor_pos, 6);
+    }
+
+    // ── mention picker cursor sync (#151) ────────────────────────────────────
+
+    #[test]
+    fn mention_picker_deactivates_on_left_arrow_past_at() {
+        let mut state = InputState::new();
+        let users = vec!["alice".to_owned()];
+        // Type "@" to activate mention picker.
+        handle_key(make_key(KeyCode::Char('@')), &mut state, &users, 10, 80);
+        assert!(state.mention.active);
+        // Move cursor left — now before the '@', picker should deactivate.
+        handle_key(make_key(KeyCode::Left), &mut state, &users, 10, 80);
+        assert!(!state.mention.active);
+    }
+
+    #[test]
+    fn mention_picker_deactivates_on_home() {
+        let mut state = InputState::new();
+        let users = vec!["alice".to_owned()];
+        // Type "hi @" to activate mention picker.
+        for c in "hi @".chars() {
+            handle_key(make_key(KeyCode::Char(c)), &mut state, &users, 10, 80);
+        }
+        assert!(state.mention.active);
+        // Home moves cursor to 0 — well before the '@'.
+        handle_key(make_key(KeyCode::Home), &mut state, &users, 10, 80);
+        assert!(!state.mention.active);
+    }
+
+    #[test]
+    fn mention_picker_updates_filter_on_right_arrow() {
+        let mut state = InputState::new();
+        let users = vec!["alice".to_owned(), "bob".to_owned()];
+        // Type "@ali" — picker active, filtered to alice.
+        for c in "@ali".chars() {
+            handle_key(make_key(KeyCode::Char(c)), &mut state, &users, 10, 80);
+        }
+        assert!(state.mention.active);
+        assert_eq!(state.mention.filtered.len(), 1);
+        // Move cursor left twice (to "@a|li" — cursor between 'a' and 'l').
+        handle_key(make_key(KeyCode::Left), &mut state, &users, 10, 80);
+        handle_key(make_key(KeyCode::Left), &mut state, &users, 10, 80);
+        // Now filter query is "a" — both alice matches, bob doesn't.
+        assert!(state.mention.active);
+        assert_eq!(state.mention.filtered.len(), 1);
+        assert_eq!(state.mention.filtered[0], "alice");
+    }
+
+    #[test]
+    fn mention_picker_deactivates_on_end_with_space_after_at() {
+        let mut state = InputState::new();
+        let users = vec!["alice".to_owned()];
+        // Type "@alice test" — picker deactivates when space is typed after @alice.
+        for c in "@alice ".chars() {
+            handle_key(make_key(KeyCode::Char(c)), &mut state, &users, 10, 80);
+        }
+        assert!(!state.mention.active);
+        // Re-type "@b" to activate again.
+        for c in "@b".chars() {
+            handle_key(make_key(KeyCode::Char(c)), &mut state, &users, 10, 80);
+        }
+        // No user matches "b" so picker should be inactive.
+        assert!(!state.mention.active);
+    }
+
+    #[test]
+    fn mention_picker_stays_active_on_right_within_query() {
+        let mut state = InputState::new();
+        let users = vec!["alice".to_owned()];
+        // Type "@al" — picker active.
+        for c in "@al".chars() {
+            handle_key(make_key(KeyCode::Char(c)), &mut state, &users, 10, 80);
+        }
+        assert!(state.mention.active);
+        // Move left to "@a|l" then right back to "@al|".
+        handle_key(make_key(KeyCode::Left), &mut state, &users, 10, 80);
+        assert!(state.mention.active);
+        handle_key(make_key(KeyCode::Right), &mut state, &users, 10, 80);
+        assert!(state.mention.active);
+    }
+
+    #[test]
+    fn mention_picker_deactivates_on_alt_left_past_at() {
+        let mut state = InputState::new();
+        let users = vec!["alice".to_owned()];
+        // Type "hi @al" — picker active.
+        for c in "hi @al".chars() {
+            handle_key(make_key(KeyCode::Char(c)), &mut state, &users, 10, 80);
+        }
+        assert!(state.mention.active);
+        // Alt+Left jumps to word start — past the '@'.
+        handle_key(
+            make_key_mod(KeyCode::Left, KeyModifiers::ALT),
+            &mut state,
+            &users,
+            10,
+            80,
+        );
+        // Cursor is now at the '@' position (byte 3). find_at_context with cursor
+        // at '@' returns None (no query between '@' and cursor).
+        assert!(!state.mention.active);
     }
 }
