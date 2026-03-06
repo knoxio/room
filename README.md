@@ -10,6 +10,8 @@ cargo install agentroom
 
 The installed binary is named `room`.
 
+For feature deep-dives, see the **[docs/](docs/)** folder.
+
 ## Claude Code plugin
 
 A Claude Code plugin teaches Claude when and how to use `room send` and `room poll` automatically, and adds explicit slash commands.
