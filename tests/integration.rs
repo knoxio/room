@@ -1582,60 +1582,86 @@ async fn pull_messages_empty_history_returns_empty() {
     assert!(msgs.is_empty());
 }
 
-/// `pull_messages` does not update the poll cursor.
+/// `cmd_pull` does not advance the poll cursor.
 ///
-/// Establishes a cursor via `poll_messages`, sends a second message, then calls
-/// `pull_messages`. A subsequent `poll_messages` must still return the second
-/// message -- proving that `pull_messages` did not advance the cursor.
+/// Registers a user, polls to establish the canonical cursor at
+/// `/tmp/room-<id>-<username>.cursor`, then calls `cmd_pull` and asserts
+/// the cursor file is unchanged. A subsequent poll must still return the
+/// message that was sent after the initial poll.
 #[tokio::test]
 async fn pull_messages_does_not_update_cursor() {
-    let broker = TestBroker::start("t_pull_no_cursor").await;
-    let mut alice = TestClient::connect(&broker.socket_path, "alice").await;
-    alice
-        .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "alice"))
-        .await;
+    let room_id = "t_pull_cursor_e2e";
+    let broker = TestBroker::start(room_id).await;
 
-    alice.send_text("first").await;
-    alice
-        .recv_until(|m| matches!(m, Message::Message { content, .. } if content == "first"))
-        .await;
+    // Write the meta file so cmd_poll / cmd_pull can locate the chat file.
+    let meta_path = PathBuf::from(format!("/tmp/room-{room_id}.meta"));
+    let meta = serde_json::json!({ "chat_path": broker.chat_path.to_string_lossy() });
+    std::fs::write(&meta_path, format!("{meta}\n")).unwrap();
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
-
-    // Cursor path local to this test -- not a real /tmp path.
-    let cursor_path = broker.chat_path.with_extension("test.cursor");
-
-    // Advance the cursor past "first" so the next poll starts after it.
-    let initial = room::oneshot::poll_messages(&broker.chat_path, &cursor_path, None, None)
+    // Join to obtain a token and write the token file.
+    let (_user, token) = room::oneshot::join_session(&broker.socket_path, "alice")
         .await
         .unwrap();
-    assert!(
-        !initial.is_empty(),
-        "first poll should return at least one message"
+    let token_path = room::oneshot::token_file_path(room_id, "alice");
+    let token_data = serde_json::json!({ "username": "alice", "token": token });
+    std::fs::write(&token_path, format!("{token_data}\n")).unwrap();
+
+    // Send first message via one-shot.
+    room::oneshot::send_message_with_token(
+        &broker.socket_path,
+        &token,
+        r#"{"type":"message","content":"first"}"#,
+    )
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // cmd_poll advances the canonical cursor.
+    room::oneshot::cmd_poll(room_id, &token, None)
+        .await
+        .unwrap();
+
+    let cursor_path = PathBuf::from(format!("/tmp/room-{room_id}-alice.cursor"));
+    let cursor_after_poll = std::fs::read_to_string(&cursor_path).unwrap();
+
+    // Send a second message after the cursor.
+    room::oneshot::send_message_with_token(
+        &broker.socket_path,
+        &token,
+        r#"{"type":"message","content":"second"}"#,
+    )
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // cmd_pull must not move the cursor.
+    room::oneshot::cmd_pull(room_id, &token, 5).await.unwrap();
+
+    let cursor_after_pull = std::fs::read_to_string(&cursor_path).unwrap();
+    assert_eq!(
+        cursor_after_poll, cursor_after_pull,
+        "cmd_pull must not advance the poll cursor at /tmp/room-{room_id}-alice.cursor"
     );
 
-    // Send a second message after the cursor position.
-    alice.send_text("second").await;
-    alice
-        .recv_until(|m| matches!(m, Message::Message { content, .. } if content == "second"))
-        .await;
-    tokio::time::sleep(Duration::from_millis(50)).await;
-
-    // Pull -- must not advance the cursor.
-    room::oneshot::pull_messages(&broker.chat_path, 5, None)
-        .await
-        .unwrap();
-
-    // Poll must still return "second" -- if pull had moved the cursor this would be empty.
-    let after_pull = room::oneshot::poll_messages(&broker.chat_path, &cursor_path, None, None)
-        .await
-        .unwrap();
+    // Verify poll still returns "second" (cursor was not consumed by pull).
+    let msgs = room::oneshot::poll_messages(
+        &broker.chat_path,
+        &cursor_path,
+        Some("alice"),
+        Some(&cursor_after_poll),
+    )
+    .await
+    .unwrap();
     assert!(
-        after_pull
-            .iter()
+        msgs.iter()
             .any(|m| matches!(m, Message::Message { content, .. } if content == "second")),
-        "poll after pull must still return 'second' -- cursor must not be advanced by pull_messages"
+        "second message must still be available after pull"
     );
+
+    // Clean up /tmp files written by this test.
+    let _ = std::fs::remove_file(&meta_path);
+    let _ = std::fs::remove_file(&token_path);
+    let _ = std::fs::remove_file(&cursor_path);
 }
 
 /// `pull_messages` with a viewer filters out DMs the viewer is not party to.
