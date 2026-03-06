@@ -56,6 +56,10 @@ pub(super) fn handle_key(
                 state.mention.deactivate();
             } else if state.palette.active {
                 state.palette.deactivate();
+            } else if !state.input.is_empty() {
+                state.input.clear();
+                state.cursor_pos = 0;
+                state.input_row_scroll = 0;
             }
         }
         KeyCode::Tab if state.mention.active => {
@@ -156,6 +160,38 @@ pub(super) fn handle_key(
         }
         KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::ALT) => {
             state.cursor_pos = next_word_end(&state.input, state.cursor_pos);
+        }
+        KeyCode::Backspace if key.modifiers.contains(KeyModifiers::ALT) => {
+            let word_start = prev_word_start(&state.input, state.cursor_pos);
+            if word_start < state.cursor_pos {
+                state.input.drain(word_start..state.cursor_pos);
+                state.cursor_pos = word_start;
+                // Sync mention/palette after deletion.
+                if state.mention.active {
+                    if let Some((at_byte, query)) = find_at_context(&state.input, state.cursor_pos)
+                    {
+                        state.mention.at_byte = at_byte;
+                        state.mention.update_filter(online_users, query);
+                        if state.mention.filtered.is_empty() {
+                            state.mention.deactivate();
+                        }
+                    } else {
+                        state.mention.deactivate();
+                    }
+                }
+                if state.palette.active {
+                    if state.input.is_empty() {
+                        state.palette.deactivate();
+                    } else if let Some(query) = state.input.strip_prefix('/') {
+                        state.palette.update_filter(query);
+                        if state.palette.filtered.is_empty() {
+                            state.palette.deactivate();
+                        }
+                    } else {
+                        state.palette.deactivate();
+                    }
+                }
+            }
         }
         KeyCode::Char(c) => {
             state.input.insert(state.cursor_pos, c);
@@ -1252,5 +1288,174 @@ mod tests {
             80,
         );
         assert_eq!(state.cursor_pos, 5);
+    }
+
+    // ── Esc clears input (#157) ──────────────────────────────────────────────
+
+    #[test]
+    fn esc_clears_input_when_no_popup_active() {
+        let mut state = InputState::new();
+        state.input = "some text here".to_owned();
+        state.cursor_pos = 14;
+        handle_key(make_key(KeyCode::Esc), &mut state, &[], 10, 80);
+        assert!(state.input.is_empty());
+        assert_eq!(state.cursor_pos, 0);
+        assert_eq!(state.input_row_scroll, 0);
+    }
+
+    #[test]
+    fn esc_on_empty_input_is_noop() {
+        let mut state = InputState::new();
+        handle_key(make_key(KeyCode::Esc), &mut state, &[], 10, 80);
+        assert!(state.input.is_empty());
+        assert_eq!(state.cursor_pos, 0);
+    }
+
+    #[test]
+    fn esc_dismisses_palette_before_clearing_input() {
+        let mut state = InputState::new();
+        state.input = "/he".to_owned();
+        state.cursor_pos = 3;
+        state.palette.activate();
+        handle_key(make_key(KeyCode::Esc), &mut state, &[], 10, 80);
+        // First Esc dismisses palette, input stays
+        assert!(!state.palette.active);
+        assert_eq!(state.input, "/he");
+        // Second Esc clears input
+        handle_key(make_key(KeyCode::Esc), &mut state, &[], 10, 80);
+        assert!(state.input.is_empty());
+    }
+
+    #[test]
+    fn esc_dismisses_mention_before_clearing_input() {
+        let mut state = InputState::new();
+        state.input = "@al".to_owned();
+        state.cursor_pos = 3;
+        let users = vec!["alice".to_owned()];
+        state.mention.activate(0, &users, "al");
+        handle_key(make_key(KeyCode::Esc), &mut state, &users, 10, 80);
+        // First Esc dismisses mention picker
+        assert!(!state.mention.active);
+        assert_eq!(state.input, "@al");
+        // Second Esc clears input
+        handle_key(make_key(KeyCode::Esc), &mut state, &users, 10, 80);
+        assert!(state.input.is_empty());
+    }
+
+    // ── Alt+Backspace deletes word (#159) ────────────────────────────────────
+
+    #[test]
+    fn alt_backspace_deletes_last_word() {
+        let mut state = InputState::new();
+        state.input = "hello world".to_owned();
+        state.cursor_pos = 11;
+        handle_key(
+            make_key_mod(KeyCode::Backspace, KeyModifiers::ALT),
+            &mut state,
+            &[],
+            10,
+            80,
+        );
+        assert_eq!(state.input, "hello ");
+        assert_eq!(state.cursor_pos, 6);
+    }
+
+    #[test]
+    fn alt_backspace_deletes_first_word() {
+        let mut state = InputState::new();
+        state.input = "hello world".to_owned();
+        state.cursor_pos = 5;
+        handle_key(
+            make_key_mod(KeyCode::Backspace, KeyModifiers::ALT),
+            &mut state,
+            &[],
+            10,
+            80,
+        );
+        assert_eq!(state.input, " world");
+        assert_eq!(state.cursor_pos, 0);
+    }
+
+    #[test]
+    fn alt_backspace_skips_trailing_spaces() {
+        let mut state = InputState::new();
+        state.input = "foo   bar".to_owned();
+        state.cursor_pos = 6; // at 'b' — prev_word_start skips spaces then "foo"
+        handle_key(
+            make_key_mod(KeyCode::Backspace, KeyModifiers::ALT),
+            &mut state,
+            &[],
+            10,
+            80,
+        );
+        assert_eq!(state.input, "bar");
+        assert_eq!(state.cursor_pos, 0);
+    }
+
+    #[test]
+    fn alt_backspace_at_start_is_noop() {
+        let mut state = InputState::new();
+        state.input = "hello".to_owned();
+        state.cursor_pos = 0;
+        handle_key(
+            make_key_mod(KeyCode::Backspace, KeyModifiers::ALT),
+            &mut state,
+            &[],
+            10,
+            80,
+        );
+        assert_eq!(state.input, "hello");
+        assert_eq!(state.cursor_pos, 0);
+    }
+
+    #[test]
+    fn alt_backspace_single_word_clears_all() {
+        let mut state = InputState::new();
+        state.input = "hello".to_owned();
+        state.cursor_pos = 5;
+        handle_key(
+            make_key_mod(KeyCode::Backspace, KeyModifiers::ALT),
+            &mut state,
+            &[],
+            10,
+            80,
+        );
+        assert!(state.input.is_empty());
+        assert_eq!(state.cursor_pos, 0);
+    }
+
+    #[test]
+    fn alt_backspace_mid_word_deletes_to_word_start() {
+        let mut state = InputState::new();
+        state.input = "hello world".to_owned();
+        state.cursor_pos = 8; // at 'r' in "world" — prev_word_start = 6 ('w')
+        handle_key(
+            make_key_mod(KeyCode::Backspace, KeyModifiers::ALT),
+            &mut state,
+            &[],
+            10,
+            80,
+        );
+        // drains bytes 6..8 ("wo"), leaving "hello rld"
+        assert_eq!(state.input, "hello rld");
+        assert_eq!(state.cursor_pos, 6);
+    }
+
+    #[test]
+    fn alt_backspace_unicode() {
+        let mut state = InputState::new();
+        // α=2bytes, ' '=1, β=2bytes, ' '=1, γ=2bytes → len=8
+        state.input = "α β γ".to_owned();
+        state.cursor_pos = state.input.len(); // 8
+        handle_key(
+            make_key_mod(KeyCode::Backspace, KeyModifiers::ALT),
+            &mut state,
+            &[],
+            10,
+            80,
+        );
+        // drains bytes 6..8 ("γ"), leaving "α β "
+        assert_eq!(state.input, "α β ");
+        assert_eq!(state.cursor_pos, 6);
     }
 }
