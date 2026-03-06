@@ -378,8 +378,10 @@ pub async fn run(
                     }
                 }
                 Event::Paste(text) => {
-                    state.input.insert_str(state.cursor_pos, &text);
-                    state.cursor_pos += text.len();
+                    // Normalize line endings: \r\n → \n, stray \r → \n.
+                    let clean = text.replace("\r\n", "\n").replace('\r', "\n");
+                    state.input.insert_str(state.cursor_pos, &clean);
+                    state.cursor_pos += clean.len();
                     state.mention.active = false;
                 }
                 Event::Resize(_, _) => {}

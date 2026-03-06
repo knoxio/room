@@ -239,11 +239,14 @@ async fn run_join(
         };
         client.run().await?;
 
-        // The local client has disconnected, but the broker should keep serving
-        // other clients until a signal arrives.  Without this, the tokio runtime
-        // shuts down immediately and cancels any in-flight spawn_blocking tasks
-        // (e.g. file writes).
-        tokio::signal::ctrl_c().await.ok();
+        if agent {
+            // In agent mode the broker should keep serving other clients until
+            // a signal arrives.  Without this, the tokio runtime shuts down
+            // immediately and cancels any in-flight spawn_blocking tasks.
+            tokio::signal::ctrl_c().await.ok();
+        }
+        // In TUI mode the user already pressed Ctrl-C to quit — exit
+        // immediately so the shell prompt returns without a second keypress.
     } else {
         eprintln!("[room] connecting to existing room '{room_id}'");
         let client = Client {
