@@ -1,3 +1,4 @@
+pub(crate) mod auth;
 pub(crate) mod state;
 
 use std::{
@@ -17,13 +18,12 @@ use tokio::{
     },
     sync::{broadcast, watch, Mutex},
 };
-use uuid::Uuid;
-
 use crate::{
     history,
     message::{make_join, make_leave, make_system, parse_client_line, Message},
 };
-use state::{ClientMap, HostUser, RoomState, TokenMap};
+use auth::{handle_oneshot_join, validate_token};
+use state::{ClientMap, HostUser, RoomState};
 
 /// Admin command names — routed through `handle_admin_cmd` when received as
 /// a `Message::Command` with one of these cmd values.
@@ -132,8 +132,7 @@ async fn handle_client(
     }
 
     if let Some(token) = first_line.strip_prefix("TOKEN:") {
-        let username = token_map.lock().await.get(token).cloned();
-        return match username {
+        return match validate_token(token, &token_map).await {
             Some(u) => handle_oneshot_send(u, reader, write_half, state).await,
             None => {
                 let err = serde_json::json!({"type":"error","code":"invalid_token"});
@@ -480,30 +479,6 @@ async fn handle_oneshot_send(
     let seq_msg = result?;
     let echo = format!("{}\n", serde_json::to_string(&seq_msg)?);
     write_half.write_all(echo.as_bytes()).await?;
-    Ok(())
-}
-
-/// Handle a one-shot JOIN request: register a username, issue a UUID session token.
-///
-/// If the username is already registered the broker returns an error envelope and
-/// closes the connection without issuing a token. The token is held in-memory for
-/// the lifetime of the broker process; token files on disk are managed by the CLI.
-async fn handle_oneshot_join(
-    username: String,
-    mut write_half: OwnedWriteHalf,
-    token_map: &TokenMap,
-) -> anyhow::Result<()> {
-    let mut map = token_map.lock().await;
-    if map.values().any(|u| u == &username) {
-        let err = serde_json::json!({"type":"error","code":"username_taken","username": username});
-        write_half.write_all(format!("{err}\n").as_bytes()).await?;
-        return Ok(());
-    }
-    let token = Uuid::new_v4().to_string();
-    map.insert(token.clone(), username.clone());
-    drop(map);
-    let resp = serde_json::json!({"type":"token","token": token,"username": username});
-    write_half.write_all(format!("{resp}\n").as_bytes()).await?;
     Ok(())
 }
 
