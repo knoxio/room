@@ -7,6 +7,16 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Environment variable configuration: `RALPH_ROOM`, `RALPH_USERNAME`, `RALPH_MODEL`,
+  `RALPH_ISSUE` as alternatives to CLI positional args and flags. (#222)
+- `RALPH_ALLOWED_TOOLS` environment variable for setting the tool allow list without
+  the CLI flag. Supports `none` to disable restrictions. (#222)
+- Safe default tool set (`Read`, `Glob`, `Grep`, `WebSearch`, `Bash(room *)`,
+  `Bash(git status)`, `Bash(git log)`, `Bash(git diff)`) applied when neither
+  `--allow-tools` nor `RALPH_ALLOWED_TOOLS` is set. (#221)
+
 ## [0.2.0] - 2026-03-06
 
 ### Added

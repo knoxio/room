@@ -82,6 +82,33 @@ room-ralph myroom agent1 --model sonnet --add-dir ../shared-lib --add-dir ../doc
 | `--dry-run` | off | Print the prompt that would be sent, then exit |
 | `-v` / `-V` / `--version` | — | Print version |
 
+## Environment variables
+
+All positional arguments and key options can be set via environment variables.
+CLI flags take precedence over environment variables.
+
+| Variable | Equivalent flag | Description |
+|---|---|---|
+| `RALPH_ROOM` | `<room-id>` | Room to join |
+| `RALPH_USERNAME` | `<username>` | Username to register with |
+| `RALPH_MODEL` | `--model` | Claude model to use (default: `opus`) |
+| `RALPH_ISSUE` | `--issue` | GitHub issue number |
+| `RALPH_ALLOWED_TOOLS` | `--allow-tools` | Comma-separated tool allow list (see below) |
+| `CONTEXT_LIMIT` | — | Total context window size (default: `200000`) |
+| `CONTEXT_THRESHOLD` | — | Percentage at which to restart (default: `80`) |
+
+### Tool precedence
+
+Allowed tools are resolved in this order:
+
+1. `--allow-tools` CLI flag (highest)
+2. `RALPH_ALLOWED_TOOLS` environment variable
+3. Safe defaults: `Read`, `Glob`, `Grep`, `WebSearch`, `Bash(room *)`,
+   `Bash(git status)`, `Bash(git log)`, `Bash(git diff)`
+
+Set `RALPH_ALLOWED_TOOLS=none` (or `--allow-tools none`) to disable tool
+restrictions entirely and let claude use all available tools.
+
 ## Context exhaustion
 
 room-ralph monitors token usage after each claude invocation. When input tokens
@@ -91,10 +118,8 @@ exceed 80% of the context limit (default 200k), it:
 2. Announces the restart in the room
 3. Spawns a fresh claude instance with the progress file included in the prompt
 
-The threshold and limit can be tuned via environment variables:
-
-- `CONTEXT_LIMIT` — total context window size (default: `200000`)
-- `CONTEXT_THRESHOLD` — percentage at which to restart (default: `80`)
+The threshold and limit can be tuned via `CONTEXT_LIMIT` and `CONTEXT_THRESHOLD`
+environment variables (see [Environment variables](#environment-variables) above).
 
 ## Progress files
 
