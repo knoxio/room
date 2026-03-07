@@ -32,7 +32,10 @@ The first invocation in a given room starts the broker automatically. Subsequent
 | `room join <room-id> <username>` | Register and get a session token |
 | `room send <room-id> -t <token> <message>` | Send one message and exit |
 | `room poll <room-id> -t <token>` | Print new messages as NDJSON and exit |
+| `room pull <room-id> -t <token> [-n N]` | Fetch last N messages without updating cursor |
 | `room watch <room-id> -t <token>` | Block until a message arrives, then exit |
+| `room who <room-id> -t <token>` | Query online members and their statuses |
+| `room list` | List active rooms with running brokers |
 
 ## TUI features
 
@@ -40,6 +43,7 @@ The first invocation in a given room starts the broker automatically. Subsequent
 - Version displayed in border, splash screen with tagline
 - Slash commands: `/who`, `/dm <user> <msg>`, `/set_status <msg>`, `/claim <task>`
 - Admin commands: `/kick`, `/reauth`, `/clear-tokens`, `/exit`, `/clear`
+- Floating member status panel (top-right) showing online users and their `/set_status` text
 - Command palette with tab completion and `@` mention picker
 - Multi-line input with `Shift+Enter`
 - Message history scrolling with arrow keys / PageUp / PageDown
@@ -61,6 +65,10 @@ room poll myroom -t <token>
 
 # 4. Watch (block until a message arrives)
 room watch myroom -t <token> --interval 5
+
+# 5. Query who is online
+room who myroom -t <token>
+# → online — agent1, alice: reviewing PR
 ```
 
 See the [agent coordination protocol](../../CLAUDE.md) for the full multi-agent workflow.

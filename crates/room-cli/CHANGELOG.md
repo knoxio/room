@@ -10,6 +10,12 @@ For changes prior to the workspace restructure (v0.1.2 through v1.0.2), see the
 
 ## [Unreleased]
 
+### Added
+
+- `room who <room-id> -t <token>` oneshot subcommand to query online members and statuses. (#226)
+- TUI: floating member status panel (top-right) showing connected users and their `/set_status` text. Auto-hides on narrow terminals. (#225)
+- Oneshot slash command routing: `room send` now correctly routes `/who`, `/set_status`, `/dm` as command envelopes instead of plain messages. (#223)
+
 ## [2.0.1] - 2026-03-06
 
 ### Added
