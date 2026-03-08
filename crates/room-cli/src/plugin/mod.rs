@@ -311,6 +311,8 @@ const RESERVED_COMMANDS: &[&str] = &[
     "clear-tokens",
     "dm",
     "claim",
+    "unclaim",
+    "claimed",
     "reply",
     "room-info",
     "exit",
@@ -430,6 +432,18 @@ pub fn builtin_command_infos() -> Vec<CommandInfo> {
                 required: true,
                 description: "Task description".to_owned(),
             }],
+        },
+        CommandInfo {
+            name: "unclaim".to_owned(),
+            description: "Release your current task claim".to_owned(),
+            usage: "/unclaim".to_owned(),
+            params: vec![],
+        },
+        CommandInfo {
+            name: "claimed".to_owned(),
+            description: "Show the task claim board".to_owned(),
+            usage: "/claimed".to_owned(),
+            params: vec![],
         },
         CommandInfo {
             name: "reply".to_owned(),
@@ -758,6 +772,8 @@ mod tests {
         for expected in &[
             "dm",
             "claim",
+            "unclaim",
+            "claimed",
             "reply",
             "set_status",
             "who",

@@ -85,6 +85,7 @@ impl Broker {
             status_map: Arc::new(Mutex::new(HashMap::new())),
             host_user: Arc::new(Mutex::new(None)),
             token_map: Arc::new(Mutex::new(persisted_tokens)),
+            claim_map: Arc::new(Mutex::new(HashMap::new())),
             chat_path: Arc::new(self.chat_path.clone()),
             room_id: Arc::new(self.room_id.clone()),
             shutdown: Arc::new(shutdown_tx),

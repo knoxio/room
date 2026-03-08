@@ -329,16 +329,17 @@ async fn json_command_envelope_is_broadcast() {
     bob.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "bob"))
         .await;
 
+    // Use a non-built-in command so it passes through to broadcast unchanged.
     alice
-        .send_json(r#"{"type":"command","cmd":"claim","params":["task-42"]}"#)
+        .send_json(r#"{"type":"command","cmd":"custom-cmd","params":["arg-1"]}"#)
         .await;
 
     let msg = bob
-        .recv_until(|m| matches!(m, Message::Command { cmd, .. } if cmd == "claim"))
+        .recv_until(|m| matches!(m, Message::Command { cmd, .. } if cmd == "custom-cmd"))
         .await;
     assert_eq!(msg.user(), "alice");
     if let Message::Command { params, .. } = &msg {
-        assert_eq!(params, &["task-42"]);
+        assert_eq!(params, &["arg-1"]);
     }
 }
 

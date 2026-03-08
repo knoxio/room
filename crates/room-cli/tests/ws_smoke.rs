@@ -52,6 +52,8 @@ async fn spawn_broker(room_id: &str) -> (tokio::process::Child, u16) {
     let chat_file = format!("/tmp/ws_smoke_{room_id}.chat");
     // Clean up any stale files from previous runs.
     let _ = std::fs::remove_file(&chat_file);
+    let token_file = format!("/tmp/ws_smoke_{room_id}.tokens");
+    let _ = std::fs::remove_file(&token_file);
     let socket_path = format!("/tmp/room-{room_id}.sock");
     let _ = std::fs::remove_file(&socket_path);
 

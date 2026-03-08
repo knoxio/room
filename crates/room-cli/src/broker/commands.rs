@@ -106,6 +106,53 @@ pub(crate) async fn route_command(
             return Ok(CommandResult::Reply(json));
         }
 
+        // Task claim commands.
+        if cmd == "claim" {
+            let task = params.join(" ");
+            state
+                .claim_map
+                .lock()
+                .await
+                .insert(username.to_owned(), task.clone());
+            let display = format!("{username} claimed: {task}");
+            let sys = make_system(&state.room_id, "broker", display);
+            broadcast_and_persist(&sys, &state.clients, &state.chat_path, &state.seq_counter)
+                .await?;
+            let json = serde_json::to_string(&sys)?;
+            return Ok(CommandResult::HandledWithReply(json));
+        }
+
+        if cmd == "unclaim" {
+            let removed = state.claim_map.lock().await.remove(username);
+            let display = match removed {
+                Some(task) => format!("{username} released claim: {task}"),
+                None => format!("{username} has no active claim"),
+            };
+            let sys = make_system(&state.room_id, "broker", display);
+            broadcast_and_persist(&sys, &state.clients, &state.chat_path, &state.seq_counter)
+                .await?;
+            let json = serde_json::to_string(&sys)?;
+            return Ok(CommandResult::HandledWithReply(json));
+        }
+
+        if cmd == "claimed" {
+            let map = state.claim_map.lock().await;
+            let content = if map.is_empty() {
+                "no active claims".to_owned()
+            } else {
+                let mut entries: Vec<String> = map
+                    .iter()
+                    .map(|(user, task)| format!("{user}: {task}"))
+                    .collect();
+                entries.sort();
+                format!("claimed — {}", entries.join(", "))
+            };
+            drop(map);
+            let sys = make_system(&state.room_id, "broker", content);
+            let json = serde_json::to_string(&sys)?;
+            return Ok(CommandResult::Reply(json));
+        }
+
         // Room management commands.
         if cmd == "room-info" {
             let result = handle_room_info(state).await;
@@ -459,6 +506,7 @@ mod tests {
             status_map: Arc::new(Mutex::new(HashMap::new())),
             host_user: Arc::new(Mutex::new(None)),
             token_map: Arc::new(Mutex::new(HashMap::new())),
+            claim_map: Arc::new(Mutex::new(HashMap::new())),
             chat_path: Arc::new(chat_path),
             room_id: Arc::new("test-room".to_owned()),
             shutdown: Arc::new(shutdown_tx),
@@ -766,13 +814,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn route_command_claim_with_task_passes_through() {
+    async fn route_command_claim_with_task_is_handled() {
         let tmp = NamedTempFile::new().unwrap();
         let state = make_state(tmp.path().to_path_buf());
         let msg = make_command("test-room", "alice", "claim", vec!["fix bug".to_owned()]);
         let result = route_command(msg, "alice", &state).await.unwrap();
-        // claim with valid params is a pass-through (no special handler)
-        assert!(matches!(result, CommandResult::Passthrough(_)));
+        let CommandResult::HandledWithReply(json) = result else {
+            panic!("expected HandledWithReply for /claim");
+        };
+        assert!(json.contains("alice claimed: fix bug"));
     }
 
     #[tokio::test]
@@ -1029,6 +1079,7 @@ mod tests {
             status_map: Arc::new(Mutex::new(HashMap::new())),
             host_user: Arc::new(Mutex::new(None)),
             token_map: Arc::new(Mutex::new(HashMap::new())),
+            claim_map: Arc::new(Mutex::new(HashMap::new())),
             chat_path: Arc::new(chat_path),
             room_id: Arc::new("test-room".to_owned()),
             shutdown: Arc::new(shutdown_tx),
@@ -1064,5 +1115,134 @@ mod tests {
         let msg = make_command("test-room", "alice", "room-info", vec![]);
         let result = route_command(msg, "alice", &state).await.unwrap();
         assert!(matches!(result, CommandResult::Reply(_)));
+    }
+
+    // ── task claim commands ──────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn route_command_claim_stores_task_and_broadcasts() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+        let msg = make_command(
+            "test-room",
+            "alice",
+            "claim",
+            vec!["fix bug #42".to_owned()],
+        );
+        let result = route_command(msg, "alice", &state).await.unwrap();
+        let CommandResult::HandledWithReply(json) = result else {
+            panic!("expected HandledWithReply");
+        };
+        assert!(json.contains("claimed"));
+        assert!(json.contains("fix bug #42"));
+        assert_eq!(
+            state
+                .claim_map
+                .lock()
+                .await
+                .get("alice")
+                .map(String::as_str),
+            Some("fix bug #42")
+        );
+    }
+
+    #[tokio::test]
+    async fn route_command_claim_overwrites_previous() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+        let msg1 = make_command("test-room", "alice", "claim", vec!["task A".to_owned()]);
+        route_command(msg1, "alice", &state).await.unwrap();
+        let msg2 = make_command("test-room", "alice", "claim", vec!["task B".to_owned()]);
+        route_command(msg2, "alice", &state).await.unwrap();
+        assert_eq!(
+            state
+                .claim_map
+                .lock()
+                .await
+                .get("alice")
+                .map(String::as_str),
+            Some("task B"),
+            "new claim should overwrite the old one"
+        );
+    }
+
+    #[tokio::test]
+    async fn route_command_unclaim_removes_claim() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+        state
+            .claim_map
+            .lock()
+            .await
+            .insert("alice".to_owned(), "task A".to_owned());
+        let msg = make_command("test-room", "alice", "unclaim", vec![]);
+        let result = route_command(msg, "alice", &state).await.unwrap();
+        let CommandResult::HandledWithReply(json) = result else {
+            panic!("expected HandledWithReply");
+        };
+        assert!(json.contains("released"));
+        assert!(json.contains("task A"));
+        assert!(state.claim_map.lock().await.get("alice").is_none());
+    }
+
+    #[tokio::test]
+    async fn route_command_unclaim_no_active_claim() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+        let msg = make_command("test-room", "alice", "unclaim", vec![]);
+        let result = route_command(msg, "alice", &state).await.unwrap();
+        let CommandResult::HandledWithReply(json) = result else {
+            panic!("expected HandledWithReply");
+        };
+        assert!(json.contains("no active claim"));
+    }
+
+    #[tokio::test]
+    async fn route_command_claimed_empty_board() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+        let msg = make_command("test-room", "alice", "claimed", vec![]);
+        let result = route_command(msg, "alice", &state).await.unwrap();
+        let CommandResult::Reply(json) = result else {
+            panic!("expected Reply");
+        };
+        assert!(json.contains("no active claims"));
+    }
+
+    #[tokio::test]
+    async fn route_command_claimed_shows_all_claims() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+        {
+            let mut map = state.claim_map.lock().await;
+            map.insert("alice".to_owned(), "task A".to_owned());
+            map.insert("bob".to_owned(), "task B".to_owned());
+        }
+        let msg = make_command("test-room", "alice", "claimed", vec![]);
+        let result = route_command(msg, "alice", &state).await.unwrap();
+        let CommandResult::Reply(json) = result else {
+            panic!("expected Reply");
+        };
+        assert!(json.contains("alice: task A"));
+        assert!(json.contains("bob: task B"));
+    }
+
+    #[tokio::test]
+    async fn route_command_claimed_is_sorted() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+        {
+            let mut map = state.claim_map.lock().await;
+            map.insert("zara".to_owned(), "z-task".to_owned());
+            map.insert("alice".to_owned(), "a-task".to_owned());
+        }
+        let msg = make_command("test-room", "alice", "claimed", vec![]);
+        let CommandResult::Reply(json) = route_command(msg, "alice", &state).await.unwrap() else {
+            panic!("expected Reply");
+        };
+        // alice should appear before zara in sorted output
+        let alice_pos = json.find("alice: a-task").unwrap();
+        let zara_pos = json.find("zara: z-task").unwrap();
+        assert!(alice_pos < zara_pos, "claims should be sorted by username");
     }
 }

@@ -24,12 +24,17 @@ pub(crate) type HostUser = Arc<Mutex<Option<String>>>;
 /// Cleared when the broker process exits; token files on disk survive restarts.
 pub(crate) type TokenMap = Arc<Mutex<HashMap<String, String>>>;
 
+/// Maps username → claimed task description. Ephemeral; cleared on broker exit.
+/// Users can hold at most one claim at a time (new claim replaces old).
+pub(crate) type ClaimMap = Arc<Mutex<HashMap<String, String>>>;
+
 /// Shared broker state passed to every client handler.
 pub(crate) struct RoomState {
     pub(crate) clients: ClientMap,
     pub(crate) status_map: StatusMap,
     pub(crate) host_user: HostUser,
     pub(crate) token_map: TokenMap,
+    pub(crate) claim_map: ClaimMap,
     pub(crate) chat_path: Arc<PathBuf>,
     pub(crate) room_id: Arc<String>,
     /// Set to `true` by the `/exit` admin command to shut down the broker.
