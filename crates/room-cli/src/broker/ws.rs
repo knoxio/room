@@ -23,7 +23,7 @@ use crate::{
 };
 
 use super::{
-    auth::{issue_token, validate_token},
+    auth::{check_join_permission, issue_token, validate_token},
     commands::{route_command, CommandResult},
     fanout::{broadcast_and_persist, dm_and_persist},
     state::RoomState,
@@ -123,6 +123,18 @@ async fn run_ws_session(
     // Interactive join — first_frame is the username.
     let username = first_frame;
     if username.is_empty() {
+        return Ok(());
+    }
+
+    // Check join permission before entering interactive session.
+    if let Err(reason) = check_join_permission(&username, state.config.as_ref()) {
+        let err = serde_json::json!({
+            "type": "error",
+            "code": "join_denied",
+            "message": reason,
+            "username": username
+        });
+        let _ = ws_tx.send(WsMessage::Text(err.to_string().into())).await;
         return Ok(());
     }
 

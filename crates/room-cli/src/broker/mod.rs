@@ -185,6 +185,20 @@ async fn handle_client(
         return Ok(());
     }
 
+    // Check join permission before entering interactive session.
+    if let Err(reason) = auth::check_join_permission(&username, state.config.as_ref()) {
+        let err = serde_json::json!({
+            "type": "error",
+            "code": "join_denied",
+            "message": reason,
+            "username": username
+        });
+        write_half
+            .write_all(format!("{err}\n").as_bytes())
+            .await?;
+        return Ok(());
+    }
+
     run_interactive_session(cid, &username, reader, write_half, own_tx, state).await
 }
 

@@ -96,21 +96,7 @@ pub(crate) async fn route_command(
             return Ok(CommandResult::Reply(json));
         }
 
-        // Room management commands: invite, uninvite, room-info.
-        if cmd == "invite" {
-            let result = handle_invite(username, params, state).await;
-            let sys = make_system(&state.room_id, "broker", result);
-            let json = serde_json::to_string(&sys)?;
-            return Ok(CommandResult::Reply(json));
-        }
-
-        if cmd == "uninvite" {
-            let result = handle_uninvite(username, params, state).await;
-            let sys = make_system(&state.room_id, "broker", result);
-            let json = serde_json::to_string(&sys)?;
-            return Ok(CommandResult::Reply(json));
-        }
-
+        // Room management commands.
         if cmd == "room-info" {
             let result = handle_room_info(state).await;
             let sys = make_system(&state.room_id, "broker", result);
@@ -414,60 +400,6 @@ pub(crate) async fn handle_admin_cmd(
 }
 
 // ── Room management commands ──────────────────────────────────────────────────
-
-/// Handle `/invite <username>` — add a user to the room's invite list.
-/// Only the room creator or host can manage invites.
-async fn handle_invite(issuer: &str, params: &[String], state: &RoomState) -> String {
-    let target = match params.first() {
-        Some(u) if !u.is_empty() => u.as_str(),
-        _ => return "usage: /invite <username>".to_owned(),
-    };
-
-    let config = match &state.config {
-        Some(c) => c,
-        None => return "this room has no access controls configured".to_owned(),
-    };
-
-    // Auth: only creator or host.
-    let host = state.host_user.lock().await.clone();
-    if issuer != config.created_by && host.as_deref() != Some(issuer) {
-        return "permission denied: only the room creator or host can invite".to_owned();
-    }
-
-    if config.invite_list.contains(target) {
-        return format!("{target} is already invited");
-    }
-
-    // We need interior mutability for config. Since RoomState stores config as Option<RoomConfig>
-    // (not behind a Mutex), we cannot mutate it in place. For now, return a message noting
-    // the limitation — proper mutation requires RoomConfig behind a lock.
-    // TODO: wrap config in Mutex for runtime mutation support.
-    format!("{target} invited to {}", state.room_id)
-}
-
-/// Handle `/uninvite <username>` — remove a user from the room's invite list.
-async fn handle_uninvite(issuer: &str, params: &[String], state: &RoomState) -> String {
-    let target = match params.first() {
-        Some(u) if !u.is_empty() => u.as_str(),
-        _ => return "usage: /uninvite <username>".to_owned(),
-    };
-
-    let config = match &state.config {
-        Some(c) => c,
-        None => return "this room has no access controls configured".to_owned(),
-    };
-
-    let host = state.host_user.lock().await.clone();
-    if issuer != config.created_by && host.as_deref() != Some(issuer) {
-        return "permission denied: only the room creator or host can uninvite".to_owned();
-    }
-
-    if !config.invite_list.contains(target) {
-        return format!("{target} is not on the invite list");
-    }
-
-    format!("{target} removed from invite list for {}", state.room_id)
-}
 
 /// Handle `/room-info` — display room visibility, config, and member count.
 async fn handle_room_info(state: &RoomState) -> String {
@@ -1022,38 +954,4 @@ mod tests {
         assert!(matches!(result, CommandResult::Reply(_)));
     }
 
-    #[tokio::test]
-    async fn route_command_invite_no_config_returns_reply() {
-        let tmp = NamedTempFile::new().unwrap();
-        let state = make_state(tmp.path().to_path_buf());
-        let msg = make_command("test-room", "alice", "invite", vec!["bob".to_owned()]);
-        let result = route_command(msg, "alice", &state).await.unwrap();
-        match result {
-            CommandResult::Reply(json) => {
-                assert!(json.contains("no access controls"));
-            }
-            _ => panic!("expected Reply"),
-        }
-    }
-
-    #[tokio::test]
-    async fn route_command_invite_non_host_denied() {
-        let tmp = NamedTempFile::new().unwrap();
-        let config = room_protocol::RoomConfig {
-            visibility: room_protocol::RoomVisibility::Private,
-            max_members: None,
-            invite_list: Default::default(),
-            created_by: "owner".to_owned(),
-            created_at: "2026-01-01T00:00:00Z".to_owned(),
-        };
-        let state = make_state_with_config(tmp.path().to_path_buf(), config);
-        let msg = make_command("test-room", "stranger", "invite", vec!["bob".to_owned()]);
-        let result = route_command(msg, "stranger", &state).await.unwrap();
-        match result {
-            CommandResult::Reply(json) => {
-                assert!(json.contains("permission denied"));
-            }
-            _ => panic!("expected Reply"),
-        }
-    }
 }

@@ -363,6 +363,20 @@ async fn dispatch_connection(
         return Ok(());
     }
 
+    // Check join permission before entering interactive session.
+    if let Err(reason) = super::auth::check_join_permission(username, state.config.as_ref()) {
+        let err = serde_json::json!({
+            "type": "error",
+            "code": "join_denied",
+            "message": reason,
+            "username": username
+        });
+        write_half
+            .write_all(format!("{err}\n").as_bytes())
+            .await?;
+        return Ok(());
+    }
+
     // Register client in room, then hand off to the full interactive handler.
     let (tx, _) = broadcast::channel::<String>(256);
     state
