@@ -40,14 +40,20 @@ enum Cmd {
     /// Poll for new messages, printing NDJSON to stdout.
     ///
     /// Updates a per-user cursor file so subsequent calls return only unseen messages.
+    /// Use `--rooms r1,r2` (comma-separated or repeated) to poll multiple rooms at once;
+    /// messages are merged by timestamp and each carries its `room` field.
     Poll {
-        room_id: String,
+        /// Single room ID (omit when using --rooms)
+        room_id: Option<String>,
         /// Session token from `room join` (required)
         #[arg(short = 't', long)]
         token: String,
-        /// Return only messages after this message ID (overrides stored cursor)
+        /// Return only messages after this message ID (overrides stored cursor; single-room only)
         #[arg(long)]
         since: Option<String>,
+        /// Poll multiple rooms (comma-separated or repeated). Merges messages by timestamp.
+        #[arg(long, value_delimiter = ',')]
+        rooms: Vec<String>,
     },
     /// Fetch the last N messages from history without updating the poll cursor.
     ///
@@ -174,8 +180,20 @@ async fn main() -> anyhow::Result<()> {
             room_id,
             token,
             since,
+            rooms,
         }) => {
-            oneshot::cmd_poll(&room_id, &token, since).await?;
+            if !rooms.is_empty() {
+                if since.is_some() {
+                    anyhow::bail!("--since is not supported with --rooms (use per-room cursors)");
+                }
+                oneshot::cmd_poll_multi(&rooms, &token).await?;
+            } else {
+                let room_id = room_id.unwrap_or_else(|| {
+                    eprintln!("error: room_id is required when --rooms is not given");
+                    std::process::exit(1);
+                });
+                oneshot::cmd_poll(&room_id, &token, since).await?;
+            }
         }
         Some(Cmd::Pull {
             room_id,
