@@ -371,9 +371,7 @@ async fn dispatch_connection(
             "message": reason,
             "username": username
         });
-        write_half
-            .write_all(format!("{err}\n").as_bytes())
-            .await?;
+        write_half.write_all(format!("{err}\n").as_bytes()).await?;
         return Ok(());
     }
 

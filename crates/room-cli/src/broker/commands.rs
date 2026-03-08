@@ -953,5 +953,4 @@ mod tests {
         let result = route_command(msg, "alice", &state).await.unwrap();
         assert!(matches!(result, CommandResult::Reply(_)));
     }
-
 }
