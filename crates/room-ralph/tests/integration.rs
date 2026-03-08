@@ -31,6 +31,7 @@ fn test_cli(f: impl FnOnce(&mut Cli)) -> Cli {
         add_dirs: vec![],
         allow_tools: vec![],
         disallow_tools: vec![],
+        profile: None,
         dry_run: false,
     };
     f(&mut cli);

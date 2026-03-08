@@ -68,6 +68,10 @@ fn launch_tmux(cli: &Cli) -> Result<(), String> {
         args.push("--add-dir".into());
         args.push(d.display().to_string());
     }
+    if let Some(profile) = &cli.profile {
+        args.push("--profile".into());
+        args.push(profile.to_string());
+    }
 
     let cmd_str = format!("{} {}", exe.display(), args.join(" "));
     std::process::Command::new("tmux")

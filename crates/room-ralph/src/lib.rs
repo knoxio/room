@@ -1,8 +1,14 @@
 use std::path::PathBuf;
+use std::str::FromStr;
 
 use clap::Parser;
 
 pub mod claude;
+
+/// Clap value parser for the Profile enum.
+fn parse_profile(s: &str) -> Result<claude::Profile, String> {
+    claude::Profile::from_str(s)
+}
 pub mod loop_runner;
 pub mod monitor;
 pub mod progress;
@@ -74,6 +80,12 @@ pub struct Cli {
     )]
     pub disallow_tools: Vec<String>,
 
+    /// Tool profile — predefined allow/disallow lists for common agent roles.
+    /// Valid profiles: coder, reviewer, coordinator, notion, reader.
+    /// Explicit --allow-tools/--disallow-tools merge on top of the profile.
+    #[arg(long, env = "RALPH_PROFILE", value_parser = parse_profile)]
+    pub profile: Option<claude::Profile>,
+
     /// Print the prompt that would be sent, then exit
     #[arg(long)]
     pub dry_run: bool,
@@ -96,6 +108,7 @@ mod tests {
             "RALPH_MODEL",
             "RALPH_ISSUE",
             "RALPH_DISALLOWED_TOOLS",
+            "RALPH_PROFILE",
         ] {
             unsafe { std::env::remove_var(key) };
         }
@@ -214,6 +227,61 @@ mod tests {
             "issue should be None when RALPH_ISSUE unset"
         );
 
+        clear_ralph_env();
+    }
+
+    #[test]
+    fn profile_flag_parses_valid() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        clear_ralph_env();
+
+        let cli =
+            Cli::try_parse_from(["room-ralph", "myroom", "myuser", "--profile", "coder"]).unwrap();
+
+        assert_eq!(cli.profile, Some(claude::Profile::Coder));
+        clear_ralph_env();
+    }
+
+    #[test]
+    fn profile_flag_rejects_invalid() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        clear_ralph_env();
+
+        let result = Cli::try_parse_from(["room-ralph", "myroom", "myuser", "--profile", "hacker"]);
+        assert!(result.is_err());
+        clear_ralph_env();
+    }
+
+    #[test]
+    fn profile_defaults_to_none() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        clear_ralph_env();
+
+        let cli = Cli::try_parse_from(["room-ralph", "myroom", "myuser"]).unwrap();
+        assert!(cli.profile.is_none());
+        clear_ralph_env();
+    }
+
+    #[test]
+    fn profile_from_env_var() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        clear_ralph_env();
+
+        unsafe { std::env::set_var("RALPH_PROFILE", "reviewer") };
+        let cli = Cli::try_parse_from(["room-ralph", "myroom", "myuser"]).unwrap();
+        assert_eq!(cli.profile, Some(claude::Profile::Reviewer));
+        clear_ralph_env();
+    }
+
+    #[test]
+    fn profile_flag_overrides_env() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        clear_ralph_env();
+
+        unsafe { std::env::set_var("RALPH_PROFILE", "reader") };
+        let cli =
+            Cli::try_parse_from(["room-ralph", "myroom", "myuser", "--profile", "notion"]).unwrap();
+        assert_eq!(cli.profile, Some(claude::Profile::Notion));
         clear_ralph_env();
     }
 }

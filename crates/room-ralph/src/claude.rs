@@ -1,5 +1,145 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::str::FromStr;
+
+/// Predefined tool profiles for different agent roles.
+///
+/// Each profile defines a set of auto-approved (allowed) and hard-blocked
+/// (disallowed) tools appropriate for that role. Explicit `--allow-tools`
+/// and `--disallow-tools` flags merge on top of the profile's base lists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Profile {
+    /// Full dev access — read, write, edit, search, build, test, git, room.
+    Coder,
+    /// PR review — read-only code access, room + gh pr commands. No writes.
+    Reviewer,
+    /// BA/coordination role — read + room + gh commands. No code writes.
+    Coordinator,
+    /// Notion management — read project, manage Notion, room + gh. No code writes.
+    Notion,
+    /// Read-only analysis — search and read only. No shell, no writes.
+    Reader,
+}
+
+impl Profile {
+    /// Tools auto-approved for this profile.
+    pub fn allowed_tools(&self) -> Vec<&'static str> {
+        match self {
+            Profile::Coder => vec![
+                "Read",
+                "Edit",
+                "Write",
+                "Glob",
+                "Grep",
+                "WebSearch",
+                "Bash(room *)",
+                "Bash(git *)",
+                "Bash(cargo *)",
+                "Bash(gh *)",
+                "Bash(bash scripts/pre-push.sh)",
+            ],
+            Profile::Reviewer => vec!["Read", "Glob", "Grep", "Bash(room *)", "Bash(gh pr *)"],
+            Profile::Coordinator => vec!["Read", "Glob", "Grep", "Bash(room *)", "Bash(gh *)"],
+            Profile::Notion => vec![
+                "Read",
+                "Glob",
+                "Grep",
+                "Bash(room *)",
+                "Bash(gh *)",
+                "mcp__notion__*",
+            ],
+            Profile::Reader => vec!["Read", "Glob", "Grep"],
+        }
+    }
+
+    /// Tools hard-blocked for this profile.
+    pub fn disallowed_tools(&self) -> Vec<&'static str> {
+        match self {
+            Profile::Coder => vec![],
+            Profile::Reviewer => vec!["Write", "Edit"],
+            Profile::Coordinator => vec!["Write", "Edit"],
+            Profile::Notion => vec!["Write", "Edit", "Bash(git push *)", "Bash(git commit *)"],
+            Profile::Reader => vec!["Bash", "Write", "Edit"],
+        }
+    }
+
+    /// All known profile names, for error messages.
+    pub const NAMES: &[&str] = &["coder", "reviewer", "coordinator", "notion", "reader"];
+}
+
+impl FromStr for Profile {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "coder" => Ok(Profile::Coder),
+            "reviewer" => Ok(Profile::Reviewer),
+            "coordinator" => Ok(Profile::Coordinator),
+            "notion" => Ok(Profile::Notion),
+            "reader" => Ok(Profile::Reader),
+            other => Err(format!(
+                "unknown profile '{}'. valid profiles: {}",
+                other,
+                Profile::NAMES.join(", ")
+            )),
+        }
+    }
+}
+
+impl std::fmt::Display for Profile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name = match self {
+            Profile::Coder => "coder",
+            Profile::Reviewer => "reviewer",
+            Profile::Coordinator => "coordinator",
+            Profile::Notion => "notion",
+            Profile::Reader => "reader",
+        };
+        f.write_str(name)
+    }
+}
+
+/// Merge a profile's base tool lists with explicit CLI overrides.
+///
+/// - `--allow-tools` values are appended to (not replacing) the profile's
+///   allowed list. Duplicates are removed.
+/// - `--disallow-tools` values are appended to the profile's disallowed list.
+///   Duplicates are removed.
+/// - If no profile is set, returns the CLI values as-is (falls through to
+///   existing `resolve_allowed_tools` / `resolve_disallowed_tools` logic).
+pub fn merge_profile_with_overrides(
+    profile: Option<Profile>,
+    cli_allow: &[String],
+    cli_disallow: &[String],
+) -> (Vec<String>, Vec<String>) {
+    let Some(profile) = profile else {
+        return (cli_allow.to_vec(), cli_disallow.to_vec());
+    };
+
+    let mut allowed: Vec<String> = profile
+        .allowed_tools()
+        .into_iter()
+        .map(String::from)
+        .collect();
+    for tool in cli_allow {
+        if !allowed.iter().any(|t| t == tool) {
+            allowed.push(tool.clone());
+        }
+    }
+
+    let mut disallowed: Vec<String> = profile
+        .disallowed_tools()
+        .into_iter()
+        .map(String::from)
+        .collect();
+    for tool in cli_disallow {
+        if !disallowed.iter().any(|t| t == tool) {
+            disallowed.push(tool.clone());
+        }
+    }
+
+    (allowed, disallowed)
+}
 
 /// Safe default tools that ralph passes to claude when no explicit
 /// --allow-tools flag or RALPH_ALLOWED_TOOLS env var is set.
@@ -616,5 +756,165 @@ mod tests {
         let result = resolve_disallowed_tools(&[]);
         assert!(result.is_empty()); // defaults are empty
         std::env::remove_var("RALPH_DISALLOWED_TOOLS");
+    }
+
+    // --- Profile tests ---
+
+    #[test]
+    fn profile_parse_all_variants() {
+        assert_eq!("coder".parse::<Profile>().unwrap(), Profile::Coder);
+        assert_eq!("reviewer".parse::<Profile>().unwrap(), Profile::Reviewer);
+        assert_eq!(
+            "coordinator".parse::<Profile>().unwrap(),
+            Profile::Coordinator
+        );
+        assert_eq!("notion".parse::<Profile>().unwrap(), Profile::Notion);
+        assert_eq!("reader".parse::<Profile>().unwrap(), Profile::Reader);
+    }
+
+    #[test]
+    fn profile_parse_case_insensitive() {
+        assert_eq!("CODER".parse::<Profile>().unwrap(), Profile::Coder);
+        assert_eq!("Reviewer".parse::<Profile>().unwrap(), Profile::Reviewer);
+        assert_eq!("NOTION".parse::<Profile>().unwrap(), Profile::Notion);
+    }
+
+    #[test]
+    fn profile_parse_invalid() {
+        let err = "unknown".parse::<Profile>().unwrap_err();
+        assert!(err.contains("unknown profile"));
+        assert!(err.contains("coder"));
+    }
+
+    #[test]
+    fn profile_display_roundtrip() {
+        for name in Profile::NAMES {
+            let profile: Profile = name.parse().unwrap();
+            assert_eq!(profile.to_string(), *name);
+        }
+    }
+
+    #[test]
+    fn profile_coder_has_full_access() {
+        let allowed = Profile::Coder.allowed_tools();
+        assert!(allowed.contains(&"Read"));
+        assert!(allowed.contains(&"Write"));
+        assert!(allowed.contains(&"Edit"));
+        assert!(allowed.contains(&"Bash(cargo *)"));
+        assert!(Profile::Coder.disallowed_tools().is_empty());
+    }
+
+    #[test]
+    fn profile_reviewer_blocks_writes() {
+        let allowed = Profile::Reviewer.allowed_tools();
+        assert!(allowed.contains(&"Read"));
+        assert!(allowed.contains(&"Bash(gh pr *)"));
+        assert!(!allowed.contains(&"Write"));
+        assert!(!allowed.contains(&"Edit"));
+        let disallowed = Profile::Reviewer.disallowed_tools();
+        assert!(disallowed.contains(&"Write"));
+        assert!(disallowed.contains(&"Edit"));
+    }
+
+    #[test]
+    fn profile_coordinator_blocks_writes() {
+        let allowed = Profile::Coordinator.allowed_tools();
+        assert!(allowed.contains(&"Bash(gh *)"));
+        assert!(!allowed.contains(&"Write"));
+        let disallowed = Profile::Coordinator.disallowed_tools();
+        assert!(disallowed.contains(&"Write"));
+        assert!(disallowed.contains(&"Edit"));
+    }
+
+    #[test]
+    fn profile_notion_has_notion_tools_and_blocks_push() {
+        let allowed = Profile::Notion.allowed_tools();
+        assert!(allowed.contains(&"mcp__notion__*"));
+        assert!(allowed.contains(&"Read"));
+        assert!(!allowed.contains(&"Write"));
+        let disallowed = Profile::Notion.disallowed_tools();
+        assert!(disallowed.contains(&"Write"));
+        assert!(disallowed.contains(&"Bash(git push *)"));
+        assert!(disallowed.contains(&"Bash(git commit *)"));
+    }
+
+    #[test]
+    fn profile_reader_is_minimal() {
+        let allowed = Profile::Reader.allowed_tools();
+        assert_eq!(allowed, vec!["Read", "Glob", "Grep"]);
+        let disallowed = Profile::Reader.disallowed_tools();
+        assert!(disallowed.contains(&"Bash"));
+        assert!(disallowed.contains(&"Write"));
+        assert!(disallowed.contains(&"Edit"));
+    }
+
+    #[test]
+    fn merge_no_profile_passes_through() {
+        let allow = vec!["Read".to_string()];
+        let disallow = vec!["Write".to_string()];
+        let (a, d) = merge_profile_with_overrides(None, &allow, &disallow);
+        assert_eq!(a, vec!["Read"]);
+        assert_eq!(d, vec!["Write"]);
+    }
+
+    #[test]
+    fn merge_profile_only_no_overrides() {
+        let (a, d) = merge_profile_with_overrides(Some(Profile::Reviewer), &[], &[]);
+        assert_eq!(
+            a,
+            Profile::Reviewer
+                .allowed_tools()
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            d,
+            Profile::Reviewer
+                .disallowed_tools()
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn merge_profile_with_extra_allow() {
+        let extra = vec!["Bash(cargo test)".to_string()];
+        let (a, _) = merge_profile_with_overrides(Some(Profile::Reviewer), &extra, &[]);
+        assert!(a.contains(&"Bash(cargo test)".to_string()));
+        assert!(a.contains(&"Read".to_string())); // from profile
+    }
+
+    #[test]
+    fn merge_profile_deduplicates_allow() {
+        let extra = vec!["Read".to_string()]; // already in reviewer profile
+        let (a, _) = merge_profile_with_overrides(Some(Profile::Reviewer), &extra, &[]);
+        assert_eq!(a.iter().filter(|t| *t == "Read").count(), 1);
+    }
+
+    #[test]
+    fn merge_profile_with_extra_disallow() {
+        let extra = vec!["Bash(rm *)".to_string()];
+        let (_, d) = merge_profile_with_overrides(Some(Profile::Coder), &[], &extra);
+        assert_eq!(d, vec!["Bash(rm *)"]);
+    }
+
+    #[test]
+    fn merge_profile_deduplicates_disallow() {
+        let extra = vec!["Write".to_string()]; // already in reviewer profile
+        let (_, d) = merge_profile_with_overrides(Some(Profile::Reviewer), &[], &extra);
+        assert_eq!(d.iter().filter(|t| *t == "Write").count(), 1);
+    }
+
+    #[test]
+    fn merge_profile_both_overrides() {
+        let allow = vec!["WebFetch".to_string()];
+        let disallow = vec!["Bash(rm *)".to_string()];
+        let (a, d) = merge_profile_with_overrides(Some(Profile::Notion), &allow, &disallow);
+        assert!(a.contains(&"WebFetch".to_string()));
+        assert!(a.contains(&"mcp__notion__*".to_string()));
+        assert!(d.contains(&"Bash(rm *)".to_string()));
+        assert!(d.contains(&"Write".to_string()));
     }
 }

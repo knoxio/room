@@ -91,8 +91,13 @@ pub async fn run_loop(cli: &Cli, token: String, running: &Arc<AtomicBool>) -> Re
             cli.model,
             iteration
         );
-        let effective_tools = claude::resolve_allowed_tools(&cli.allow_tools);
-        let effective_disallowed = claude::resolve_disallowed_tools(&cli.disallow_tools);
+        let (profile_allow, profile_disallow) = claude::merge_profile_with_overrides(
+            cli.profile,
+            &cli.allow_tools,
+            &cli.disallow_tools,
+        );
+        let effective_tools = claude::resolve_allowed_tools(&profile_allow);
+        let effective_disallowed = claude::resolve_disallowed_tools(&profile_disallow);
         let claude_output = match claude::spawn_claude(
             &cli.model,
             &prompt_file,
