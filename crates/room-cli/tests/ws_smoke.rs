@@ -3,11 +3,23 @@
 /// These tests spawn the real `room` binary as a child process (broker mode)
 /// and connect via WebSocket and REST from outside the process. This validates
 /// the full CLI → broker → transport path that users will exercise.
-use std::{process::Stdio, time::Duration};
+///
+/// Tests are serialized via `SMOKE_LOCK` because spawning 5 broker processes
+/// simultaneously causes disk I/O contention on encrypted volumes, preventing
+/// any of them from starting within a reasonable timeout.
+use std::{
+    process::Stdio,
+    sync::{LazyLock, Mutex},
+    time::Duration,
+};
 
 use futures_util::{SinkExt, StreamExt};
 use tokio::time::timeout;
 use tokio_tungstenite::{connect_async, tungstenite::Message as TungsteniteMsg};
+
+/// Serialize smoke test execution to prevent disk I/O contention when multiple
+/// broker processes start simultaneously on encrypted volumes.
+static SMOKE_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 /// Find a free ephemeral port by binding to port 0 and releasing.
 fn free_port() -> u16 {
@@ -43,7 +55,7 @@ async fn spawn_broker(room_id: &str) -> (tokio::process::Child, u16) {
     let socket_path = format!("/tmp/room-{room_id}.sock");
     let _ = std::fs::remove_file(&socket_path);
 
-    let child = tokio::process::Command::new(&bin)
+    let mut child = tokio::process::Command::new(&bin)
         .args([
             room_id,
             "smoke_host",
@@ -61,23 +73,24 @@ async fn spawn_broker(room_id: &str) -> (tokio::process::Child, u16) {
         .unwrap_or_else(|e| panic!("failed to spawn room binary at {}: {e}", bin.display()));
 
     // Wait for the WS server to be ready.
-    for _ in 0..200 {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
         if tokio::net::TcpStream::connect(("127.0.0.1", port))
             .await
             .is_ok()
         {
             break;
         }
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        // Check if the broker crashed before the port was ready.
+        if let Ok(Some(status)) = child.try_wait() {
+            panic!("broker exited with {status} before WS server was ready on port {port}");
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "WS server did not start on port {port} within 10 seconds"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
-
-    // Verify the server is actually listening.
-    assert!(
-        tokio::net::TcpStream::connect(("127.0.0.1", port))
-            .await
-            .is_ok(),
-        "WS server did not start on port {port} within 4 seconds"
-    );
 
     (child, port)
 }
@@ -86,6 +99,7 @@ async fn spawn_broker(room_id: &str) -> (tokio::process::Child, u16) {
 
 #[tokio::test]
 async fn smoke_rest_health() {
+    let _guard = SMOKE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let (mut child, port) = spawn_broker("smoke_health").await;
 
     let resp = reqwest::get(format!("http://127.0.0.1:{port}/api/health"))
@@ -101,6 +115,7 @@ async fn smoke_rest_health() {
 
 #[tokio::test]
 async fn smoke_rest_join_send_poll() {
+    let _guard = SMOKE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let (mut child, port) = spawn_broker("smoke_rsp").await;
     let base = format!("http://127.0.0.1:{port}");
     let client = reqwest::Client::new();
@@ -169,6 +184,7 @@ async fn smoke_rest_join_send_poll() {
 
 #[tokio::test]
 async fn smoke_ws_interactive_session() {
+    let _guard = SMOKE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let (mut child, port) = spawn_broker("smoke_wsi").await;
 
     let url = format!("ws://127.0.0.1:{port}/ws/smoke_wsi");
@@ -200,6 +216,7 @@ async fn smoke_ws_interactive_session() {
 
 #[tokio::test]
 async fn smoke_ws_oneshot_join_and_token_send() {
+    let _guard = SMOKE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let (mut child, port) = spawn_broker("smoke_wsos").await;
 
     // One-shot JOIN via WS.
@@ -235,6 +252,7 @@ async fn smoke_ws_oneshot_join_and_token_send() {
 
 #[tokio::test]
 async fn smoke_ws_and_rest_cross_path() {
+    let _guard = SMOKE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let (mut child, port) = spawn_broker("smoke_cross").await;
     let base = format!("http://127.0.0.1:{port}");
     let http = reqwest::Client::new();
@@ -288,7 +306,7 @@ type WsRx = futures_util::stream::SplitStream<
 
 /// Read WS frames until the predicate matches a parsed JSON value.
 async fn recv_until(rx: &mut WsRx, pred: impl Fn(&serde_json::Value) -> bool) -> serde_json::Value {
-    let deadline = Duration::from_secs(3);
+    let deadline = Duration::from_secs(5);
     let start = tokio::time::Instant::now();
     loop {
         let remaining = deadline.checked_sub(start.elapsed()).unwrap_or_default();
@@ -313,7 +331,7 @@ async fn recv_until(rx: &mut WsRx, pred: impl Fn(&serde_json::Value) -> bool) ->
 
 /// Read WS frames until we get a text frame with the specified `type` field.
 async fn recv_until_type(rx: &mut WsRx, msg_type: &str) -> serde_json::Value {
-    let deadline = Duration::from_secs(3);
+    let deadline = Duration::from_secs(5);
     let start = tokio::time::Instant::now();
     loop {
         let remaining = deadline.checked_sub(start.elapsed()).unwrap_or_default();
@@ -338,7 +356,7 @@ async fn recv_until_type(rx: &mut WsRx, msg_type: &str) -> serde_json::Value {
 
 /// Read the next text frame as JSON.
 async fn recv_json(rx: &mut WsRx) -> serde_json::Value {
-    match timeout(Duration::from_secs(3), rx.next()).await {
+    match timeout(Duration::from_secs(5), rx.next()).await {
         Ok(Some(Ok(TungsteniteMsg::Text(text)))) => {
             serde_json::from_str(&*text).expect("invalid JSON from WS")
         }
