@@ -57,6 +57,13 @@ pub async fn run_loop(cli: &Cli, token: &str, running: &Arc<AtomicBool>) -> Resu
         std::fs::write(&prompt_file, &prompt_text)
             .map_err(|e| format!("failed to write prompt file: {e}"))?;
 
+        // Update status before spawning claude.
+        let status_text = match cli.issue.as_deref() {
+            Some(issue) => format!("running claude — iteration {iteration} for #{issue}"),
+            None => format!("running claude — iteration {iteration}"),
+        };
+        room::set_status(&cli.room_id, token, &status_text).ok();
+
         // Run claude
         tracing::info!(
             "running claude -p (model={}, iteration={})",
@@ -114,6 +121,12 @@ pub async fn run_loop(cli: &Cli, token: &str, running: &Arc<AtomicBool>) -> Resu
             progress::write_progress(&progress_file, iteration, cli.issue.as_deref(), &response)
                 .map_err(|e| format!("failed to write progress: {e}"))?;
 
+            room::set_status(
+                &cli.room_id,
+                token,
+                &format!("restarting — context limit at iteration {iteration}"),
+            )
+            .ok();
             let msg = format!(
                 "context limit at iteration {} (tokens: {}), restarting with fresh context",
                 iteration, input_tokens
@@ -124,6 +137,15 @@ pub async fn run_loop(cli: &Cli, token: &str, running: &Arc<AtomicBool>) -> Resu
                 "claude failed (exit {}), will retry after cooldown",
                 claude_output.exit_code
             );
+            room::set_status(
+                &cli.room_id,
+                token,
+                &format!(
+                    "retrying — claude error (code {}) at iteration {iteration}",
+                    claude_output.exit_code
+                ),
+            )
+            .ok();
             let msg = format!(
                 "claude exited with error (code {}), retrying in {}s",
                 claude_output.exit_code, cli.cooldown
@@ -145,6 +167,7 @@ pub async fn run_loop(cli: &Cli, token: &str, running: &Arc<AtomicBool>) -> Resu
     }
 
     tracing::info!("room-ralph stopped after {} iterations", iteration);
+    room::set_status(&cli.room_id, token, "offline").ok();
     room::send_message(
         &cli.room_id,
         token,
