@@ -203,6 +203,10 @@ pub async fn run(
         .await?;
 
     'main: loop {
+        // Sync scroll_offset: handle_key modifies input_state.scroll_offset,
+        // but rendering reads from tabs[active_tab].scroll_offset.
+        tabs[active_tab].scroll_offset = input_state.scroll_offset;
+
         // Drain pending messages from all tabs.
         for (i, t) in tabs.iter_mut().enumerate() {
             let is_active = i == active_tab;
@@ -280,6 +284,8 @@ pub async fn run(
         tabs[active_tab].scroll_offset = tabs[active_tab]
             .scroll_offset
             .min(total_lines.saturating_sub(msg_area_height));
+        // Sync clamped value back to input_state so handle_key sees the clamped value.
+        input_state.scroll_offset = tabs[active_tab].scroll_offset;
 
         // Capture values needed by the draw closure (avoid borrowing tabs inside closure).
         let scroll_offset = tabs[active_tab].scroll_offset;
@@ -596,6 +602,7 @@ pub async fn run(
                         Some(Action::Quit) => break 'main,
                         Some(Action::NextTab) => {
                             if tabs.len() > 1 {
+                                tabs[active_tab].scroll_offset = input_state.scroll_offset;
                                 active_tab = (active_tab + 1) % tabs.len();
                                 tabs[active_tab].unread_count = 0;
                                 input_state.scroll_offset = tabs[active_tab].scroll_offset;
@@ -603,6 +610,7 @@ pub async fn run(
                         }
                         Some(Action::PrevTab) => {
                             if tabs.len() > 1 {
+                                tabs[active_tab].scroll_offset = input_state.scroll_offset;
                                 active_tab = if active_tab == 0 {
                                     tabs.len() - 1
                                 } else {
@@ -614,6 +622,7 @@ pub async fn run(
                         }
                         Some(Action::SwitchTab(idx)) => {
                             if idx < tabs.len() {
+                                tabs[active_tab].scroll_offset = input_state.scroll_offset;
                                 active_tab = idx;
                                 tabs[active_tab].unread_count = 0;
                                 input_state.scroll_offset = tabs[active_tab].scroll_offset;
@@ -658,4 +667,269 @@ pub async fn run(
     terminal.show_cursor()?;
 
     result
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+
+    fn make_msg(user: &str, content: &str) -> Message {
+        Message::Message {
+            id: "test-id".into(),
+            room: "test-room".into(),
+            user: user.into(),
+            ts: Utc::now(),
+            content: content.into(),
+            seq: None,
+        }
+    }
+
+    fn make_join(user: &str) -> Message {
+        Message::Join {
+            id: "test-id".into(),
+            room: "test-room".into(),
+            user: user.into(),
+            ts: Utc::now(),
+            seq: None,
+        }
+    }
+
+    fn make_leave(user: &str) -> Message {
+        Message::Leave {
+            id: "test-id".into(),
+            room: "test-room".into(),
+            user: user.into(),
+            ts: Utc::now(),
+            seq: None,
+        }
+    }
+
+    fn make_system(content: &str) -> Message {
+        Message::System {
+            id: "test-id".into(),
+            room: "test-room".into(),
+            user: "broker".into(),
+            ts: Utc::now(),
+            content: content.into(),
+            seq: None,
+        }
+    }
+
+    // ── RoomTab::process_message tests ────────────────────────────────────
+
+    #[tokio::test]
+    async fn process_message_adds_user_on_join() {
+        let (_, rx) = mpsc::unbounded_channel();
+        let (_, wh) = tokio::net::UnixStream::pair().unwrap().1.into_split();
+        let mut tab = RoomTab {
+            room_id: "test".into(),
+            messages: Vec::new(),
+            online_users: Vec::new(),
+            user_statuses: HashMap::new(),
+            unread_count: 0,
+            scroll_offset: 0,
+            msg_rx: rx,
+            write_half: wh,
+        };
+        let mut cm = ColorMap::new();
+
+        tab.process_message(make_join("alice"), &mut cm, true);
+        assert_eq!(tab.online_users, vec!["alice"]);
+        assert_eq!(tab.messages.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn process_message_removes_user_on_leave() {
+        let (_, rx) = mpsc::unbounded_channel();
+        let (_, wh) = tokio::net::UnixStream::pair().unwrap().1.into_split();
+        let mut tab = RoomTab {
+            room_id: "test".into(),
+            messages: Vec::new(),
+            online_users: vec!["alice".into()],
+            user_statuses: HashMap::new(),
+            unread_count: 0,
+            scroll_offset: 0,
+            msg_rx: rx,
+            write_half: wh,
+        };
+        let mut cm = ColorMap::new();
+
+        tab.process_message(make_leave("alice"), &mut cm, true);
+        assert!(tab.online_users.is_empty());
+    }
+
+    #[tokio::test]
+    async fn process_message_increments_unread_when_inactive() {
+        let (_, rx) = mpsc::unbounded_channel();
+        let (_, wh) = tokio::net::UnixStream::pair().unwrap().1.into_split();
+        let mut tab = RoomTab {
+            room_id: "test".into(),
+            messages: Vec::new(),
+            online_users: Vec::new(),
+            user_statuses: HashMap::new(),
+            unread_count: 0,
+            scroll_offset: 0,
+            msg_rx: rx,
+            write_half: wh,
+        };
+        let mut cm = ColorMap::new();
+
+        tab.process_message(make_msg("bob", "hello"), &mut cm, false);
+        assert_eq!(tab.unread_count, 1);
+
+        tab.process_message(make_msg("bob", "world"), &mut cm, false);
+        assert_eq!(tab.unread_count, 2);
+    }
+
+    #[tokio::test]
+    async fn process_message_no_unread_when_active() {
+        let (_, rx) = mpsc::unbounded_channel();
+        let (_, wh) = tokio::net::UnixStream::pair().unwrap().1.into_split();
+        let mut tab = RoomTab {
+            room_id: "test".into(),
+            messages: Vec::new(),
+            online_users: Vec::new(),
+            user_statuses: HashMap::new(),
+            unread_count: 0,
+            scroll_offset: 0,
+            msg_rx: rx,
+            write_half: wh,
+        };
+        let mut cm = ColorMap::new();
+
+        tab.process_message(make_msg("bob", "hello"), &mut cm, true);
+        assert_eq!(tab.unread_count, 0);
+    }
+
+    #[tokio::test]
+    async fn process_message_seeds_user_from_message_sender() {
+        let (_, rx) = mpsc::unbounded_channel();
+        let (_, wh) = tokio::net::UnixStream::pair().unwrap().1.into_split();
+        let mut tab = RoomTab {
+            room_id: "test".into(),
+            messages: Vec::new(),
+            online_users: Vec::new(),
+            user_statuses: HashMap::new(),
+            unread_count: 0,
+            scroll_offset: 0,
+            msg_rx: rx,
+            write_half: wh,
+        };
+        let mut cm = ColorMap::new();
+
+        tab.process_message(make_msg("charlie", "hi"), &mut cm, true);
+        assert_eq!(tab.online_users, vec!["charlie"]);
+        assert!(cm.contains_key("charlie"));
+    }
+
+    #[tokio::test]
+    async fn process_message_does_not_duplicate_existing_user() {
+        let (_, rx) = mpsc::unbounded_channel();
+        let (_, wh) = tokio::net::UnixStream::pair().unwrap().1.into_split();
+        let mut tab = RoomTab {
+            room_id: "test".into(),
+            messages: Vec::new(),
+            online_users: vec!["alice".into()],
+            user_statuses: HashMap::new(),
+            unread_count: 0,
+            scroll_offset: 0,
+            msg_rx: rx,
+            write_half: wh,
+        };
+        let mut cm = ColorMap::new();
+
+        tab.process_message(make_msg("alice", "hi"), &mut cm, true);
+        assert_eq!(tab.online_users.len(), 1);
+    }
+
+    // ── drain_messages tests ──────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn drain_messages_processes_pending() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let (_, wh) = tokio::net::UnixStream::pair().unwrap().1.into_split();
+        let mut tab = RoomTab {
+            room_id: "test".into(),
+            messages: Vec::new(),
+            online_users: Vec::new(),
+            user_statuses: HashMap::new(),
+            unread_count: 0,
+            scroll_offset: 0,
+            msg_rx: rx,
+            write_half: wh,
+        };
+        let mut cm = ColorMap::new();
+
+        tx.send(make_msg("bob", "one")).unwrap();
+        tx.send(make_msg("bob", "two")).unwrap();
+
+        let result = tab.drain_messages(&mut cm, true);
+        assert!(matches!(result, DrainResult::Ok));
+        assert_eq!(tab.messages.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn drain_messages_detects_disconnect() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let (_, wh) = tokio::net::UnixStream::pair().unwrap().1.into_split();
+        let mut tab = RoomTab {
+            room_id: "test".into(),
+            messages: Vec::new(),
+            online_users: Vec::new(),
+            user_statuses: HashMap::new(),
+            unread_count: 0,
+            scroll_offset: 0,
+            msg_rx: rx,
+            write_half: wh,
+        };
+        let mut cm = ColorMap::new();
+
+        drop(tx);
+        let result = tab.drain_messages(&mut cm, true);
+        assert!(matches!(result, DrainResult::Disconnected));
+    }
+
+    #[tokio::test]
+    async fn drain_messages_empty_returns_ok() {
+        let (_tx, rx) = mpsc::unbounded_channel::<Message>();
+        let (_, wh) = tokio::net::UnixStream::pair().unwrap().1.into_split();
+        let mut tab = RoomTab {
+            room_id: "test".into(),
+            messages: Vec::new(),
+            online_users: Vec::new(),
+            user_statuses: HashMap::new(),
+            unread_count: 0,
+            scroll_offset: 0,
+            msg_rx: rx,
+            write_half: wh,
+        };
+        let mut cm = ColorMap::new();
+
+        let result = tab.drain_messages(&mut cm, true);
+        assert!(matches!(result, DrainResult::Ok));
+        assert!(tab.messages.is_empty());
+    }
+
+    #[tokio::test]
+    async fn process_system_message_parses_status() {
+        let (_, rx) = mpsc::unbounded_channel();
+        let (_, wh) = tokio::net::UnixStream::pair().unwrap().1.into_split();
+        let mut tab = RoomTab {
+            room_id: "test".into(),
+            messages: Vec::new(),
+            online_users: vec!["alice".into()],
+            user_statuses: HashMap::new(),
+            unread_count: 0,
+            scroll_offset: 0,
+            msg_rx: rx,
+            write_half: wh,
+        };
+        let mut cm = ColorMap::new();
+
+        tab.process_message(make_system("alice set status: coding"), &mut cm, true);
+        assert_eq!(tab.user_statuses.get("alice").unwrap(), "coding");
+    }
 }
