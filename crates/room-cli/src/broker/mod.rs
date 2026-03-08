@@ -299,7 +299,7 @@ async fn handle_client(
                     }
                     match parse_client_line(trimmed, &room_id_in, &username_in) {
                         Ok(msg) => match route_command(msg, &username_in, &state_in).await {
-                            Ok(CommandResult::Handled) => {}
+                            Ok(CommandResult::Handled | CommandResult::HandledWithReply(_)) => {}
                             Ok(CommandResult::Reply(json)) => {
                                 let _ = write_half_in
                                     .lock()
@@ -380,7 +380,7 @@ async fn handle_oneshot_send(
     let msg = parse_client_line(trimmed, &state.room_id, &username)?;
     match route_command(msg, &username, state).await? {
         CommandResult::Handled | CommandResult::Shutdown => {}
-        CommandResult::Reply(json) => {
+        CommandResult::HandledWithReply(json) | CommandResult::Reply(json) => {
             write_half.write_all(format!("{json}\n").as_bytes()).await?;
         }
         CommandResult::Passthrough(msg) => {

@@ -13,6 +13,13 @@ pub(crate) const ADMIN_CMD_NAMES: &[&str] = &["kick", "reauth", "clear-tokens", 
 pub(crate) enum CommandResult {
     /// The command was fully handled with a broadcast or no-op; nothing to send back privately.
     Handled,
+    /// The command was handled with a broadcast; oneshot callers should receive this JSON echo.
+    ///
+    /// Interactive clients already receive the message via the broadcast channel, so
+    /// `handle_client` treats this identically to `Handled`. One-shot senders are not
+    /// subscribed to the broadcast, so `handle_oneshot_send` writes the JSON back to them
+    /// directly, avoiding the EOF parse error the client would otherwise see.
+    HandledWithReply(String),
     /// The command was handled privately; send this JSON line back only to the issuer.
     Reply(String),
     /// The command was handled and the broker is shutting down.
@@ -55,9 +62,11 @@ pub(crate) async fn route_command(
             let sys = make_system(&state.room_id, "broker", display);
             broadcast_and_persist(&sys, &state.clients, &state.chat_path, &state.seq_counter)
                 .await?;
-            // Broadcast already delivers to all connected clients including the sender;
-            // no additional private reply needed.
-            return Ok(CommandResult::Handled);
+            // Broadcast already delivers to all interactive clients. One-shot callers are not
+            // subscribed to the broadcast channel, so we carry the JSON in HandledWithReply so
+            // handle_oneshot_send can write it back — preventing the EOF parse error.
+            let json = serde_json::to_string(&sys)?;
+            return Ok(CommandResult::HandledWithReply(json));
         }
 
         if cmd == "who" {
@@ -361,12 +370,22 @@ mod tests {
     // ── route_command: set_status ──────────────────────────────────────────
 
     #[tokio::test]
-    async fn route_command_set_status_returns_handled_and_updates_map() {
+    async fn route_command_set_status_returns_handled_with_reply_and_updates_map() {
         let tmp = NamedTempFile::new().unwrap();
         let state = make_state(tmp.path().to_path_buf());
         let msg = make_command("test-room", "alice", "set_status", vec!["busy".to_owned()]);
         let result = route_command(msg, "alice", &state).await.unwrap();
-        assert!(matches!(result, CommandResult::Handled));
+        let CommandResult::HandledWithReply(json) = result else {
+            panic!("expected HandledWithReply, got Handled or other");
+        };
+        assert!(
+            json.contains("set status"),
+            "reply JSON should contain status announcement"
+        );
+        assert!(
+            json.contains("busy"),
+            "reply JSON should contain the status text"
+        );
         assert_eq!(
             state
                 .status_map
@@ -389,7 +408,7 @@ mod tests {
             .insert("alice".to_owned(), "busy".to_owned());
         let msg = make_command("test-room", "alice", "set_status", vec![]);
         let result = route_command(msg, "alice", &state).await.unwrap();
-        assert!(matches!(result, CommandResult::Handled));
+        assert!(matches!(result, CommandResult::HandledWithReply(_)));
         assert_eq!(
             state
                 .status_map

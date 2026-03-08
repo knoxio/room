@@ -236,7 +236,7 @@ async fn run_ws_session(
                     }
                     match parse_client_line(trimmed, &room_id_in, &username_in) {
                         Ok(msg) => match route_command(msg, &username_in, &state_in).await {
-                            Ok(CommandResult::Handled) => {}
+                            Ok(CommandResult::Handled | CommandResult::HandledWithReply(_)) => {}
                             Ok(CommandResult::Reply(json)) => {
                                 let _ = ws_tx_in
                                     .lock()
@@ -349,7 +349,7 @@ async fn ws_oneshot_send(
     let msg = parse_client_line(trimmed, &state.room_id, &username)?;
     match route_command(msg, &username, state).await? {
         CommandResult::Handled | CommandResult::Shutdown => {}
-        CommandResult::Reply(json) => {
+        CommandResult::HandledWithReply(json) | CommandResult::Reply(json) => {
             let _ = ws_tx.send(WsMessage::Text(json.into())).await;
         }
         CommandResult::Passthrough(msg) => {
@@ -478,7 +478,7 @@ async fn api_send(
         Ok(CommandResult::Handled) => {
             (StatusCode::OK, Json(serde_json::json!({"type":"ok"}))).into_response()
         }
-        Ok(CommandResult::Reply(json)) => {
+        Ok(CommandResult::HandledWithReply(json) | CommandResult::Reply(json)) => {
             let v: serde_json::Value =
                 serde_json::from_str(&json).unwrap_or(serde_json::json!({"reply": json}));
             (StatusCode::OK, Json(v)).into_response()

@@ -770,6 +770,46 @@ async fn set_status_broadcasts_system_message_to_all() {
     );
 }
 
+/// `send_message_with_token` with a `/set_status` command returns the system echo
+/// instead of producing an EOF error. Regression test for #234.
+#[tokio::test]
+async fn oneshot_set_status_returns_system_echo_not_eof() {
+    let broker = TestBroker::start("t_set_status_oneshot").await;
+
+    let mut watcher = TestClient::connect(&broker.socket_path, "watcher").await;
+    watcher
+        .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "watcher"))
+        .await;
+
+    let (_, token) = room_cli::oneshot::join_session(&broker.socket_path, "agent")
+        .await
+        .expect("join_session failed");
+
+    let wire = serde_json::json!({
+        "type": "command",
+        "cmd": "set_status",
+        "params": ["drafting auth handler"]
+    })
+    .to_string();
+
+    // Before the fix this would fail with "EOF while parsing a value".
+    let msg = room_cli::oneshot::send_message_with_token(&broker.socket_path, &token, &wire)
+        .await
+        .expect("send_message_with_token should not return EOF for set_status");
+
+    assert!(
+        matches!(&msg, Message::System { content, .. } if content.contains("drafting auth handler")),
+        "expected System echo with status text, got: {msg:?}"
+    );
+
+    // The broadcast should also have reached the watcher.
+    watcher
+        .recv_until(|m| {
+            matches!(m, Message::System { content, .. } if content.contains("drafting auth handler"))
+        })
+        .await;
+}
+
 /// who responds only to the requesting client with the current online list.
 /// The response is a System message and is not broadcast to other clients.
 #[tokio::test]
