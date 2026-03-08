@@ -463,8 +463,8 @@ crates/room-ralph/src/
   monitor.rs           — Context monitoring: parse_usage, should_restart, threshold math
   progress.rs          — Progress file I/O: write/read/delete, log usage
   prompt.rs            — Prompt builder: custom prompts, progress inclusion
-  room.rs              — Room CLI wrapper: join/send/poll via Command::new
-  claude.rs            — Claude subprocess wrapper: spawn, parse output, resolve_allowed_tools
+  room.rs              — Room CLI wrapper: join/send/poll/set_status via Command::new
+  claude.rs            — Claude subprocess wrapper: spawn, parse output, resolve_allowed/disallowed_tools
 
 scripts/
   pre-push.sh          — Git hook: check + fmt + clippy + test
@@ -484,6 +484,13 @@ Key invariants to preserve:
 - **`crates/room-cli/src/lib.rs` must export any new modules** so integration tests can import them.
 - **room-ralph is a CLIENT** — it shells out to `room` and `claude` via `Command::new`.
   It must NOT link room-cli transport or broker code. Depend on room-protocol only.
+- **Tests touching env vars must use `ENV_LOCK`** — env is process-global state.
+  Use the static `Mutex<()>` in `lib.rs` tests and call `clear_ralph_env()` before
+  and after each test to prevent cross-test contamination.
+- **`--disallowedTools` restricts, `--allowedTools` does not** — claude's
+  `--allowedTools` only controls auto-approval (additive), not tool availability.
+  `--disallowedTools` hard-blocks tools. ralph uses `--disallow-tools` (mapped to
+  `--disallowedTools`) for actual enforcement.
 - **All tests must pass** before committing: `cargo test`.
 
 ## Pre-push checklist
@@ -522,12 +529,12 @@ All tests must remain green. Add tests for any new behaviour.
 
 ## Baseline test count
 
-**Current baseline: 456 Rust tests + 107 shell tests**
+**Current baseline: 476 Rust tests + 107 shell tests**
 
 Rust breakdown:
 - room-protocol: 20 unit tests
-- room-cli: 251 unit + 71 integration + 5 smoke = 327 tests
-- room-ralph: 96 unit + 8 integration = 104 tests (+ 1 ignored live-broker test)
+- room-cli: 256 unit + 71 integration + 5 smoke = 332 tests
+- room-ralph: 111 unit + 8 integration = 119 tests (+ 1 ignored live-broker test)
 - agentroom: 5 integration tests (deprecation shim)
 
 Shell breakdown:
