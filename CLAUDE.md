@@ -92,6 +92,10 @@ room send myroom -t $TOKEN "fix pushed"
 
 ## Shell environment constraints
 
+> **Note:** These restrictions apply to **interactive Claude Code sessions only**.
+> Agents spawned via room-ralph (`claude -p`) run non-interactively and do not
+> trigger permission prompts, so heredocs, `$()`, and env expansion are fine there.
+
 Claude Code's Bash tool triggers permission prompts on certain shell patterns. Avoid these
 to keep the workflow smooth:
 
