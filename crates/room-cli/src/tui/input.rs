@@ -543,6 +543,19 @@ pub(super) fn parse_status_broadcast(content: &str) -> Option<(String, String)> 
     None
 }
 
+/// Parse a `/kick` system broadcast into the kicked username.
+///
+/// The broker broadcasts `"alice kicked bob (token invalidated)"`.
+/// Returns `Some("bob")` — the target user who was kicked.
+pub(super) fn parse_kick_broadcast(content: &str) -> Option<&str> {
+    let rest = content.strip_suffix(" (token invalidated)")?;
+    let (_issuer, target) = rest.split_once(" kicked ")?;
+    if target.is_empty() {
+        return None;
+    }
+    Some(target)
+}
+
 /// Move the cursor to the start of the previous word.
 ///
 /// "Word" is a maximal run of non-whitespace characters. Starting from
@@ -694,6 +707,37 @@ mod tests {
             result,
             Some(("my-agent".to_owned(), "reviewing PR".to_owned()))
         );
+    }
+
+    // ── parse_kick_broadcast tests ──────────────────────────────────────────
+
+    #[test]
+    fn parse_kick_standard() {
+        let result = parse_kick_broadcast("alice kicked bob (token invalidated)");
+        assert_eq!(result, Some("bob"));
+    }
+
+    #[test]
+    fn parse_kick_hyphenated_names() {
+        let result = parse_kick_broadcast("room-host kicked my-agent (token invalidated)");
+        assert_eq!(result, Some("my-agent"));
+    }
+
+    #[test]
+    fn parse_kick_unrelated_message() {
+        assert!(parse_kick_broadcast("alice set status: busy").is_none());
+        assert!(parse_kick_broadcast("hello world").is_none());
+        assert!(parse_kick_broadcast("alice cleared their status").is_none());
+    }
+
+    #[test]
+    fn parse_kick_missing_suffix() {
+        assert!(parse_kick_broadcast("alice kicked bob").is_none());
+    }
+
+    #[test]
+    fn parse_kick_missing_target() {
+        assert!(parse_kick_broadcast("alice kicked  (token invalidated)").is_none());
     }
 
     // ── build_payload tests ───────────────────────────────────────────────────

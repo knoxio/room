@@ -24,7 +24,7 @@ mod widgets;
 
 use crate::message::Message;
 use input::{
-    build_payload, cursor_display_pos, handle_key, parse_status_broadcast,
+    build_payload, cursor_display_pos, handle_key, parse_kick_broadcast, parse_status_broadcast,
     seed_online_users_from_who, wrap_input_display, Action, InputState,
 };
 use render::{assign_color, find_view_start, format_message, user_color, welcome_splash, ColorMap};
@@ -143,6 +143,10 @@ pub async fn run(
                             );
                             if let Some((name, status)) = parse_status_broadcast(content) {
                                 user_statuses.insert(name, status);
+                            }
+                            if let Some(kicked) = parse_kick_broadcast(content) {
+                                online_users.retain(|u| u != kicked);
+                                user_statuses.remove(kicked);
                             }
                             for u in &online_users {
                                 assign_color(u, &mut color_map);
@@ -524,6 +528,10 @@ pub async fn run(
                             );
                             if let Some((name, status)) = parse_status_broadcast(content) {
                                 user_statuses.insert(name, status);
+                            }
+                            if let Some(kicked) = parse_kick_broadcast(content) {
+                                online_users.retain(|u| u != kicked);
+                                user_statuses.remove(kicked);
                             }
                             for u in &online_users {
                                 assign_color(u, &mut color_map);
