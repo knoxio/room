@@ -53,9 +53,19 @@ pub struct ClaudeOutput {
     pub exit_code: i32,
 }
 
+/// Environment variables to strip from the child claude process.
+///
+/// Claude Code sets these to detect (and reject) nested sessions. Since
+/// room-ralph intentionally spawns independent `claude -p` processes,
+/// the nesting guard must be bypassed.
+const STRIPPED_ENV_VARS: &[&str] = &["CLAUDECODE", "CLAUDE_CODE_ENTRY_POINT"];
+
 /// Build the `claude` command with all flags, ready to spawn.
 fn build_claude_command(model: &str, add_dirs: &[PathBuf], allowed_tools: &[String]) -> Command {
     let mut cmd = Command::new("claude");
+    for var in STRIPPED_ENV_VARS {
+        cmd.env_remove(var);
+    }
     cmd.args(["-p", "--model", model, "--output-format", "json"]);
     for dir in add_dirs {
         cmd.args(["--add-dir", &dir.display().to_string()]);
@@ -390,5 +400,27 @@ mod tests {
         let result = resolve_allowed_tools(&[]);
         assert_eq!(result.len(), DEFAULT_ALLOWED_TOOLS.len());
         std::env::remove_var("RALPH_ALLOWED_TOOLS");
+    }
+
+    #[test]
+    fn build_command_strips_claudecode_env_vars() {
+        let cmd = build_claude_command("opus", &[], &[]);
+        let removals: Vec<_> = cmd
+            .get_envs()
+            .filter(|(_, val)| val.is_none())
+            .map(|(key, _)| key.to_string_lossy().to_string())
+            .collect();
+        for var in STRIPPED_ENV_VARS {
+            assert!(
+                removals.contains(&var.to_string()),
+                "{var} should be removed from child env"
+            );
+        }
+    }
+
+    #[test]
+    fn stripped_env_vars_contains_expected_entries() {
+        assert!(STRIPPED_ENV_VARS.contains(&"CLAUDECODE"));
+        assert!(STRIPPED_ENV_VARS.contains(&"CLAUDE_CODE_ENTRY_POINT"));
     }
 }
