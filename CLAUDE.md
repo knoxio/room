@@ -45,6 +45,12 @@ room poll <room-id> -t <token>
 
 # Check messages since a specific ID (overrides stored cursor)
 room poll <room-id> -t <token> --since <message-id>
+
+# Poll multiple rooms at once (messages merged by timestamp)
+room poll -t <token> --rooms room1,room2,room3
+
+# Filter to only messages that @mention you
+room poll <room-id> -t <token> --mentions-only
 ```
 
 The cursor is stored at `/tmp/room-<id>-<username>.cursor` (username resolved from token). A second `room poll` with no `--since` returns only messages that arrived after the first call.
@@ -426,10 +432,11 @@ scripts/                  — shell scripts (pre-push, tests, legacy ralph wrapp
 
 ```
 crates/room-protocol/src/
-  lib.rs               — Message enum, constructors, serde impls, parse_client_line
+  lib.rs               — Message enum, constructors, serde impls, parse_client_line,
+                          parse_mentions, Message::content/mentions accessors
 
 crates/room-cli/src/
-  main.rs              — CLI parsing, subcommand dispatch (join / send / poll / watch / list / daemon)
+  main.rs              — CLI parsing, subcommand dispatch (join / send / poll / pull / watch / who / list / daemon)
   lib.rs               — Re-exports all modules (required for integration tests)
   client.rs            — Connects to broker, runs TUI or agent mode
   message.rs           — Re-exports room_protocol::* + CLI-specific helpers
@@ -438,7 +445,8 @@ crates/room-cli/src/
   broker/
     mod.rs             — Accept loop, handle_client, handle_oneshot_send, run_interactive_session
     state.rs           — RoomState struct and type aliases (ClientMap, StatusMap, etc.)
-    auth.rs            — Token issuance (issue_token) and validation (validate_token)
+    auth.rs            — Token issuance (issue_token), validation (validate_token),
+                          token persistence (save/load_token_map, token_file_path)
     commands.rs        — Unified command routing (route_command, handle_admin_cmd, dispatch_plugin, validate_params)
     daemon.rs          — Multi-room daemon (DaemonState, room lifecycle, ROOM: handshake, UDS dispatch)
     fanout.rs          — broadcast_and_persist, dm_and_persist
@@ -452,7 +460,8 @@ crates/room-cli/src/
     mod.rs             — Re-exports, subcommand dispatch, slash command routing (build_wire_payload)
     transport.rs       — Socket connect, send_message, send_message_with_token
     token.rs           — Token file I/O, cursor read/write, cmd_join
-    poll.rs            — poll_messages, pull_messages, cmd_poll, cmd_pull, cmd_watch
+    poll.rs            — poll_messages, poll_messages_multi, pull_messages, cmd_poll,
+                          cmd_poll_multi, cmd_pull, cmd_watch (--mentions-only filter)
     who.rs             — cmd_who: oneshot /who query
   tui/
     mod.rs             — Main run() loop and TUI state
@@ -471,7 +480,8 @@ crates/room-ralph/src/
   progress.rs          — Progress file I/O: write/read/delete, log usage
   prompt.rs            — Prompt builder: custom prompts, progress inclusion
   room.rs              — Room CLI wrapper: join/send/poll/set_status via Command::new
-  claude.rs            — Claude subprocess wrapper: spawn, parse output, resolve_allowed/disallowed_tools
+  claude.rs            — Claude subprocess wrapper: spawn, parse output, resolve_allowed/disallowed_tools,
+                          Profile enum, merge_profiles, tool profiles
 
 docs/
   design-253-room-visibility.md — Design doc for room visibility and ACLs
@@ -501,6 +511,8 @@ Key invariants to preserve:
   `--allowedTools` only controls auto-approval (additive), not tool availability.
   `--disallowedTools` hard-blocks tools. ralph uses `--disallow-tools` (mapped to
   `--disallowedTools`) for actual enforcement.
+- **Token persistence writes .tokens alongside .chat** — broker saves the token map
+  to disk on every issuance and loads it on startup. Tests must clean up `.tokens` files.
 - **All tests must pass** before committing: `cargo test`.
 
 ## Pre-push checklist
@@ -539,12 +551,12 @@ All tests must remain green. Add tests for any new behaviour.
 
 ## Baseline test count
 
-**Current baseline: 562 Rust tests + 107 shell tests**
+**Current baseline: 687 Rust tests + 107 shell tests**
 
 Rust breakdown:
-- room-protocol: 20 unit tests
-- room-cli: 336 unit + 77 integration + 5 smoke = 418 tests
-- room-ralph: 111 unit + 8 integration = 119 tests (+ 1 ignored live-broker test)
+- room-protocol: 47 unit tests
+- room-cli: 407 unit + 83 integration + 5 smoke = 495 tests
+- room-ralph: 132 unit + 8 integration = 140 tests (+ 1 ignored live-broker test)
 - agentroom: 5 integration tests (deprecation shim)
 
 Shell breakdown:
