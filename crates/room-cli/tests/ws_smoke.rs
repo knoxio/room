@@ -3,7 +3,17 @@
 /// These tests spawn the real `room` binary as a child process (broker mode)
 /// and connect via WebSocket and REST from outside the process. This validates
 /// the full CLI → broker → transport path that users will exercise.
+///
+/// Timeouts are generous (10s startup, 5s recv) to avoid flakiness on
+/// encrypted volumes where process startup is slower (#184).
 use std::{process::Stdio, time::Duration};
+
+/// Broker startup: max wait before declaring the WS port unreachable.
+const BROKER_STARTUP_ATTEMPTS: u32 = 200;
+const BROKER_STARTUP_INTERVAL: Duration = Duration::from_millis(50);
+
+/// WS message receive deadline — must exceed broker message processing time.
+const WS_RECV_TIMEOUT: Duration = Duration::from_secs(5);
 
 use futures_util::{SinkExt, StreamExt};
 use tokio::time::timeout;
@@ -36,12 +46,13 @@ async fn spawn_broker(room_id: &str) -> (tokio::process::Child, u16) {
     let port = free_port();
     let bin = room_binary();
 
-    // Create a temp directory for the chat file.
     let chat_file = format!("/tmp/ws_smoke_{room_id}.chat");
-    // Clean up any stale files from previous runs.
-    let _ = std::fs::remove_file(&chat_file);
+    let token_file = format!("/tmp/ws_smoke_{room_id}.tokens");
     let socket_path = format!("/tmp/room-{room_id}.sock");
-    let _ = std::fs::remove_file(&socket_path);
+    // Clean up stale files from previous runs.
+    for path in [&chat_file, &token_file, &socket_path] {
+        let _ = std::fs::remove_file(path);
+    }
 
     let child = tokio::process::Command::new(&bin)
         .args([
@@ -60,23 +71,26 @@ async fn spawn_broker(room_id: &str) -> (tokio::process::Child, u16) {
         .spawn()
         .unwrap_or_else(|e| panic!("failed to spawn room binary at {}: {e}", bin.display()));
 
-    // Wait for the WS server to be ready.
-    for _ in 0..200 {
+    // Wait for the WS server to be ready. Generous timeout for encrypted
+    // volumes where process startup is slower (#184).
+    for _ in 0..BROKER_STARTUP_ATTEMPTS {
         if tokio::net::TcpStream::connect(("127.0.0.1", port))
             .await
             .is_ok()
         {
             break;
         }
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        tokio::time::sleep(BROKER_STARTUP_INTERVAL).await;
     }
 
     // Verify the server is actually listening.
+    let max_wait_secs =
+        BROKER_STARTUP_ATTEMPTS as u64 * BROKER_STARTUP_INTERVAL.as_millis() as u64 / 1000;
     assert!(
         tokio::net::TcpStream::connect(("127.0.0.1", port))
             .await
             .is_ok(),
-        "WS server did not start on port {port} within 4 seconds"
+        "WS server did not start on port {port} within {max_wait_secs}s"
     );
 
     (child, port)
@@ -288,7 +302,7 @@ type WsRx = futures_util::stream::SplitStream<
 
 /// Read WS frames until the predicate matches a parsed JSON value.
 async fn recv_until(rx: &mut WsRx, pred: impl Fn(&serde_json::Value) -> bool) -> serde_json::Value {
-    let deadline = Duration::from_secs(3);
+    let deadline = WS_RECV_TIMEOUT;
     let start = tokio::time::Instant::now();
     loop {
         let remaining = deadline.checked_sub(start.elapsed()).unwrap_or_default();
@@ -313,7 +327,7 @@ async fn recv_until(rx: &mut WsRx, pred: impl Fn(&serde_json::Value) -> bool) ->
 
 /// Read WS frames until we get a text frame with the specified `type` field.
 async fn recv_until_type(rx: &mut WsRx, msg_type: &str) -> serde_json::Value {
-    let deadline = Duration::from_secs(3);
+    let deadline = WS_RECV_TIMEOUT;
     let start = tokio::time::Instant::now();
     loop {
         let remaining = deadline.checked_sub(start.elapsed()).unwrap_or_default();
@@ -338,7 +352,7 @@ async fn recv_until_type(rx: &mut WsRx, msg_type: &str) -> serde_json::Value {
 
 /// Read the next text frame as JSON.
 async fn recv_json(rx: &mut WsRx) -> serde_json::Value {
-    match timeout(Duration::from_secs(3), rx.next()).await {
+    match timeout(WS_RECV_TIMEOUT, rx.next()).await {
         Ok(Some(Ok(TungsteniteMsg::Text(text)))) => {
             serde_json::from_str(&*text).expect("invalid JSON from WS")
         }
