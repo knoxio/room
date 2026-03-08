@@ -7,6 +7,19 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `--disallow-tools <tools>` flag and `RALPH_DISALLOWED_TOOLS` environment variable for
+  hard-blocking tools from the claude session (passed as `--disallowedTools`). Supports
+  granular patterns like `Bash(python3:*)`. Empty by default. (#242)
+- Automatic `/set_status` updates at loop milestones: before claude spawn, on context
+  restart, on claude error, and on shutdown. Handles #234 EOF gracefully. (#243)
+
+### Fixed
+
+- Strip `CLAUDECODE` and `CLAUDE_CODE_ENTRY_POINT` environment variables from the child
+  claude process to prevent the nested-session guard from blocking startup. (#239)
+
 ## [0.3.0-rc.1] - 2026-03-07
 
 ### Added

@@ -57,6 +57,9 @@ room-ralph myroom agent1 --tmux
 # Restrict which tools claude can use
 room-ralph myroom agent1 --allow-tools Read,Grep,Glob,Bash
 
+# Block specific tools (hard restriction — agent cannot use them at all)
+room-ralph myroom agent1 --disallow-tools Write,Edit
+
 # Preview the prompt without running claude
 room-ralph myroom agent1 --dry-run
 
@@ -79,6 +82,7 @@ room-ralph myroom agent1 --model sonnet --add-dir ../shared-lib --add-dir ../doc
 | `--personality <file>` | — | Personality file; contents prepended before all prompt content |
 | `--add-dir <path>` | — | Additional directories for `claude --add-dir` (repeatable) |
 | `--allow-tools <tools>` | — | Comma-separated tool allow list (passed as `--allowedTools` to claude) |
+| `--disallow-tools <tools>` | — | Comma-separated tool deny list (passed as `--disallowedTools` to claude). Supports granular patterns like `Bash(python3:*)`. |
 | `--dry-run` | off | Print the prompt that would be sent, then exit |
 | `-v` / `-V` / `--version` | — | Print version |
 
@@ -94,6 +98,7 @@ CLI flags take precedence over environment variables.
 | `RALPH_MODEL` | `--model` | Claude model to use (default: `opus`) |
 | `RALPH_ISSUE` | `--issue` | GitHub issue number |
 | `RALPH_ALLOWED_TOOLS` | `--allow-tools` | Comma-separated tool allow list (see below) |
+| `RALPH_DISALLOWED_TOOLS` | `--disallow-tools` | Comma-separated tool deny list (see below) |
 | `CONTEXT_LIMIT` | — | Total context window size (default: `200000`) |
 | `CONTEXT_THRESHOLD` | — | Percentage at which to restart (default: `80`) |
 
@@ -108,6 +113,19 @@ Allowed tools are resolved in this order:
 
 Set `RALPH_ALLOWED_TOOLS=none` (or `--allow-tools none`) to disable tool
 restrictions entirely and let claude use all available tools.
+
+### Tool deny list
+
+Disallowed tools are resolved with the same precedence:
+
+1. `--disallow-tools` CLI flag (highest)
+2. `RALPH_DISALLOWED_TOOLS` environment variable
+3. Defaults: empty (no tools blocked)
+
+Disallowed tools are hard-blocked — they are removed from the session entirely,
+regardless of what `--allow-tools` permits. Supports granular patterns like
+`Bash(python3:*)` to block specific commands while keeping the tool available for
+other uses.
 
 ## Context exhaustion
 

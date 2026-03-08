@@ -25,6 +25,19 @@ Configure it via `.claude/settings.json` in the project directory:
   (`Read`) and parameterized patterns (`Bash(cargo test)`).
 - **`deny`** — tool patterns that are always blocked, even if listed in `allow`.
 
+Ralph also supports `--disallow-tools` (or `RALPH_DISALLOWED_TOOLS` env var) for
+hard-blocking specific tools from the session. Unlike `--allow-tools` which controls
+auto-approval, `--disallow-tools` removes tools entirely — the agent cannot use them
+even if prompted. Supports granular patterns like `Bash(python3:*)`.
+
+```bash
+# Block Write and Edit — agent can read but not modify files
+room-ralph myroom reviewer --disallow-tools Write,Edit
+
+# Block specific shell commands while keeping Bash available
+room-ralph myroom agent1 --disallow-tools "Bash(rm:*),Bash(curl:*)"
+```
+
 For fully autonomous operation (e.g. CI pipelines), ralph passes
 `--dangerously-skip-permissions` to the claude subprocess. Do not use this for untrusted
 workloads — it grants the agent unrestricted access to all tools including file writes,
