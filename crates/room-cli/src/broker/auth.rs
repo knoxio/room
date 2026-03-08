@@ -1,7 +1,40 @@
+use room_protocol::{RoomConfig, RoomVisibility};
 use tokio::{io::AsyncWriteExt, net::unix::OwnedWriteHalf};
 use uuid::Uuid;
 
 use super::state::TokenMap;
+
+/// Check whether `username` is allowed to join a room with the given config.
+///
+/// Returns `Ok(())` if allowed, or `Err(reason)` if denied.
+/// Rooms without config (legacy single-room mode) are always allowed.
+pub(crate) fn check_join_permission(
+    username: &str,
+    config: Option<&RoomConfig>,
+) -> Result<(), String> {
+    let config = match config {
+        Some(c) => c,
+        None => return Ok(()), // Legacy rooms have no config — always allow.
+    };
+
+    match config.visibility {
+        RoomVisibility::Public => Ok(()),
+        RoomVisibility::Private | RoomVisibility::Unlisted => {
+            if username == config.created_by || config.invite_list.contains(username) {
+                Ok(())
+            } else {
+                Err("permission denied: this room requires an invite to join".to_owned())
+            }
+        }
+        RoomVisibility::Dm => {
+            if config.invite_list.contains(username) {
+                Ok(())
+            } else {
+                Err("permission denied: DM rooms are restricted to the two participants".to_owned())
+            }
+        }
+    }
+}
 
 /// Issue a session token for `username` if the name is not already taken.
 ///
@@ -29,13 +62,27 @@ pub(crate) async fn validate_token(token: &str, token_map: &TokenMap) -> Option<
 
 /// Handle a one-shot JOIN request over an already-open write half.
 ///
-/// Calls `issue_token` and writes the response JSON to the socket.
-/// If the username is already taken, writes an error envelope instead.
+/// Checks join permission against the room config, then calls `issue_token`
+/// and writes the response JSON to the socket. Rejects unauthorized joins
+/// with an error envelope.
 pub(crate) async fn handle_oneshot_join(
     username: String,
     mut write_half: OwnedWriteHalf,
     token_map: &TokenMap,
+    config: Option<&RoomConfig>,
 ) -> anyhow::Result<()> {
+    // Check visibility/ACL before issuing a token.
+    if let Err(reason) = check_join_permission(&username, config) {
+        let err = serde_json::json!({
+            "type": "error",
+            "code": "join_denied",
+            "message": reason,
+            "username": username
+        });
+        write_half.write_all(format!("{err}\n").as_bytes()).await?;
+        return Ok(());
+    }
+
     match issue_token(&username, token_map).await {
         Ok(token) => {
             let resp = serde_json::json!({"type":"token","token": token,"username": username});
@@ -57,7 +104,8 @@ pub(crate) async fn handle_oneshot_join(
 
 #[cfg(test)]
 mod tests {
-    use super::{issue_token, validate_token};
+    use super::{check_join_permission, issue_token, validate_token};
+    use room_protocol::{RoomConfig, RoomVisibility};
     use std::{collections::HashMap, sync::Arc};
     use tokio::sync::Mutex;
 
@@ -150,5 +198,81 @@ mod tests {
             validate_token(&token, &map).await.is_none(),
             "token must be invalid after reauth clears it"
         );
+    }
+
+    // ── check_join_permission ─────────────────────────────────────────────
+
+    #[test]
+    fn join_public_room_always_allowed() {
+        let config = RoomConfig::public("owner");
+        assert!(check_join_permission("anyone", Some(&config)).is_ok());
+    }
+
+    #[test]
+    fn join_private_room_denied_without_invite() {
+        let config = RoomConfig {
+            visibility: RoomVisibility::Private,
+            max_members: None,
+            invite_list: ["alice".to_owned()].into(),
+            created_by: "owner".to_owned(),
+            created_at: "2026-01-01T00:00:00Z".to_owned(),
+        };
+        assert!(check_join_permission("alice", Some(&config)).is_ok());
+        assert!(check_join_permission("bob", Some(&config)).is_err());
+    }
+
+    #[test]
+    fn join_private_room_creator_always_allowed() {
+        let config = RoomConfig {
+            visibility: RoomVisibility::Private,
+            max_members: None,
+            invite_list: Default::default(),
+            created_by: "owner".to_owned(),
+            created_at: "2026-01-01T00:00:00Z".to_owned(),
+        };
+        assert!(check_join_permission("owner", Some(&config)).is_ok());
+        assert!(check_join_permission("stranger", Some(&config)).is_err());
+    }
+
+    #[test]
+    fn join_unlisted_room_requires_invite() {
+        let config = RoomConfig {
+            visibility: RoomVisibility::Unlisted,
+            max_members: None,
+            invite_list: ["invited".to_owned()].into(),
+            created_by: "owner".to_owned(),
+            created_at: "2026-01-01T00:00:00Z".to_owned(),
+        };
+        assert!(check_join_permission("invited", Some(&config)).is_ok());
+        assert!(check_join_permission("owner", Some(&config)).is_ok());
+        assert!(check_join_permission("stranger", Some(&config)).is_err());
+    }
+
+    #[test]
+    fn join_dm_room_only_participants() {
+        let config = RoomConfig::dm("alice", "bob");
+        assert!(check_join_permission("alice", Some(&config)).is_ok());
+        assert!(check_join_permission("bob", Some(&config)).is_ok());
+        assert!(check_join_permission("eve", Some(&config)).is_err());
+    }
+
+    #[test]
+    fn join_dm_creator_not_special() {
+        // In DM rooms, even the creator must be in the invite_list.
+        // RoomConfig::dm always adds both users, but test the logic directly.
+        let config = RoomConfig {
+            visibility: RoomVisibility::Dm,
+            max_members: Some(2),
+            invite_list: ["bob".to_owned()].into(), // only bob
+            created_by: "alice".to_owned(),
+            created_at: "2026-01-01T00:00:00Z".to_owned(),
+        };
+        assert!(check_join_permission("bob", Some(&config)).is_ok());
+        assert!(check_join_permission("alice", Some(&config)).is_err());
+    }
+
+    #[test]
+    fn join_no_config_always_allowed() {
+        assert!(check_join_permission("anyone", None).is_ok());
     }
 }

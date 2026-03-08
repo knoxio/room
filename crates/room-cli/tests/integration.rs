@@ -2652,6 +2652,7 @@ async fn rest_send_dm_is_persisted() {
 // ── Daemon (multi-room) integration tests ────────────────────────────────────
 
 use room_cli::broker::daemon::{DaemonConfig, DaemonState};
+use room_protocol::{dm_room_id, RoomConfig, RoomVisibility};
 
 struct TestDaemon {
     pub socket_path: PathBuf,
@@ -2659,6 +2660,43 @@ struct TestDaemon {
 }
 
 impl TestDaemon {
+    /// Start a daemon with configured rooms (room_id, optional RoomConfig).
+    async fn start_with_configs(rooms: Vec<(&str, Option<RoomConfig>)>) -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let socket_path = dir.path().join("roomd.sock");
+
+        let config = DaemonConfig {
+            socket_path: socket_path.clone(),
+            data_dir: dir.path().to_owned(),
+            ws_port: None,
+        };
+
+        let daemon = DaemonState::new(config);
+        for (room_id, room_config) in rooms {
+            match room_config {
+                Some(cfg) => daemon.create_room_with_config(room_id, cfg).await.unwrap(),
+                None => daemon.create_room(room_id).await.unwrap(),
+            }
+        }
+
+        tokio::spawn(async move {
+            daemon.run().await.ok();
+        });
+
+        for _ in 0..100 {
+            if socket_path.exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(socket_path.exists(), "daemon did not start in time");
+
+        Self {
+            socket_path,
+            _dir: dir,
+        }
+    }
+
     async fn start(rooms: &[&str]) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let socket_path = dir.path().join("roomd.sock");
@@ -2885,4 +2923,101 @@ async fn daemon_token_scoped_to_room() {
     let v: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
     assert_eq!(v["type"], "error");
     assert_eq!(v["code"], "invalid_token");
+}
+
+// ── DM room visibility integration tests ─────────────────────────────────
+
+#[tokio::test]
+async fn daemon_dm_room_participants_can_join() {
+    let dm_id = dm_room_id("alice", "bob");
+    let config = RoomConfig::dm("alice", "bob");
+    let td = TestDaemon::start_with_configs(vec![(&dm_id, Some(config))]).await;
+
+    let token_a = daemon_join(&td.socket_path, &dm_id, "alice").await;
+    assert!(!token_a.is_empty());
+
+    let token_b = daemon_join(&td.socket_path, &dm_id, "bob").await;
+    assert!(!token_b.is_empty());
+}
+
+#[tokio::test]
+async fn daemon_dm_room_non_participant_rejected() {
+    let dm_id = dm_room_id("alice", "bob");
+    let config = RoomConfig::dm("alice", "bob");
+    let td = TestDaemon::start_with_configs(vec![(&dm_id, Some(config))]).await;
+
+    let stream = UnixStream::connect(&td.socket_path).await.unwrap();
+    let (r, mut w) = stream.into_split();
+    w.write_all(format!("ROOM:{dm_id}:JOIN:eve\n").as_bytes())
+        .await
+        .unwrap();
+
+    let mut reader = BufReader::new(r);
+    let mut line = String::new();
+    reader.read_line(&mut line).await.unwrap();
+    let v: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+    assert_eq!(v["type"], "error");
+    assert_eq!(v["code"], "join_denied");
+}
+
+#[tokio::test]
+async fn daemon_dm_room_send_and_receive() {
+    let dm_id = dm_room_id("alice", "bob");
+    let config = RoomConfig::dm("alice", "bob");
+    let td = TestDaemon::start_with_configs(vec![(&dm_id, Some(config))]).await;
+
+    let token = daemon_join(&td.socket_path, &dm_id, "alice").await;
+    let resp = daemon_send(&td.socket_path, &dm_id, &token, "private hello").await;
+    assert_eq!(resp["type"], "message");
+    assert_eq!(resp["content"], "private hello");
+    assert_eq!(resp["user"], "alice");
+    assert_eq!(resp["room"], dm_id);
+}
+
+#[tokio::test]
+async fn daemon_private_room_requires_invite() {
+    let config = RoomConfig {
+        visibility: RoomVisibility::Private,
+        max_members: None,
+        invite_list: ["member".to_owned()].into(),
+        created_by: "owner".to_owned(),
+        created_at: "2026-01-01T00:00:00Z".to_owned(),
+    };
+    let td = TestDaemon::start_with_configs(vec![("secret-room", Some(config))]).await;
+
+    // Owner can join (creator privilege).
+    let token_owner = daemon_join(&td.socket_path, "secret-room", "owner").await;
+    assert!(!token_owner.is_empty());
+
+    // Invited member can join.
+    let token_member = daemon_join(&td.socket_path, "secret-room", "member").await;
+    assert!(!token_member.is_empty());
+
+    // Uninvited user is rejected.
+    let stream = UnixStream::connect(&td.socket_path).await.unwrap();
+    let (r, mut w) = stream.into_split();
+    w.write_all(b"ROOM:secret-room:JOIN:stranger\n")
+        .await
+        .unwrap();
+
+    let mut reader = BufReader::new(r);
+    let mut line = String::new();
+    reader.read_line(&mut line).await.unwrap();
+    let v: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+    assert_eq!(v["type"], "error");
+    assert_eq!(v["code"], "join_denied");
+}
+
+#[tokio::test]
+async fn daemon_public_room_allows_anyone() {
+    let config = RoomConfig::public("owner");
+    let td = TestDaemon::start_with_configs(vec![("open-room", Some(config))]).await;
+
+    let token = daemon_join(&td.socket_path, "open-room", "random-user").await;
+    assert!(!token.is_empty());
+}
+
+#[tokio::test]
+async fn dm_room_id_both_directions_same() {
+    assert_eq!(dm_room_id("alice", "bob"), dm_room_id("bob", "alice"));
 }

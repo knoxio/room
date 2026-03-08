@@ -4,6 +4,7 @@ use std::{
     sync::{atomic::AtomicU64, Arc},
 };
 
+use room_protocol::RoomConfig;
 use tokio::sync::{broadcast, watch, Mutex};
 
 use crate::plugin::PluginRegistry;
@@ -41,4 +42,7 @@ pub(crate) struct RoomState {
     pub(crate) seq_counter: Arc<AtomicU64>,
     /// Plugin registry for dispatching `/` commands to plugins.
     pub(crate) plugin_registry: Arc<PluginRegistry>,
+    /// Room visibility and access control configuration.
+    /// `None` for rooms created without explicit config (backward compat).
+    pub(crate) config: Option<RoomConfig>,
 }

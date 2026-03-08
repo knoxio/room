@@ -81,6 +81,7 @@ impl Broker {
             shutdown: Arc::new(shutdown_tx),
             seq_counter: Arc::new(AtomicU64::new(0)),
             plugin_registry: Arc::new(registry),
+            config: None,
         });
         let next_client_id = Arc::new(AtomicU64::new(0));
 
@@ -169,7 +170,13 @@ async fn handle_client(
     }
 
     if let Some(join_user) = first_line.strip_prefix("JOIN:") {
-        return handle_oneshot_join(join_user.to_owned(), write_half, &token_map).await;
+        return handle_oneshot_join(
+            join_user.to_owned(),
+            write_half,
+            &token_map,
+            state.config.as_ref(),
+        )
+        .await;
     }
 
     // Remaining path: full interactive join — first_line is the username.

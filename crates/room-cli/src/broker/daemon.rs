@@ -123,10 +123,59 @@ impl DaemonState {
             shutdown: Arc::new(shutdown_tx),
             seq_counter: Arc::new(AtomicU64::new(0)),
             plugin_registry: Arc::new(registry),
+            config: None,
         });
 
         rooms.insert(room_id.to_owned(), state);
         Ok(())
+    }
+
+    /// Create a room with explicit configuration. Returns `Err` if room already exists.
+    pub async fn create_room_with_config(
+        &self,
+        room_id: &str,
+        config: room_protocol::RoomConfig,
+    ) -> Result<(), String> {
+        let mut rooms = self.rooms.lock().await;
+        if rooms.contains_key(room_id) {
+            return Err(format!("room already exists: {room_id}"));
+        }
+
+        let chat_path = self.config.chat_path(room_id);
+        let (shutdown_tx, _) = watch::channel(false);
+
+        let mut registry = PluginRegistry::new();
+        registry
+            .register(Box::new(plugin::help::HelpPlugin))
+            .map_err(|e| format!("plugin error: {e}"))?;
+        registry
+            .register(Box::new(plugin::stats::StatsPlugin))
+            .map_err(|e| format!("plugin error: {e}"))?;
+
+        let state = Arc::new(RoomState {
+            clients: Arc::new(Mutex::new(HashMap::new())),
+            status_map: Arc::new(Mutex::new(HashMap::new())),
+            host_user: Arc::new(Mutex::new(None)),
+            token_map: Arc::new(Mutex::new(HashMap::new())),
+            chat_path: Arc::new(chat_path),
+            room_id: Arc::new(room_id.to_owned()),
+            shutdown: Arc::new(shutdown_tx),
+            seq_counter: Arc::new(AtomicU64::new(0)),
+            plugin_registry: Arc::new(registry),
+            config: Some(config),
+        });
+
+        rooms.insert(room_id.to_owned(), state);
+        Ok(())
+    }
+
+    /// Get a room's config, if it exists.
+    pub async fn get_room_config(&self, room_id: &str) -> Option<room_protocol::RoomConfig> {
+        self.rooms
+            .lock()
+            .await
+            .get(room_id)
+            .and_then(|s| s.config.clone())
     }
 
     /// Destroy a room. Returns `Err` if the room does not exist.
@@ -303,6 +352,7 @@ async fn dispatch_connection(
             join_user.to_owned(),
             write_half,
             &state.token_map,
+            state.config.as_ref(),
         )
         .await;
     }
@@ -504,5 +554,70 @@ mod tests {
     fn config_default_socket_path() {
         let config = DaemonConfig::default();
         assert_eq!(config.socket_path, PathBuf::from("/tmp/roomd.sock"));
+    }
+
+    // ── create_room_with_config ───────────────────────────────────────────
+
+    #[tokio::test]
+    async fn create_room_with_dm_config() {
+        let daemon = DaemonState::new(DaemonConfig::default());
+        let config = room_protocol::RoomConfig::dm("alice", "bob");
+        assert!(daemon
+            .create_room_with_config("dm-alice-bob", config)
+            .await
+            .is_ok());
+
+        let state = get_room(&daemon, "dm-alice-bob").await;
+        let cfg = state.config.as_ref().unwrap();
+        assert_eq!(cfg.visibility, room_protocol::RoomVisibility::Dm);
+        assert_eq!(cfg.max_members, Some(2));
+        assert!(cfg.invite_list.contains("alice"));
+        assert!(cfg.invite_list.contains("bob"));
+    }
+
+    #[tokio::test]
+    async fn create_room_with_config_duplicate_fails() {
+        let daemon = DaemonState::new(DaemonConfig::default());
+        let config = room_protocol::RoomConfig::public("owner");
+        daemon
+            .create_room_with_config("dup", config.clone())
+            .await
+            .unwrap();
+        assert!(daemon.create_room_with_config("dup", config).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn get_room_config_returns_none_for_unconfigured() {
+        let daemon = DaemonState::new(DaemonConfig::default());
+        daemon.create_room("plain").await.unwrap();
+        assert!(daemon.get_room_config("plain").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn get_room_config_returns_config_when_present() {
+        let daemon = DaemonState::new(DaemonConfig::default());
+        let config = room_protocol::RoomConfig::dm("alice", "bob");
+        daemon
+            .create_room_with_config("dm-alice-bob", config)
+            .await
+            .unwrap();
+        let cfg = daemon.get_room_config("dm-alice-bob").await.unwrap();
+        assert_eq!(cfg.visibility, room_protocol::RoomVisibility::Dm);
+    }
+
+    #[tokio::test]
+    async fn dm_room_id_deterministic_and_lookup_works() {
+        let daemon = DaemonState::new(DaemonConfig::default());
+        let room_id = room_protocol::dm_room_id("bob", "alice");
+        assert_eq!(room_id, "dm-alice-bob");
+
+        let config = room_protocol::RoomConfig::dm("bob", "alice");
+        daemon
+            .create_room_with_config(&room_id, config)
+            .await
+            .unwrap();
+        assert!(daemon.has_room("dm-alice-bob").await);
+        // Reverse order gives the same room_id
+        assert_eq!(room_protocol::dm_room_id("alice", "bob"), "dm-alice-bob");
     }
 }

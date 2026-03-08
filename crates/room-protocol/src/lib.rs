@@ -1,6 +1,85 @@
+use std::collections::HashSet;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+
+/// Visibility level for a room, controlling who can discover and join it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RoomVisibility {
+    /// Anyone can discover and join.
+    Public,
+    /// Discoverable in listings but requires invite to join.
+    Private,
+    /// Not discoverable; join requires knowing room ID + invite.
+    Unlisted,
+    /// Private 2-person room, auto-created by `/dm` command.
+    Dm,
+}
+
+/// Configuration for a room's access controls and metadata.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoomConfig {
+    pub visibility: RoomVisibility,
+    /// Maximum number of members. `None` = unlimited.
+    pub max_members: Option<usize>,
+    /// Usernames allowed to join (for private/unlisted/dm rooms).
+    pub invite_list: HashSet<String>,
+    /// Username of the room creator.
+    pub created_by: String,
+    /// ISO 8601 creation timestamp.
+    pub created_at: String,
+}
+
+impl RoomConfig {
+    /// Create a default public room config.
+    pub fn public(created_by: &str) -> Self {
+        Self {
+            visibility: RoomVisibility::Public,
+            max_members: None,
+            invite_list: HashSet::new(),
+            created_by: created_by.to_owned(),
+            created_at: Utc::now().to_rfc3339(),
+        }
+    }
+
+    /// Create a DM room config for two users.
+    pub fn dm(user_a: &str, user_b: &str) -> Self {
+        let mut invite_list = HashSet::new();
+        invite_list.insert(user_a.to_owned());
+        invite_list.insert(user_b.to_owned());
+        Self {
+            visibility: RoomVisibility::Dm,
+            max_members: Some(2),
+            invite_list,
+            created_by: user_a.to_owned(),
+            created_at: Utc::now().to_rfc3339(),
+        }
+    }
+}
+
+/// Compute the deterministic room ID for a DM between two users.
+///
+/// Sorts usernames alphabetically so `/dm alice` from bob and `/dm bob` from
+/// alice both resolve to the same room.
+pub fn dm_room_id(user_a: &str, user_b: &str) -> String {
+    let (first, second) = if user_a < user_b {
+        (user_a, user_b)
+    } else {
+        (user_b, user_a)
+    };
+    format!("dm-{first}-{second}")
+}
+
+/// Entry returned by room listing (discovery).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoomListEntry {
+    pub room_id: String,
+    pub visibility: RoomVisibility,
+    pub member_count: usize,
+    pub created_by: String,
+}
 
 /// Wire format for all messages stored in the chat file and sent over the socket.
 ///
@@ -560,5 +639,104 @@ mod tests {
         assert_eq!(msg.room(), "testroom");
         assert_eq!(msg.user(), "carol");
         assert_eq!(msg.ts(), &fixed_ts());
+    }
+
+    // ── RoomVisibility tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn room_visibility_serde_round_trip() {
+        for vis in [
+            RoomVisibility::Public,
+            RoomVisibility::Private,
+            RoomVisibility::Unlisted,
+            RoomVisibility::Dm,
+        ] {
+            let json = serde_json::to_string(&vis).unwrap();
+            let back: RoomVisibility = serde_json::from_str(&json).unwrap();
+            assert_eq!(vis, back);
+        }
+    }
+
+    #[test]
+    fn room_visibility_rename_all_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&RoomVisibility::Public).unwrap(),
+            r#""public""#
+        );
+        assert_eq!(
+            serde_json::to_string(&RoomVisibility::Dm).unwrap(),
+            r#""dm""#
+        );
+    }
+
+    // ── dm_room_id tests ──────────────────────────────────────────────────────
+
+    #[test]
+    fn dm_room_id_sorts_alphabetically() {
+        assert_eq!(dm_room_id("alice", "bob"), "dm-alice-bob");
+        assert_eq!(dm_room_id("bob", "alice"), "dm-alice-bob");
+    }
+
+    #[test]
+    fn dm_room_id_same_user() {
+        // Degenerate case — should still produce a valid ID
+        assert_eq!(dm_room_id("alice", "alice"), "dm-alice-alice");
+    }
+
+    #[test]
+    fn dm_room_id_is_deterministic() {
+        let id1 = dm_room_id("r2d2", "saphire");
+        let id2 = dm_room_id("saphire", "r2d2");
+        assert_eq!(id1, id2);
+        assert_eq!(id1, "dm-r2d2-saphire");
+    }
+
+    // ── RoomConfig tests ──────────────────────────────────────────────────────
+
+    #[test]
+    fn room_config_public_defaults() {
+        let config = RoomConfig::public("alice");
+        assert_eq!(config.visibility, RoomVisibility::Public);
+        assert!(config.max_members.is_none());
+        assert!(config.invite_list.is_empty());
+        assert_eq!(config.created_by, "alice");
+    }
+
+    #[test]
+    fn room_config_dm_has_two_users() {
+        let config = RoomConfig::dm("alice", "bob");
+        assert_eq!(config.visibility, RoomVisibility::Dm);
+        assert_eq!(config.max_members, Some(2));
+        assert!(config.invite_list.contains("alice"));
+        assert!(config.invite_list.contains("bob"));
+        assert_eq!(config.invite_list.len(), 2);
+    }
+
+    #[test]
+    fn room_config_serde_round_trip() {
+        let config = RoomConfig::dm("alice", "bob");
+        let json = serde_json::to_string(&config).unwrap();
+        let back: RoomConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.visibility, RoomVisibility::Dm);
+        assert_eq!(back.max_members, Some(2));
+        assert!(back.invite_list.contains("alice"));
+        assert!(back.invite_list.contains("bob"));
+    }
+
+    // ── RoomListEntry tests ───────────────────────────────────────────────────
+
+    #[test]
+    fn room_list_entry_serde_round_trip() {
+        let entry = RoomListEntry {
+            room_id: "dev-chat".into(),
+            visibility: RoomVisibility::Public,
+            member_count: 5,
+            created_by: "alice".into(),
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        let back: RoomListEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.room_id, "dev-chat");
+        assert_eq!(back.visibility, RoomVisibility::Public);
+        assert_eq!(back.member_count, 5);
     }
 }
