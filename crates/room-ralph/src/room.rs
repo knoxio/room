@@ -87,32 +87,18 @@ pub fn poll_messages(room_id: &str, token: &str) -> Result<Vec<Message>, String>
 
 /// Set the agent's status in the room via `/set_status`.
 ///
-/// Runs `room send <room_id> -t <token> /set_status <status>`.
-/// Note: `/set_status` is a `CommandResult::Handled` command — the broker
-/// broadcasts the status change but sends no reply to oneshot connections,
-/// causing `room send` to exit non-zero with an EOF error (#234). The status
-/// IS set server-side, so we treat a non-zero exit as success here.
+/// Delegates to `send_message` with the formatted `/set_status` command.
+/// Pass an empty string to clear the status.
 pub fn set_status(room_id: &str, token: &str, status: &str) -> Result<(), String> {
-    let message = if status.is_empty() {
+    let message = build_set_status_message(status);
+    send_message(room_id, token, &message)
+}
+
+fn build_set_status_message(status: &str) -> String {
+    if status.is_empty() {
         "/set_status".to_owned()
     } else {
         format!("/set_status {status}")
-    };
-    let output = Command::new("room")
-        .args(["send", room_id, "-t", token, &message])
-        .output()
-        .map_err(|e| format!("failed to run `room send /set_status`: {e}"))?;
-
-    // Accept both success and the known EOF error (#234) as OK.
-    if output.status.success() {
-        return Ok(());
-    }
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    if stderr.contains("EOF while parsing") {
-        // Known #234 — status was set server-side despite the error.
-        Ok(())
-    } else {
-        Err(format!("room set_status failed: {stderr}"))
     }
 }
 
@@ -186,21 +172,17 @@ mod tests {
         assert!(!detect_token_expiry("valid response"));
     }
 
-    /// The known EOF error from #234 that set_status treats as success.
-    const EOF_ERROR: &str =
-        "Error: broker returned invalid JSON: EOF while parsing a value at line 1 column 0";
-
     #[test]
-    fn set_status_eof_pattern_detected() {
-        // Verify the EOF substring match used in set_status catches the real error.
-        assert!(EOF_ERROR.contains("EOF while parsing"));
+    fn set_status_message_with_status_text() {
+        assert_eq!(
+            build_set_status_message("reading src/broker.rs"),
+            "/set_status reading src/broker.rs"
+        );
     }
 
     #[test]
-    fn set_status_other_errors_not_masked() {
-        // Errors unrelated to #234 should NOT match the EOF pattern.
-        let other = "Error: connection refused";
-        assert!(!other.contains("EOF while parsing"));
+    fn set_status_message_empty_clears_status() {
+        assert_eq!(build_set_status_message(""), "/set_status");
     }
 
     #[test]
