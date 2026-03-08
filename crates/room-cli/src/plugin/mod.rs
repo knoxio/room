@@ -309,6 +309,10 @@ const RESERVED_COMMANDS: &[&str] = &[
     "kick",
     "reauth",
     "clear-tokens",
+    "dm",
+    "claim",
+    "reply",
+    "room-info",
     "exit",
     "clear",
 ];
