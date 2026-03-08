@@ -2,6 +2,8 @@
 ///
 /// Each test spins up a real broker (bound to a temp socket), connects raw
 /// Unix-socket clients, and verifies behaviour at the wire level.
+mod common;
+
 use std::{path::PathBuf, time::Duration};
 
 use futures_util::{SinkExt, StreamExt};
@@ -36,24 +38,9 @@ impl TestBroker {
     /// Start a broker with both UDS and WebSocket/REST transport.
     /// Returns (TestBroker, ws_port).
     async fn start_with_ws(room_id: &str) -> (Self, u16) {
-        // Bind to port 0 to get a free ephemeral port, then release it.
-        let tmp = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = tmp.local_addr().unwrap().port();
-        drop(tmp);
-
+        let port = common::free_port();
         let broker = Self::start_inner(room_id, Some(port)).await;
-
-        // Wait for the HTTP server to be ready.
-        for _ in 0..100 {
-            if tokio::net::TcpStream::connect(("127.0.0.1", port))
-                .await
-                .is_ok()
-            {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-
+        common::wait_for_tcp(port, Duration::from_secs(1)).await;
         (broker, port)
     }
 
@@ -67,14 +54,7 @@ impl TestBroker {
             broker.run().await.ok();
         });
 
-        // Wait until the socket file appears (broker has bound)
-        for _ in 0..100 {
-            if socket_path.exists() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        assert!(socket_path.exists(), "broker did not start in time");
+        common::wait_for_socket(&socket_path, Duration::from_secs(1)).await;
 
         Self {
             socket_path,
@@ -2684,13 +2664,7 @@ impl TestDaemon {
             daemon.run().await.ok();
         });
 
-        for _ in 0..100 {
-            if socket_path.exists() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        assert!(socket_path.exists(), "daemon did not start in time");
+        common::wait_for_socket(&socket_path, Duration::from_secs(1)).await;
 
         Self {
             socket_path,
@@ -2699,37 +2673,9 @@ impl TestDaemon {
     }
 
     async fn start(rooms: &[&str]) -> Self {
-        let dir = tempfile::tempdir().unwrap();
-        let socket_path = dir.path().join("roomd.sock");
-
-        let config = DaemonConfig {
-            socket_path: socket_path.clone(),
-            data_dir: dir.path().to_owned(),
-            ws_port: None,
-        };
-
-        let daemon = DaemonState::new(config);
-        for room_id in rooms {
-            daemon.create_room(room_id).await.unwrap();
-        }
-
-        tokio::spawn(async move {
-            daemon.run().await.ok();
-        });
-
-        // Wait until the socket file appears.
-        for _ in 0..100 {
-            if socket_path.exists() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        assert!(socket_path.exists(), "daemon did not start in time");
-
-        Self {
-            socket_path,
-            _dir: dir,
-        }
+        let rooms_with_config: Vec<(&str, Option<RoomConfig>)> =
+            rooms.iter().map(|id| (*id, None)).collect();
+        Self::start_with_configs(rooms_with_config).await
     }
 }
 

@@ -7,6 +7,8 @@
 /// Tests are serialized via `SMOKE_LOCK` because spawning 5 broker processes
 /// simultaneously causes disk I/O contention on encrypted volumes, preventing
 /// any of them from starting within a reasonable timeout.
+mod common;
+
 use std::{
     process::Stdio,
     sync::{LazyLock, Mutex},
@@ -20,12 +22,6 @@ use tokio_tungstenite::{connect_async, tungstenite::Message as TungsteniteMsg};
 /// Serialize smoke test execution to prevent disk I/O contention when multiple
 /// broker processes start simultaneously on encrypted volumes.
 static SMOKE_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
-
-/// Find a free ephemeral port by binding to port 0 and releasing.
-fn free_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    listener.local_addr().unwrap().port()
-}
 
 /// Find the compiled `room` binary. Works with `cargo test`.
 fn room_binary() -> std::path::PathBuf {
@@ -42,20 +38,16 @@ fn room_binary() -> std::path::PathBuf {
 }
 
 /// Spawn a `room` broker process with a unique room ID and WS port.
-/// Returns (child, ws_port, room_id).
+/// Returns (child, ws_port).
 /// The caller must kill the child when done.
 async fn spawn_broker(room_id: &str) -> (tokio::process::Child, u16) {
-    let port = free_port();
+    let port = common::free_port();
     let bin = room_binary();
 
-    // Create a temp directory for the chat file.
     let chat_file = format!("/tmp/ws_smoke_{room_id}.chat");
-    // Clean up any stale files from previous runs.
-    let _ = std::fs::remove_file(&chat_file);
     let token_file = format!("/tmp/ws_smoke_{room_id}.tokens");
-    let _ = std::fs::remove_file(&token_file);
     let socket_path = format!("/tmp/room-{room_id}.sock");
-    let _ = std::fs::remove_file(&socket_path);
+    common::cleanup_stale_files(&[&chat_file, &token_file, &socket_path]);
 
     let mut child = tokio::process::Command::new(&bin)
         .args([
@@ -74,7 +66,7 @@ async fn spawn_broker(room_id: &str) -> (tokio::process::Child, u16) {
         .spawn()
         .unwrap_or_else(|e| panic!("failed to spawn room binary at {}: {e}", bin.display()));
 
-    // Wait for the WS server to be ready.
+    // Wait for TCP readiness with early crash detection.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
         if tokio::net::TcpStream::connect(("127.0.0.1", port))
@@ -83,7 +75,6 @@ async fn spawn_broker(room_id: &str) -> (tokio::process::Child, u16) {
         {
             break;
         }
-        // Check if the broker crashed before the port was ready.
         if let Ok(Some(status)) = child.try_wait() {
             panic!("broker exited with {status} before WS server was ready on port {port}");
         }
