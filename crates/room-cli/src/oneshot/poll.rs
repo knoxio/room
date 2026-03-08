@@ -130,8 +130,15 @@ pub async fn cmd_watch(room_id: &str, token: &str, interval_secs: u64) -> anyhow
 
 /// One-shot poll subcommand: read messages since cursor, print as NDJSON, update cursor.
 ///
-/// Reads the caller's username from the session token file.
-pub async fn cmd_poll(room_id: &str, token: &str, since: Option<String>) -> anyhow::Result<()> {
+/// Reads the caller's username from the session token file. When `mentions_only` is
+/// true, only messages that @mention the caller's username are printed (cursor still
+/// advances past all messages).
+pub async fn cmd_poll(
+    room_id: &str,
+    token: &str,
+    since: Option<String>,
+    mentions_only: bool,
+) -> anyhow::Result<()> {
     let username = username_from_token(room_id, token)?;
     let meta_path = PathBuf::from(format!("/tmp/room-{room_id}.meta"));
     let chat_path = chat_path_from_meta(room_id, &meta_path);
@@ -140,6 +147,9 @@ pub async fn cmd_poll(room_id: &str, token: &str, since: Option<String>) -> anyh
     let messages =
         poll_messages(&chat_path, &cursor_path, Some(&username), since.as_deref()).await?;
     for msg in &messages {
+        if mentions_only && !msg.mentions().iter().any(|m| m == &username) {
+            continue;
+        }
         println!("{}", serde_json::to_string(msg)?);
     }
     Ok(())
@@ -170,7 +180,11 @@ pub async fn poll_messages_multi(
 ///
 /// Resolves the username from the token by trying each room in order. Each room's cursor
 /// is updated independently.
-pub async fn cmd_poll_multi(room_ids: &[String], token: &str) -> anyhow::Result<()> {
+pub async fn cmd_poll_multi(
+    room_ids: &[String],
+    token: &str,
+    mentions_only: bool,
+) -> anyhow::Result<()> {
     // Resolve username by trying the token against each room
     let username = resolve_username_from_rooms(room_ids, token)?;
 
@@ -185,6 +199,9 @@ pub async fn cmd_poll_multi(room_ids: &[String], token: &str) -> anyhow::Result<
     let room_refs: Vec<(&str, &Path)> = rooms.iter().map(|(id, p)| (*id, p.as_path())).collect();
     let messages = poll_messages_multi(&room_refs, &username).await?;
     for msg in &messages {
+        if mentions_only && !msg.mentions().iter().any(|m| m == &username) {
+            continue;
+        }
         println!("{}", serde_json::to_string(msg)?);
     }
     Ok(())

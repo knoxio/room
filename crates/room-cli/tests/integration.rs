@@ -1759,7 +1759,7 @@ async fn pull_messages_does_not_update_cursor() {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // cmd_poll advances the canonical cursor.
-    room_cli::oneshot::cmd_poll(room_id, &token, None)
+    room_cli::oneshot::cmd_poll(room_id, &token, None, false)
         .await
         .unwrap();
 

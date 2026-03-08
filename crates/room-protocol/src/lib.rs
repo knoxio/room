@@ -223,6 +223,29 @@ impl Message {
         }
     }
 
+    /// Returns the text content of this message, or `None` for variants without content
+    /// (Join, Leave, Command).
+    pub fn content(&self) -> Option<&str> {
+        match self {
+            Self::Message { content, .. }
+            | Self::Reply { content, .. }
+            | Self::System { content, .. }
+            | Self::DirectMessage { content, .. } => Some(content),
+            Self::Join { .. } | Self::Leave { .. } | Self::Command { .. } => None,
+        }
+    }
+
+    /// Extract @mentions from this message's content.
+    ///
+    /// Returns an empty vec for variants without content (Join, Leave, Command)
+    /// or content with no @mentions.
+    pub fn mentions(&self) -> Vec<String> {
+        match self.content() {
+            Some(content) => parse_mentions(content),
+            None => Vec::new(),
+        }
+    }
+
     /// Assign a broker-issued sequence number to this message.
     pub fn set_seq(&mut self, seq: u64) {
         let n = Some(seq);
@@ -330,6 +353,43 @@ pub fn make_dm(room: &str, user: &str, to: &str, content: impl Into<String>) -> 
         content: content.into(),
         seq: None,
     }
+}
+
+/// Extract @mentions from message content.
+///
+/// Matches `@username` patterns where usernames can contain alphanumerics, hyphens,
+/// and underscores. Stops at whitespace, punctuation (except `-` and `_`), or end of
+/// string. Skips email-like patterns (`user@domain`) by requiring the `@` to be at
+/// the start of the string or preceded by whitespace.
+///
+/// Returns a deduplicated list of mentioned usernames (without the `@` prefix),
+/// preserving first-occurrence order.
+pub fn parse_mentions(content: &str) -> Vec<String> {
+    let mut mentions = Vec::new();
+    let mut seen = HashSet::new();
+
+    for (i, _) in content.match_indices('@') {
+        // Skip if preceded by a non-whitespace char (email-like pattern)
+        if i > 0 {
+            let prev = content.as_bytes()[i - 1];
+            if !prev.is_ascii_whitespace() {
+                continue;
+            }
+        }
+
+        // Extract username chars after @
+        let rest = &content[i + 1..];
+        let end = rest
+            .find(|c: char| !c.is_alphanumeric() && c != '-' && c != '_')
+            .unwrap_or(rest.len());
+        let username = &rest[..end];
+
+        if !username.is_empty() && seen.insert(username.to_owned()) {
+            mentions.push(username.to_owned());
+        }
+    }
+
+    mentions
 }
 
 /// Parse a raw line from a client socket.
@@ -738,5 +798,110 @@ mod tests {
         assert_eq!(back.room_id, "dev-chat");
         assert_eq!(back.visibility, RoomVisibility::Public);
         assert_eq!(back.member_count, 5);
+    }
+
+    // ── parse_mentions tests ────────────────────────────────────────────────
+
+    #[test]
+    fn parse_mentions_single() {
+        assert_eq!(parse_mentions("hello @alice"), vec!["alice"]);
+    }
+
+    #[test]
+    fn parse_mentions_multiple() {
+        assert_eq!(
+            parse_mentions("@alice and @bob should see this"),
+            vec!["alice", "bob"]
+        );
+    }
+
+    #[test]
+    fn parse_mentions_at_start() {
+        assert_eq!(parse_mentions("@alice hello"), vec!["alice"]);
+    }
+
+    #[test]
+    fn parse_mentions_at_end() {
+        assert_eq!(parse_mentions("hello @alice"), vec!["alice"]);
+    }
+
+    #[test]
+    fn parse_mentions_with_hyphens_and_underscores() {
+        assert_eq!(parse_mentions("cc @my-agent_2"), vec!["my-agent_2"]);
+    }
+
+    #[test]
+    fn parse_mentions_deduplicates() {
+        assert_eq!(parse_mentions("@alice @bob @alice"), vec!["alice", "bob"]);
+    }
+
+    #[test]
+    fn parse_mentions_skips_email() {
+        assert!(parse_mentions("send to user@example.com").is_empty());
+    }
+
+    #[test]
+    fn parse_mentions_skips_bare_at() {
+        assert!(parse_mentions("@ alone").is_empty());
+    }
+
+    #[test]
+    fn parse_mentions_empty_content() {
+        assert!(parse_mentions("").is_empty());
+    }
+
+    #[test]
+    fn parse_mentions_no_mentions() {
+        assert!(parse_mentions("just a normal message").is_empty());
+    }
+
+    #[test]
+    fn parse_mentions_punctuation_after_username() {
+        assert_eq!(parse_mentions("hey @alice, what's up?"), vec!["alice"]);
+    }
+
+    #[test]
+    fn parse_mentions_multiple_at_signs() {
+        // user@@foo — second @ is preceded by non-whitespace, so skipped
+        assert_eq!(parse_mentions("@alice@@bob"), vec!["alice"]);
+    }
+
+    // ── content() and mentions() method tests ───────────────────────────────
+
+    #[test]
+    fn message_content_returns_text() {
+        let msg = make_message("r", "alice", "hello @bob");
+        assert_eq!(msg.content(), Some("hello @bob"));
+    }
+
+    #[test]
+    fn join_content_returns_none() {
+        let msg = make_join("r", "alice");
+        assert!(msg.content().is_none());
+    }
+
+    #[test]
+    fn message_mentions_extracts_usernames() {
+        let msg = make_message("r", "alice", "hey @bob and @carol");
+        assert_eq!(msg.mentions(), vec!["bob", "carol"]);
+    }
+
+    #[test]
+    fn join_mentions_returns_empty() {
+        let msg = make_join("r", "alice");
+        assert!(msg.mentions().is_empty());
+    }
+
+    #[test]
+    fn dm_mentions_works() {
+        let msg = make_dm("r", "alice", "bob", "cc @carol on this");
+        assert_eq!(msg.mentions(), vec!["carol"]);
+    }
+
+    #[test]
+    fn reply_content_returns_text() {
+        let msg = make_reply("r", "alice", "msg-1", "@bob noted");
+        assert_eq!(msg.content(), Some("@bob noted"));
+        assert_eq!(msg.mentions(), vec!["bob"]);
     }
 }

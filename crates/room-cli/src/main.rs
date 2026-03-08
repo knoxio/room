@@ -54,6 +54,9 @@ enum Cmd {
         /// Poll multiple rooms (comma-separated or repeated). Merges messages by timestamp.
         #[arg(long, value_delimiter = ',')]
         rooms: Vec<String>,
+        /// Only return messages that @mention the caller's username
+        #[arg(long)]
+        mentions_only: bool,
     },
     /// Fetch the last N messages from history without updating the poll cursor.
     ///
@@ -181,18 +184,19 @@ async fn main() -> anyhow::Result<()> {
             token,
             since,
             rooms,
+            mentions_only,
         }) => {
             if !rooms.is_empty() {
                 if since.is_some() {
                     anyhow::bail!("--since is not supported with --rooms (use per-room cursors)");
                 }
-                oneshot::cmd_poll_multi(&rooms, &token).await?;
+                oneshot::cmd_poll_multi(&rooms, &token, mentions_only).await?;
             } else {
                 let room_id = room_id.unwrap_or_else(|| {
                     eprintln!("error: room_id is required when --rooms is not given");
                     std::process::exit(1);
                 });
-                oneshot::cmd_poll(&room_id, &token, since).await?;
+                oneshot::cmd_poll(&room_id, &token, since, mentions_only).await?;
             }
         }
         Some(Cmd::Pull {
