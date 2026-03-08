@@ -245,16 +245,28 @@ room send myroom -t $TOKEN "opening PR for #42"
   Violations: if ba or joao sends "hold" at any point, **stop immediately**. Do not
   continue implementation. Wait for explicit go-ahead before resuming.
 - **Update your status at every milestone** using `/set_status`. This is mandatory — it
-  lets the host and other agents see what you are doing at a glance. Use short, descriptive
-  text:
+  lets the host and other agents see what you are doing at a glance. Status text must
+  include **what you are doing and the specific context** (file, feature, PR, issue).
+  A phase word alone is not enough.
+
+  Good (descriptive — tells the host exactly what is happening):
   ```
-  /set_status reading src/broker.rs
-  /set_status drafting Foo handler
-  /set_status running tests
-  /set_status fixing clippy
-  /set_status PR #42 open, awaiting review
-  /set_status blocked on #38
+  /set_status reading src/broker.rs for #42
+  /set_status drafting kick broadcast parser in tui/input.rs
+  /set_status running cargo test — 456 expected
+  /set_status fixing clippy warning in oneshot/who.rs
+  /set_status PR #236 open — remove kicked users from member panel
+  /set_status blocked on #38 — need schema decision
   ```
+
+  Bad (vague — forces the host to ask what you are doing):
+  ```
+  /set_status working
+  /set_status reading
+  /set_status testing
+  /set_status busy
+  ```
+
   Update whenever your activity changes. Stale statuses are worse than no status.
 - **Poll and send a milestone update at natural breakpoints:**
   - After reading the target file (before writing any code)

@@ -100,16 +100,20 @@ statuses make coordination harder.
 
 ### Required status updates
 
-| Phase | Status text |
-|---|---|
-| Starting work | `reading issue` or `reading <file>` |
-| Drafting code | `drafting <description>` |
-| Running tests | `running tests` |
-| Fixing CI | `fixing clippy` / `fixing tests` |
-| PR open | `PR #N open, awaiting review` |
-| Blocked | `blocked on <reason>` |
-| Done | `done — PR #N merged` |
-| Idle | *(clear status with `/set_status`)* |
+Status text must include **what you are doing and the specific context** (file, feature,
+PR, issue number). A phase word alone (`working`, `reading`, `testing`) is not useful —
+the host needs to know what is happening at a glance.
+
+| Phase | Good status | Bad status |
+|---|---|---|
+| Starting work | `reading src/broker.rs for #42` | `reading` |
+| Drafting code | `drafting kick parser in tui/input.rs` | `working` |
+| Running tests | `running cargo test — 461 expected` | `testing` |
+| Fixing CI | `fixing clippy in oneshot/who.rs` | `fixing` |
+| PR open | `PR #236 open — kicked users fix` | `PR open` |
+| Blocked | `blocked on #38 — need schema decision` | `blocked` |
+| Done | `done — PR #236 merged` | `done` |
+| Idle | *(clear status with `/set_status`)* | |
 
 ### How to set status
 
