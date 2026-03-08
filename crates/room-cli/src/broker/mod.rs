@@ -1,5 +1,6 @@
 pub(crate) mod auth;
 pub(crate) mod commands;
+pub mod daemon;
 pub(crate) mod fanout;
 pub(crate) mod state;
 pub(crate) mod ws;
@@ -365,7 +366,7 @@ async fn handle_client(
 /// Handle a one-shot SEND connection: read one message line, route it, echo it back, close.
 /// The sender is never registered in ClientMap/StatusMap and generates no join/leave events.
 /// DM envelopes are routed via `dm_and_persist`; all other messages are broadcast.
-async fn handle_oneshot_send(
+pub(crate) async fn handle_oneshot_send(
     username: String,
     mut reader: BufReader<OwnedReadHalf>,
     mut write_half: OwnedWriteHalf,

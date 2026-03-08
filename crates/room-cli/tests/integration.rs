@@ -2648,3 +2648,241 @@ async fn rest_send_dm_is_persisted() {
         .iter()
         .any(|m| matches!(m, Message::DirectMessage { content, to, .. } if content == "secret DM" && to == "recipient")));
 }
+
+// ── Daemon (multi-room) integration tests ────────────────────────────────────
+
+use room_cli::broker::daemon::{DaemonConfig, DaemonState};
+
+struct TestDaemon {
+    pub socket_path: PathBuf,
+    _dir: TempDir,
+}
+
+impl TestDaemon {
+    async fn start(rooms: &[&str]) -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let socket_path = dir.path().join("roomd.sock");
+
+        let config = DaemonConfig {
+            socket_path: socket_path.clone(),
+            data_dir: dir.path().to_owned(),
+            ws_port: None,
+        };
+
+        let daemon = DaemonState::new(config);
+        for room_id in rooms {
+            daemon.create_room(room_id).await.unwrap();
+        }
+
+        tokio::spawn(async move {
+            daemon.run().await.ok();
+        });
+
+        // Wait until the socket file appears.
+        for _ in 0..100 {
+            if socket_path.exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(socket_path.exists(), "daemon did not start in time");
+
+        Self {
+            socket_path,
+            _dir: dir,
+        }
+    }
+}
+
+/// Connect to the daemon socket and perform a ROOM:-prefixed handshake.
+async fn daemon_connect(
+    socket_path: &PathBuf,
+    room_id: &str,
+    username: &str,
+) -> (
+    BufReader<tokio::net::unix::OwnedReadHalf>,
+    tokio::net::unix::OwnedWriteHalf,
+) {
+    let stream = UnixStream::connect(socket_path).await.unwrap();
+    let (r, mut w) = stream.into_split();
+    w.write_all(format!("ROOM:{room_id}:{username}\n").as_bytes())
+        .await
+        .unwrap();
+    (BufReader::new(r), w)
+}
+
+/// One-shot join via the daemon protocol, returns the token UUID.
+async fn daemon_join(socket_path: &PathBuf, room_id: &str, username: &str) -> String {
+    let stream = UnixStream::connect(socket_path).await.unwrap();
+    let (r, mut w) = stream.into_split();
+    w.write_all(format!("ROOM:{room_id}:JOIN:{username}\n").as_bytes())
+        .await
+        .unwrap();
+
+    let mut reader = BufReader::new(r);
+    let mut line = String::new();
+    reader.read_line(&mut line).await.unwrap();
+    let v: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+    assert_eq!(v["type"], "token", "expected token response: {v}");
+    v["token"].as_str().unwrap().to_owned()
+}
+
+/// One-shot send via the daemon protocol, returns the broadcast JSON.
+async fn daemon_send(
+    socket_path: &PathBuf,
+    room_id: &str,
+    token: &str,
+    content: &str,
+) -> serde_json::Value {
+    let stream = UnixStream::connect(socket_path).await.unwrap();
+    let (r, mut w) = stream.into_split();
+    w.write_all(format!("ROOM:{room_id}:TOKEN:{token}\n").as_bytes())
+        .await
+        .unwrap();
+    w.write_all(format!("{content}\n").as_bytes())
+        .await
+        .unwrap();
+
+    let mut reader = BufReader::new(r);
+    let mut line = String::new();
+    reader.read_line(&mut line).await.unwrap();
+    serde_json::from_str(line.trim()).unwrap()
+}
+
+// ── Test: daemon rejects connections without ROOM: prefix ─────────────────
+
+#[tokio::test]
+async fn daemon_rejects_missing_room_prefix() {
+    let td = TestDaemon::start(&["test-room"]).await;
+
+    let stream = UnixStream::connect(&td.socket_path).await.unwrap();
+    let (r, mut w) = stream.into_split();
+    // Send without ROOM: prefix
+    w.write_all(b"alice\n").await.unwrap();
+
+    let mut reader = BufReader::new(r);
+    let mut line = String::new();
+    reader.read_line(&mut line).await.unwrap();
+    let v: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+    assert_eq!(v["type"], "error");
+    assert_eq!(v["code"], "missing_room_prefix");
+}
+
+// ── Test: daemon rejects connections to nonexistent rooms ─────────────────
+
+#[tokio::test]
+async fn daemon_rejects_nonexistent_room() {
+    let td = TestDaemon::start(&["real-room"]).await;
+
+    let stream = UnixStream::connect(&td.socket_path).await.unwrap();
+    let (r, mut w) = stream.into_split();
+    w.write_all(b"ROOM:fake-room:JOIN:alice\n").await.unwrap();
+
+    let mut reader = BufReader::new(r);
+    let mut line = String::new();
+    reader.read_line(&mut line).await.unwrap();
+    let v: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+    assert_eq!(v["type"], "error");
+    assert_eq!(v["code"], "room_not_found");
+}
+
+// ── Test: daemon join + send + receive ────────────────────────────────────
+
+#[tokio::test]
+async fn daemon_join_send_receive() {
+    let td = TestDaemon::start(&["chat"]).await;
+
+    let token = daemon_join(&td.socket_path, "chat", "alice").await;
+    assert!(!token.is_empty());
+
+    let resp = daemon_send(&td.socket_path, "chat", &token, "hello from daemon").await;
+    assert_eq!(resp["type"], "message");
+    assert_eq!(resp["content"], "hello from daemon");
+    assert_eq!(resp["user"], "alice");
+}
+
+// ── Test: multi-room message isolation ────────────────────────────────────
+
+#[tokio::test]
+async fn daemon_multi_room_message_isolation() {
+    let td = TestDaemon::start(&["room-alpha", "room-beta"]).await;
+
+    // Join both rooms with different tokens.
+    let token_a = daemon_join(&td.socket_path, "room-alpha", "agent-a").await;
+    let token_b = daemon_join(&td.socket_path, "room-beta", "agent-b").await;
+
+    // Connect an interactive client to room-alpha to observe messages.
+    let (mut reader_a, _writer_a) =
+        daemon_connect(&td.socket_path, "room-alpha", "observer-a").await;
+
+    // Drain history/join messages from the interactive connection.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Send a message to room-beta.
+    let resp_b = daemon_send(&td.socket_path, "room-beta", &token_b, "beta-only msg").await;
+    assert_eq!(resp_b["type"], "message");
+    assert_eq!(resp_b["room"], "room-beta");
+
+    // Send a message to room-alpha.
+    let resp_a = daemon_send(&td.socket_path, "room-alpha", &token_a, "alpha msg").await;
+    assert_eq!(resp_a["type"], "message");
+    assert_eq!(resp_a["room"], "room-alpha");
+
+    // The observer in room-alpha should see "alpha msg" but NOT "beta-only msg".
+    // Read with a short timeout — we should get the alpha message.
+    let mut line = String::new();
+    let read_result = timeout(Duration::from_millis(500), reader_a.read_line(&mut line)).await;
+
+    // We may get the join/leave messages first, so drain until we find "alpha msg"
+    // or run out of data.
+    let mut saw_alpha = false;
+    let mut saw_beta = false;
+
+    if read_result.is_ok() {
+        // Check this line and keep reading.
+        loop {
+            if line.contains("alpha msg") {
+                saw_alpha = true;
+            }
+            if line.contains("beta-only msg") {
+                saw_beta = true;
+            }
+            line.clear();
+            match timeout(Duration::from_millis(200), reader_a.read_line(&mut line)).await {
+                Ok(Ok(0)) | Err(_) => break,
+                Ok(Ok(_)) => continue,
+                Ok(Err(_)) => break,
+            }
+        }
+    }
+
+    assert!(saw_alpha, "observer in room-alpha should see alpha msg");
+    assert!(
+        !saw_beta,
+        "observer in room-alpha should NOT see beta-only msg"
+    );
+}
+
+// ── Test: token from room-alpha is invalid in room-beta ───────────────────
+
+#[tokio::test]
+async fn daemon_token_scoped_to_room() {
+    let td = TestDaemon::start(&["room-x", "room-y"]).await;
+
+    let token_x = daemon_join(&td.socket_path, "room-x", "user-x").await;
+
+    // Try to use token_x in room-y — should fail with invalid_token.
+    let stream = UnixStream::connect(&td.socket_path).await.unwrap();
+    let (r, mut w) = stream.into_split();
+    w.write_all(format!("ROOM:room-y:TOKEN:{token_x}\n").as_bytes())
+        .await
+        .unwrap();
+    w.write_all(b"cross-room attempt\n").await.unwrap();
+
+    let mut reader = BufReader::new(r);
+    let mut line = String::new();
+    reader.read_line(&mut line).await.unwrap();
+    let v: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+    assert_eq!(v["type"], "error");
+    assert_eq!(v["code"], "invalid_token");
+}

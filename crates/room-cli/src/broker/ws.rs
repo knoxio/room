@@ -604,3 +604,280 @@ async fn api_health(State(state): State<WsAppState>) -> impl IntoResponse {
         "users": users
     }))
 }
+
+// ── Daemon-mode (multi-room) WS/REST ─────────────────────────────────────
+
+/// Shared state for daemon-mode axum handlers.
+#[derive(Clone)]
+pub(crate) struct DaemonWsState {
+    pub(crate) rooms: super::daemon::RoomMap,
+    pub(crate) next_client_id: Arc<AtomicU64>,
+}
+
+impl DaemonWsState {
+    /// Look up a room by ID. Returns the RoomState or None.
+    async fn get_room(&self, room_id: &str) -> Option<Arc<RoomState>> {
+        self.rooms.lock().await.get(room_id).cloned()
+    }
+}
+
+/// Build the axum router for daemon mode (multi-room).
+pub(crate) fn create_daemon_router(state: DaemonWsState) -> Router {
+    Router::new()
+        .route("/ws/{room_id}", get(daemon_ws_upgrade))
+        .route("/api/{room_id}/join", post(daemon_api_join))
+        .route("/api/{room_id}/send", post(daemon_api_send))
+        .route("/api/{room_id}/poll", get(daemon_api_poll))
+        .route("/api/health", get(daemon_api_health))
+        .route("/api/rooms", get(daemon_api_rooms))
+        .with_state(state)
+}
+
+// ── Daemon WS upgrade ────────────────────────────────────────────────────
+
+async fn daemon_ws_upgrade(
+    ws: WebSocketUpgrade,
+    Path(room_id): Path<String>,
+    State(state): State<DaemonWsState>,
+) -> impl IntoResponse {
+    let room = match state.get_room(&room_id).await {
+        Some(r) => r,
+        None => {
+            return (StatusCode::NOT_FOUND, "room not found").into_response();
+        }
+    };
+
+    let next_id = state.next_client_id.clone();
+    ws.on_upgrade(move |socket| async move {
+        let app_state = WsAppState {
+            room_state: room,
+            next_client_id: next_id,
+        };
+        if let Err(e) = handle_ws_client(socket, app_state).await {
+            eprintln!("[daemon/ws] error: {e:#}");
+        }
+    })
+}
+
+// ── Daemon REST endpoints ────────────────────────────────────────────────
+
+async fn daemon_api_join(
+    Path(room_id): Path<String>,
+    State(state): State<DaemonWsState>,
+    Json(body): Json<JoinRequest>,
+) -> impl IntoResponse {
+    let room = match state.get_room(&room_id).await {
+        Some(r) => r,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"type":"error","code":"room_not_found"})),
+            )
+                .into_response();
+        }
+    };
+    match issue_token(&body.username, &room.token_map).await {
+        Ok(token) => {
+            let resp = serde_json::json!({
+                "type":"token","token": token, "username": body.username
+            });
+            (StatusCode::OK, Json(resp)).into_response()
+        }
+        Err(_) => {
+            let err = serde_json::json!({
+                "type":"error","code":"username_taken","username": body.username
+            });
+            (StatusCode::CONFLICT, Json(err)).into_response()
+        }
+    }
+}
+
+async fn daemon_api_send(
+    Path(room_id): Path<String>,
+    State(state): State<DaemonWsState>,
+    headers: HeaderMap,
+    Json(body): Json<SendRequest>,
+) -> impl IntoResponse {
+    let room = match state.get_room(&room_id).await {
+        Some(r) => r,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"type":"error","code":"room_not_found"})),
+            )
+                .into_response();
+        }
+    };
+
+    let token = match extract_bearer_token(&headers) {
+        Some(t) => t,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"type":"error","code":"missing_token"})),
+            )
+                .into_response()
+        }
+    };
+
+    let username = match validate_token(token, &room.token_map).await {
+        Some(u) => u,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"type":"error","code":"invalid_token"})),
+            )
+                .into_response()
+        }
+    };
+
+    let msg = if let Some(ref to) = body.to {
+        make_dm(&room.room_id, &username, to, &body.content)
+    } else {
+        make_message(&room.room_id, &username, &body.content)
+    };
+
+    match route_command(msg, &username, &room).await {
+        Ok(CommandResult::Handled) => {
+            (StatusCode::OK, Json(serde_json::json!({"type":"ok"}))).into_response()
+        }
+        Ok(CommandResult::HandledWithReply(json) | CommandResult::Reply(json)) => {
+            let v: serde_json::Value =
+                serde_json::from_str(&json).unwrap_or(serde_json::json!({"reply": json}));
+            (StatusCode::OK, Json(v)).into_response()
+        }
+        Ok(CommandResult::Shutdown) => {
+            (StatusCode::OK, Json(serde_json::json!({"type":"shutdown"}))).into_response()
+        }
+        Ok(CommandResult::Passthrough(msg)) => {
+            let result = match &msg {
+                Message::DirectMessage { to, .. } => {
+                    dm_and_persist(
+                        &msg,
+                        &username,
+                        to,
+                        &room.host_user,
+                        &room.clients,
+                        &room.chat_path,
+                        &room.seq_counter,
+                    )
+                    .await
+                }
+                _ => {
+                    broadcast_and_persist(&msg, &room.clients, &room.chat_path, &room.seq_counter)
+                        .await
+                }
+            };
+            match result {
+                Ok(seq_msg) => {
+                    let json = serde_json::to_value(&seq_msg).unwrap_or_default();
+                    (StatusCode::OK, Json(json)).into_response()
+                }
+                Err(e) => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"type":"error","code":"persist_error","message": e.to_string()})),
+                )
+                    .into_response(),
+            }
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"type":"error","code":"route_error","message": e.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+async fn daemon_api_poll(
+    Path(room_id): Path<String>,
+    State(state): State<DaemonWsState>,
+    headers: HeaderMap,
+    Query(query): Query<PollQuery>,
+) -> impl IntoResponse {
+    let room = match state.get_room(&room_id).await {
+        Some(r) => r,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"type":"error","code":"room_not_found"})),
+            )
+                .into_response();
+        }
+    };
+
+    let token = match extract_bearer_token(&headers) {
+        Some(t) => t,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"type":"error","code":"missing_token"})),
+            )
+                .into_response()
+        }
+    };
+
+    let username = match validate_token(token, &room.token_map).await {
+        Some(u) => u,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"type":"error","code":"invalid_token"})),
+            )
+                .into_response()
+        }
+    };
+
+    let history = history::load(&room.chat_path).await.unwrap_or_default();
+    let host_name = room.host_user.lock().await.clone();
+    let is_host = host_name.as_deref() == Some(username.as_str());
+
+    let mut found_since = query.since.is_none();
+    let messages: Vec<serde_json::Value> = history
+        .into_iter()
+        .filter(|msg| {
+            if !found_since {
+                if msg.id() == query.since.as_deref().unwrap_or_default() {
+                    found_since = true;
+                }
+                return false;
+            }
+            match msg {
+                Message::DirectMessage { user, to, .. } => {
+                    is_host || user == &username || to == &username
+                }
+                _ => true,
+            }
+        })
+        .filter_map(|msg| serde_json::to_value(&msg).ok())
+        .collect();
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "messages": messages })),
+    )
+        .into_response()
+}
+
+async fn daemon_api_health(State(state): State<DaemonWsState>) -> impl IntoResponse {
+    let rooms = state.rooms.lock().await;
+    let mut room_info = Vec::new();
+    for (id, rs) in rooms.iter() {
+        let users = rs.status_map.lock().await.len();
+        room_info.push(serde_json::json!({
+            "room": id,
+            "users": users,
+        }));
+    }
+    Json(serde_json::json!({
+        "status": "ok",
+        "rooms": room_info,
+    }))
+}
+
+async fn daemon_api_rooms(State(state): State<DaemonWsState>) -> impl IntoResponse {
+    let rooms = state.rooms.lock().await;
+    let ids: Vec<&String> = rooms.keys().collect();
+    Json(serde_json::json!({
+        "rooms": ids,
+    }))
+}

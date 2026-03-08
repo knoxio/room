@@ -1,7 +1,15 @@
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
-use room_cli::{broker::Broker, client::Client, history::default_chat_path, oneshot};
+use room_cli::{
+    broker::{
+        daemon::{DaemonConfig, DaemonState},
+        Broker,
+    },
+    client::Client,
+    history::default_chat_path,
+    oneshot,
+};
 use tokio::net::UnixStream;
 
 #[derive(Subcommand, Debug)]
@@ -86,6 +94,25 @@ enum Cmd {
     /// Scans `/tmp` for `room-*.sock` files and probes each to verify the broker
     /// is alive. Prints one NDJSON line per active room. No token required.
     List,
+    /// Start a multi-room daemon that manages N rooms in a single process.
+    ///
+    /// Listens on a single UDS socket (default: `/tmp/roomd.sock`) and dispatches
+    /// connections to rooms based on the `ROOM:<room_id>:` handshake prefix.
+    /// Rooms can be created dynamically via `room create` or the REST API.
+    Daemon {
+        /// Path to the daemon UDS socket
+        #[arg(long, default_value = "/tmp/roomd.sock")]
+        socket: PathBuf,
+        /// Directory for chat files (one per room)
+        #[arg(long, default_value = "/tmp")]
+        data_dir: PathBuf,
+        /// Enable WebSocket/REST transport on this port
+        #[arg(long)]
+        ws_port: Option<u16>,
+        /// Room IDs to create on startup (can be repeated)
+        #[arg(long = "room")]
+        rooms: Vec<String>,
+    },
 }
 
 #[derive(Parser, Debug)]
@@ -173,6 +200,14 @@ async fn main() -> anyhow::Result<()> {
         }
         Some(Cmd::List) => {
             oneshot::cmd_list().await?;
+        }
+        Some(Cmd::Daemon {
+            socket,
+            data_dir,
+            ws_port,
+            rooms,
+        }) => {
+            run_daemon(socket, data_dir, ws_port, rooms).await?;
         }
         None => {
             let room_id = args.room_id.unwrap_or_else(|| {
@@ -296,4 +331,37 @@ fn resolve_chat_path(chat_file: &Option<PathBuf>, meta_path: &PathBuf, room_id: 
         }
     }
     default_chat_path(room_id)
+}
+
+async fn run_daemon(
+    socket: PathBuf,
+    data_dir: PathBuf,
+    ws_port: Option<u16>,
+    rooms: Vec<String>,
+) -> anyhow::Result<()> {
+    let config = DaemonConfig {
+        socket_path: socket,
+        data_dir,
+        ws_port,
+    };
+
+    let daemon = DaemonState::new(config);
+
+    // Create initial rooms.
+    for room_id in &rooms {
+        match daemon.create_room(room_id).await {
+            Ok(_) => eprintln!("[daemon] created room: {room_id}"),
+            Err(e) => eprintln!("[daemon] failed to create room {room_id}: {e}"),
+        }
+    }
+
+    // Set up signal handling for graceful shutdown.
+    let shutdown = daemon.shutdown_handle();
+    tokio::spawn(async move {
+        tokio::signal::ctrl_c().await.ok();
+        eprintln!("[daemon] caught SIGINT, shutting down");
+        let _ = shutdown.send(true);
+    });
+
+    daemon.run().await
 }
