@@ -35,6 +35,12 @@ pub(super) enum Action {
     Send(String),
     /// The user pressed Ctrl-C — exit the TUI.
     Quit,
+    /// Switch to the next tab (Ctrl+N).
+    NextTab,
+    /// Switch to the previous tab (Ctrl+P).
+    PrevTab,
+    /// Switch to a specific tab by index (Ctrl+1–9).
+    SwitchTab(usize),
 }
 
 /// Handle a single key event, mutating `state` in place.
@@ -147,6 +153,16 @@ pub(super) fn handle_key(
         }
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             return Some(Action::Quit);
+        }
+        // Tab switching: Ctrl+N / Ctrl+P cycle, Ctrl+1–9 jump to tab by index.
+        KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            return Some(Action::NextTab);
+        }
+        KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            return Some(Action::PrevTab);
+        }
+        KeyCode::Char(c @ '1'..='9') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            return Some(Action::SwitchTab((c as usize) - ('1' as usize)));
         }
         // Emacs-style word navigation (sent by macOS Terminal / iTerm2 for Option+arrow).
         KeyCode::Char('b') if key.modifiers.contains(KeyModifiers::ALT) => {
@@ -1918,5 +1934,53 @@ mod tests {
         handle_key(make_key(KeyCode::Enter), &mut state, &users, 10, 80);
         assert_eq!(state.input, "/dm ");
         assert!(state.mention.active);
+    }
+
+    // ── Tab switching keybinding tests ──────────────────────────────────────
+
+    fn make_ctrl_key(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
+    }
+
+    #[test]
+    fn ctrl_n_returns_next_tab_action() {
+        let mut state = InputState::new();
+        let action = handle_key(make_ctrl_key('n'), &mut state, &[], 10, 80);
+        assert!(matches!(action, Some(Action::NextTab)));
+    }
+
+    #[test]
+    fn ctrl_p_returns_prev_tab_action() {
+        let mut state = InputState::new();
+        let action = handle_key(make_ctrl_key('p'), &mut state, &[], 10, 80);
+        assert!(matches!(action, Some(Action::PrevTab)));
+    }
+
+    #[test]
+    fn ctrl_1_returns_switch_tab_0() {
+        let mut state = InputState::new();
+        let action = handle_key(make_ctrl_key('1'), &mut state, &[], 10, 80);
+        assert!(matches!(action, Some(Action::SwitchTab(0))));
+    }
+
+    #[test]
+    fn ctrl_9_returns_switch_tab_8() {
+        let mut state = InputState::new();
+        let action = handle_key(make_ctrl_key('9'), &mut state, &[], 10, 80);
+        assert!(matches!(action, Some(Action::SwitchTab(8))));
+    }
+
+    #[test]
+    fn ctrl_5_returns_switch_tab_4() {
+        let mut state = InputState::new();
+        let action = handle_key(make_ctrl_key('5'), &mut state, &[], 10, 80);
+        assert!(matches!(action, Some(Action::SwitchTab(4))));
+    }
+
+    #[test]
+    fn ctrl_c_still_quits() {
+        let mut state = InputState::new();
+        let action = handle_key(make_ctrl_key('c'), &mut state, &[], 10, 80);
+        assert!(matches!(action, Some(Action::Quit)));
     }
 }

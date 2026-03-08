@@ -448,6 +448,47 @@ pub(super) fn find_view_start(heights: &[usize], view_top: usize) -> (usize, usi
     (heights.len(), 0)
 }
 
+/// Describes a single tab for the tab bar renderer.
+pub(super) struct TabInfo {
+    pub(super) room_id: String,
+    pub(super) active: bool,
+    pub(super) unread: usize,
+}
+
+/// Render the tab bar as a single `Line` of styled spans.
+///
+/// Hidden when there is only one tab (backward-compatible single-room mode).
+/// Active tab is highlighted; inactive tabs with unread messages show a count badge.
+pub(super) fn render_tab_bar(tabs: &[TabInfo]) -> Option<Line<'static>> {
+    if tabs.len() <= 1 {
+        return None;
+    }
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    spans.push(Span::raw(" "));
+    for tab in tabs {
+        let label = if tab.unread > 0 && !tab.active {
+            format!(" {} ({}) ", tab.room_id, tab.unread)
+        } else {
+            format!(" {} ", tab.room_id)
+        };
+        let style = if tab.active {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else if tab.unread > 0 {
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+        spans.push(Span::styled(label, style));
+        spans.push(Span::raw(" "));
+    }
+    Some(Line::from(spans))
+}
+
 /// Look up a username's color from the map, falling back to the hash-based
 /// palette index if the user has not been assigned a color yet.
 pub(super) fn user_color(username: &str, color_map: &ColorMap) -> Color {
@@ -760,6 +801,114 @@ mod tests {
             "splash should have logo + tagline + version lines, got {}",
             text.lines.len()
         );
+    }
+
+    // ── render_tab_bar tests ──────────────────────────────────────────────
+
+    #[test]
+    fn tab_bar_hidden_for_single_tab() {
+        let tabs = vec![TabInfo {
+            room_id: "room-1".into(),
+            active: true,
+            unread: 0,
+        }];
+        assert!(render_tab_bar(&tabs).is_none());
+    }
+
+    #[test]
+    fn tab_bar_hidden_for_empty_tabs() {
+        let tabs: Vec<TabInfo> = vec![];
+        assert!(render_tab_bar(&tabs).is_none());
+    }
+
+    #[test]
+    fn tab_bar_shown_for_multiple_tabs() {
+        let tabs = vec![
+            TabInfo {
+                room_id: "alpha".into(),
+                active: true,
+                unread: 0,
+            },
+            TabInfo {
+                room_id: "beta".into(),
+                active: false,
+                unread: 0,
+            },
+        ];
+        let line = render_tab_bar(&tabs).expect("should render tab bar");
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("alpha"), "tab bar should contain 'alpha'");
+        assert!(text.contains("beta"), "tab bar should contain 'beta'");
+    }
+
+    #[test]
+    fn tab_bar_shows_unread_badge_on_inactive_tab() {
+        let tabs = vec![
+            TabInfo {
+                room_id: "alpha".into(),
+                active: true,
+                unread: 0,
+            },
+            TabInfo {
+                room_id: "beta".into(),
+                active: false,
+                unread: 5,
+            },
+        ];
+        let line = render_tab_bar(&tabs).expect("should render tab bar");
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(
+            text.contains("beta (5)"),
+            "inactive tab with unread should show count badge"
+        );
+    }
+
+    #[test]
+    fn tab_bar_no_unread_badge_on_active_tab() {
+        let tabs = vec![
+            TabInfo {
+                room_id: "alpha".into(),
+                active: true,
+                unread: 3,
+            },
+            TabInfo {
+                room_id: "beta".into(),
+                active: false,
+                unread: 0,
+            },
+        ];
+        let line = render_tab_bar(&tabs).expect("should render tab bar");
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        // Active tab should NOT show unread badge even if count > 0
+        assert!(
+            !text.contains("alpha (3)"),
+            "active tab should not show unread badge"
+        );
+    }
+
+    #[test]
+    fn tab_bar_active_tab_has_bold_cyan_style() {
+        let tabs = vec![
+            TabInfo {
+                room_id: "alpha".into(),
+                active: true,
+                unread: 0,
+            },
+            TabInfo {
+                room_id: "beta".into(),
+                active: false,
+                unread: 0,
+            },
+        ];
+        let line = render_tab_bar(&tabs).unwrap();
+        // Find the span containing "alpha"
+        let alpha_span = line
+            .spans
+            .iter()
+            .find(|s| s.content.contains("alpha"))
+            .expect("should find alpha span");
+        assert_eq!(alpha_span.style.fg, Some(Color::Black));
+        assert_eq!(alpha_span.style.bg, Some(Color::Cyan));
     }
 
     #[test]
