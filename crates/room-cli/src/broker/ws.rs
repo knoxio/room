@@ -339,7 +339,7 @@ async fn ws_oneshot_join(
         let _ = ws_tx.send(WsMessage::Close(None)).await;
         return Ok(());
     }
-    match issue_token(username, &state.token_map).await {
+    match issue_token(username, &state.token_map, Some(&state.chat_path)).await {
         Ok(token) => {
             let resp = serde_json::json!({"type":"token","token": token, "username": username});
             let _ = ws_tx.send(WsMessage::Text(resp.to_string().into())).await;
@@ -435,7 +435,13 @@ async fn api_join(
         )
             .into_response();
     }
-    match issue_token(&body.username, &state.room_state.token_map).await {
+    match issue_token(
+        &body.username,
+        &state.room_state.token_map,
+        Some(&state.room_state.chat_path),
+    )
+    .await
+    {
         Ok(token) => {
             let resp = serde_json::json!({
                 "type":"token","token": token, "username": body.username
@@ -716,7 +722,7 @@ async fn daemon_api_join(
         )
             .into_response();
     }
-    match issue_token(&body.username, &room.token_map).await {
+    match issue_token(&body.username, &room.token_map, Some(&room.chat_path)).await {
         Ok(token) => {
             let resp = serde_json::json!({
                 "type":"token","token": token, "username": body.username

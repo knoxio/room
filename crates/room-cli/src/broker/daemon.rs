@@ -389,6 +389,7 @@ async fn dispatch_connection(
             write_half,
             &state.token_map,
             state.config.as_ref(),
+            Some(&state.chat_path),
         )
         .await;
     }

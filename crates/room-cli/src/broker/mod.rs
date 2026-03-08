@@ -71,11 +71,20 @@ impl Broker {
         registry.register(Box::new(plugin::help::HelpPlugin))?;
         registry.register(Box::new(plugin::stats::StatsPlugin))?;
 
+        // Load persisted tokens from a previous broker session (if any).
+        let persisted_tokens = auth::load_token_map(&self.chat_path);
+        if !persisted_tokens.is_empty() {
+            eprintln!(
+                "[broker] loaded {} persisted token(s)",
+                persisted_tokens.len()
+            );
+        }
+
         let state = Arc::new(RoomState {
             clients: Arc::new(Mutex::new(HashMap::new())),
             status_map: Arc::new(Mutex::new(HashMap::new())),
             host_user: Arc::new(Mutex::new(None)),
-            token_map: Arc::new(Mutex::new(HashMap::new())),
+            token_map: Arc::new(Mutex::new(persisted_tokens)),
             chat_path: Arc::new(self.chat_path.clone()),
             room_id: Arc::new(self.room_id.clone()),
             shutdown: Arc::new(shutdown_tx),
@@ -175,6 +184,7 @@ async fn handle_client(
             write_half,
             &token_map,
             state.config.as_ref(),
+            Some(&state.chat_path),
         )
         .await;
     }
