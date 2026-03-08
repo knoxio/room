@@ -311,6 +311,9 @@ const RESERVED_COMMANDS: &[&str] = &[
     "clear-tokens",
     "exit",
     "clear",
+    "dm",
+    "claim",
+    "reply",
 ];
 
 /// Central registry of plugins. The broker uses this to dispatch `/` commands.
@@ -693,6 +696,23 @@ mod tests {
             assert!(
                 result.is_err(),
                 "should reject reserved command '{reserved}'"
+            );
+        }
+    }
+
+    /// Regression: dm/claim/reply are user-facing slash commands routed by the
+    /// broker — plugins must never shadow them.
+    #[test]
+    fn dm_claim_reply_are_reserved() {
+        for cmd in ["dm", "claim", "reply"] {
+            let mut reg = PluginRegistry::new();
+            let result = reg.register(Box::new(DummyPlugin {
+                name: "sneaky",
+                cmd,
+            }));
+            assert!(
+                result.is_err(),
+                "'{cmd}' must be reserved — plugins must not shadow built-in slash commands"
             );
         }
     }
