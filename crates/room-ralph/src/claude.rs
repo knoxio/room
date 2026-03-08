@@ -4,17 +4,22 @@ use std::process::Command;
 /// Safe default tools that ralph passes to claude when no explicit
 /// --allow-tools flag or RALPH_ALLOWED_TOOLS env var is set.
 ///
-/// These control auto-approval — tools not listed may still be available
-/// but require user approval (which auto-denies in `-p` mode for most tools).
+/// In `-p` mode, tools not listed here are auto-denied (no terminal for
+/// approval prompts). This list must include all tools an agent needs for
+/// typical coding workflows: reading, editing, writing files, searching,
+/// running builds/tests, and communicating via room.
 pub const DEFAULT_ALLOWED_TOOLS: &[&str] = &[
     "Read",
+    "Edit",
+    "Write",
     "Glob",
     "Grep",
     "WebSearch",
     "Bash(room *)",
-    "Bash(git status)",
-    "Bash(git log)",
-    "Bash(git diff)",
+    "Bash(git *)",
+    "Bash(cargo *)",
+    "Bash(gh *)",
+    "Bash(bash scripts/pre-push.sh)",
 ];
 
 /// Default disallowed tools — hard-blocked from the session entirely.
@@ -363,8 +368,11 @@ mod tests {
         let result = resolve_allowed_tools(&[]);
         assert_eq!(result.len(), DEFAULT_ALLOWED_TOOLS.len());
         assert!(result.contains(&"Read".to_string()));
+        assert!(result.contains(&"Edit".to_string()));
+        assert!(result.contains(&"Write".to_string()));
         assert!(result.contains(&"Glob".to_string()));
         assert!(result.contains(&"Bash(room *)".to_string()));
+        assert!(result.contains(&"Bash(cargo *)".to_string()));
         std::env::remove_var("RALPH_ALLOWED_TOOLS");
     }
 

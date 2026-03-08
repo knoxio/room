@@ -9,9 +9,13 @@ use crate::room;
 use crate::Cli;
 
 /// Run the main ralph loop: iterate, build prompt, call claude, handle output.
-pub async fn run_loop(cli: &Cli, token: &str, running: &Arc<AtomicBool>) -> Result<(), String> {
+///
+/// Takes ownership of `token` so it can be updated in-place if the broker
+/// restarts and a re-join is needed.
+pub async fn run_loop(cli: &Cli, token: String, running: &Arc<AtomicBool>) -> Result<(), String> {
     let progress_file = progress::progress_file_path(cli.issue.as_deref(), &cli.username);
     let mut iteration: u32 = 0;
+    let mut token = token;
 
     while running.load(Ordering::SeqCst) {
         iteration += 1;
@@ -20,7 +24,7 @@ pub async fn run_loop(cli: &Cli, token: &str, running: &Arc<AtomicBool>) -> Resu
             tracing::info!("max iterations ({}) reached, stopping", cli.max_iter);
             room::send_message(
                 &cli.room_id,
-                token,
+                &token,
                 &format!("max iterations reached ({}), shutting down", cli.max_iter),
             )
             .ok();
@@ -29,14 +33,31 @@ pub async fn run_loop(cli: &Cli, token: &str, running: &Arc<AtomicBool>) -> Resu
 
         tracing::info!("--- iteration {} ---", iteration);
 
-        // Poll room for recent messages
-        let messages = room::poll_messages(&cli.room_id, token).unwrap_or_default();
+        // Poll room for recent messages — re-join if token is stale (broker restart)
+        let messages = match room::poll_messages(&cli.room_id, &token) {
+            Ok(msgs) => msgs,
+            Err(e) if room::detect_token_expiry(&e) => {
+                tracing::warn!("token expired during poll, re-joining: {}", e);
+                match room::join_room(&cli.room_id, &cli.username) {
+                    Ok(new_token) => {
+                        tracing::info!("re-joined with new token");
+                        token = new_token;
+                        room::poll_messages(&cli.room_id, &token).unwrap_or_default()
+                    }
+                    Err(join_err) => {
+                        tracing::error!("re-join failed: {}", join_err);
+                        Vec::new()
+                    }
+                }
+            }
+            Err(_) => Vec::new(),
+        };
 
         // Build prompt
         let config = PromptConfig {
             room_id: &cli.room_id,
             username: &cli.username,
-            token,
+            token: &token,
             custom_prompt_file: cli.prompt.as_deref(),
             personality_file: cli.personality.as_deref(),
             progress_file: &progress_file,
@@ -62,7 +83,7 @@ pub async fn run_loop(cli: &Cli, token: &str, running: &Arc<AtomicBool>) -> Resu
             Some(issue) => format!("running claude — iteration {iteration} for #{issue}"),
             None => format!("running claude — iteration {iteration}"),
         };
-        room::set_status(&cli.room_id, token, &status_text).ok();
+        room::set_status(&cli.room_id, &token, &status_text).ok();
 
         // Run claude
         tracing::info!(
@@ -123,7 +144,7 @@ pub async fn run_loop(cli: &Cli, token: &str, running: &Arc<AtomicBool>) -> Resu
 
             room::set_status(
                 &cli.room_id,
-                token,
+                &token,
                 &format!("restarting — context limit at iteration {iteration}"),
             )
             .ok();
@@ -131,7 +152,7 @@ pub async fn run_loop(cli: &Cli, token: &str, running: &Arc<AtomicBool>) -> Resu
                 "context limit at iteration {} (tokens: {}), restarting with fresh context",
                 iteration, input_tokens
             );
-            room::send_message(&cli.room_id, token, &msg).ok();
+            room::send_message(&cli.room_id, &token, &msg).ok();
         } else if claude_output.exit_code != 0 {
             tracing::warn!(
                 "claude failed (exit {}), will retry after cooldown",
@@ -139,7 +160,7 @@ pub async fn run_loop(cli: &Cli, token: &str, running: &Arc<AtomicBool>) -> Resu
             );
             room::set_status(
                 &cli.room_id,
-                token,
+                &token,
                 &format!(
                     "retrying — claude error (code {}) at iteration {iteration}",
                     claude_output.exit_code
@@ -150,16 +171,7 @@ pub async fn run_loop(cli: &Cli, token: &str, running: &Arc<AtomicBool>) -> Resu
                 "claude exited with error (code {}), retrying in {}s",
                 claude_output.exit_code, cli.cooldown
             );
-            room::send_message(&cli.room_id, token, &msg).ok();
-        }
-
-        // Re-join if token expired
-        if room::detect_token_expiry(&response) {
-            tracing::warn!("token appears invalid, re-joining");
-            // For now, we cannot update the token in-place since it's borrowed.
-            // In the shell version this mutated a global. Here we log and continue.
-            // A future improvement: pass token as &mut or use a shared state.
-            tracing::error!("token re-join not yet implemented in Rust version");
+            room::send_message(&cli.room_id, &token, &msg).ok();
         }
 
         // Cooldown
@@ -167,10 +179,10 @@ pub async fn run_loop(cli: &Cli, token: &str, running: &Arc<AtomicBool>) -> Resu
     }
 
     tracing::info!("room-ralph stopped after {} iterations", iteration);
-    room::set_status(&cli.room_id, token, "offline").ok();
+    room::set_status(&cli.room_id, &token, "offline").ok();
     room::send_message(
         &cli.room_id,
-        token,
+        &token,
         &format!("offline (room-ralph stopped after {iteration} iterations)"),
     )
     .ok();

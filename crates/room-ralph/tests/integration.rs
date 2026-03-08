@@ -117,7 +117,7 @@ async fn dry_run_prints_prompt_and_exits() {
     let running = Arc::new(AtomicBool::new(true));
 
     // dry_run exits before calling claude; room poll failure is swallowed
-    let result = loop_runner::run_loop(&cli, "fake-token", &running).await;
+    let result = loop_runner::run_loop(&cli, "fake-token".to_string(), &running).await;
 
     assert!(result.is_ok(), "dry_run should return Ok: {result:?}");
     assert!(
@@ -144,7 +144,7 @@ async fn max_iter_one_stops_after_single_iteration() {
     });
     let running = Arc::new(AtomicBool::new(true));
 
-    let result = loop_runner::run_loop(&cli, "mock-tok", &running).await;
+    let result = loop_runner::run_loop(&cli, "mock-tok".to_string(), &running).await;
     restore_path(&original);
 
     assert!(result.is_ok(), "max_iter=1 should complete: {result:?}");
@@ -179,7 +179,7 @@ async fn max_iter_zero_runs_until_signal() {
         r.store(false, Ordering::SeqCst);
     });
 
-    let result = loop_runner::run_loop(&cli, "mock-tok", &running).await;
+    let result = loop_runner::run_loop(&cli, "mock-tok".to_string(), &running).await;
     restore_path(&original);
 
     assert!(result.is_ok(), "should stop cleanly: {result:?}");
@@ -218,7 +218,7 @@ async fn context_exhaustion_writes_progress() {
     });
     let running = Arc::new(AtomicBool::new(true));
 
-    let result = loop_runner::run_loop(&cli, "mock-tok", &running).await;
+    let result = loop_runner::run_loop(&cli, "mock-tok".to_string(), &running).await;
     restore_path(&original);
 
     assert!(result.is_ok());
@@ -260,6 +260,9 @@ fn token_expiry_detected_across_formats() {
     assert!(room::detect_token_expiry(
         "The token is invalid, re-join required"
     ));
+    assert!(room::detect_token_expiry(
+        "token not recognised — run: room join myroom <username>"
+    ));
 
     // Negative: benign text that mentions tokens but isn't an expiry error
     assert!(!room::detect_token_expiry("generated 500 tokens of output"));
@@ -295,7 +298,7 @@ async fn claude_failure_continues_loop() {
     });
     let running = Arc::new(AtomicBool::new(true));
 
-    let result = loop_runner::run_loop(&cli, "mock-tok", &running).await;
+    let result = loop_runner::run_loop(&cli, "mock-tok".to_string(), &running).await;
     restore_path(&original);
 
     assert!(
@@ -358,7 +361,7 @@ async fn personality_appears_in_dry_run_output() {
     let running = Arc::new(AtomicBool::new(true));
 
     // Capture stdout to verify personality content
-    let result = loop_runner::run_loop(&cli, "fake-token", &running).await;
+    let result = loop_runner::run_loop(&cli, "fake-token".to_string(), &running).await;
     assert!(
         result.is_ok(),
         "dry_run with personality should succeed: {result:?}"

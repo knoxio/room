@@ -177,7 +177,7 @@ async fn main() -> ExitCode {
     );
     room::send_message(&cli.room_id, &token, &announce).ok();
 
-    match loop_runner::run_loop(&cli, &token, &running).await {
+    match loop_runner::run_loop(&cli, token, &running).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             tracing::error!("loop failed: {}", e);

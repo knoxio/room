@@ -57,11 +57,18 @@ pub fn send_message(room_id: &str, token: &str, message: &str) -> Result<(), Str
 /// Poll the room for new messages.
 ///
 /// Runs `room poll <room_id> -t <token>` and parses NDJSON output into Messages.
+/// Returns `Err` on non-zero exit (e.g. invalid token) so the caller can detect
+/// token expiry and re-join.
 pub fn poll_messages(room_id: &str, token: &str) -> Result<Vec<Message>, String> {
     let output = Command::new("room")
         .args(["poll", room_id, "-t", token])
         .output()
         .map_err(|e| format!("failed to run `room poll`: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("room poll failed: {stderr}"));
+    }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let mut messages = Vec::new();
@@ -110,11 +117,15 @@ pub fn set_status(room_id: &str, token: &str, status: &str) -> Result<(), String
 }
 
 /// Check if a response suggests the auth token is invalid/expired.
+///
+/// Matches error messages from both the broker (`invalid_token`) and the
+/// oneshot token resolver (`token not recognised`).
 pub fn detect_token_expiry(response: &str) -> bool {
     let lower = response.to_lowercase();
-    lower.contains("invalid") && lower.contains("token")
+    (lower.contains("invalid") && lower.contains("token"))
         || lower.contains("unauthorized")
-        || lower.contains("token") && lower.contains("expired")
+        || (lower.contains("token") && lower.contains("expired"))
+        || (lower.contains("token") && lower.contains("not recognised"))
 }
 
 /// Extract the token UUID from room join JSON output.
@@ -168,6 +179,9 @@ mod tests {
         assert!(detect_token_expiry("Unauthorized"));
         assert!(detect_token_expiry("token expired"));
         assert!(detect_token_expiry("Token is invalid"));
+        assert!(detect_token_expiry(
+            "token not recognised — run: room join myroom <username>"
+        ));
         assert!(!detect_token_expiry("all good"));
         assert!(!detect_token_expiry("valid response"));
     }
