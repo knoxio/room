@@ -507,6 +507,12 @@ pub fn builtin_command_infos() -> Vec<CommandInfo> {
             usage: "/clear".to_owned(),
             params: vec![],
         },
+        CommandInfo {
+            name: "room-info".to_owned(),
+            description: "Show room visibility, config, and member count".to_owned(),
+            usage: "/room-info".to_owned(),
+            params: vec![],
+        },
     ]
 }
 
@@ -760,6 +766,7 @@ mod tests {
             "clear-tokens",
             "exit",
             "clear",
+            "room-info",
         ] {
             assert!(
                 names.contains(expected),

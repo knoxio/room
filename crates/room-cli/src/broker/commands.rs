@@ -1,8 +1,8 @@
 use crate::{
     message::{make_system, Message},
     plugin::{
-        ChatWriter, CommandContext, CommandInfo, HistoryReader, ParamType, PluginResult,
-        RoomMetadata,
+        builtin_command_infos, ChatWriter, CommandContext, CommandInfo, HistoryReader, ParamType,
+        PluginResult, RoomMetadata,
     },
 };
 
@@ -50,6 +50,16 @@ pub(crate) async fn route_command(
         ..
     } = msg
     {
+        // Validate params against built-in schema before dispatching.
+        let builtins = builtin_command_infos();
+        if let Some(cmd_info) = builtins.iter().find(|c| c.name == *cmd) {
+            if let Err(err_msg) = validate_params(params, cmd_info) {
+                let sys = make_system(&state.room_id, "broker", err_msg);
+                let json = serde_json::to_string(&sys)?;
+                return Ok(CommandResult::Reply(json));
+            }
+        }
+
         if cmd == "set_status" {
             let status = params.first().cloned().unwrap_or_default();
             state
@@ -695,6 +705,108 @@ mod tests {
             !contents.contains("some existing history"),
             "prior history must be gone after clear"
         );
+    }
+
+    // ── route_command: built-in param validation ────────────────────────
+
+    #[tokio::test]
+    async fn route_command_kick_missing_user_gets_validation_error() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+        *state.host_user.lock().await = Some("alice".to_owned());
+        let msg = make_command("test-room", "alice", "kick", vec![]);
+        let result = route_command(msg, "alice", &state).await.unwrap();
+        let CommandResult::Reply(json) = result else {
+            panic!("expected Reply with validation error");
+        };
+        assert!(
+            json.contains("missing required"),
+            "should report missing param"
+        );
+        assert!(json.contains("<user>"), "should name the missing param");
+    }
+
+    #[tokio::test]
+    async fn route_command_reauth_missing_user_gets_validation_error() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+        *state.host_user.lock().await = Some("alice".to_owned());
+        let msg = make_command("test-room", "alice", "reauth", vec![]);
+        let result = route_command(msg, "alice", &state).await.unwrap();
+        let CommandResult::Reply(json) = result else {
+            panic!("expected Reply with validation error");
+        };
+        assert!(json.contains("missing required"));
+    }
+
+    #[tokio::test]
+    async fn route_command_kick_with_valid_params_passes_validation() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+        *state.host_user.lock().await = Some("alice".to_owned());
+        // Kick with valid username — should not be rejected by validation.
+        let msg = make_command("test-room", "alice", "kick", vec!["bob".to_owned()]);
+        let result = route_command(msg, "alice", &state).await.unwrap();
+        // kick succeeds (Handled), not a validation error Reply
+        assert!(matches!(result, CommandResult::Handled));
+    }
+
+    #[tokio::test]
+    async fn route_command_claim_missing_task_gets_validation_error() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+        // /claim has a required "task" param
+        let msg = make_command("test-room", "alice", "claim", vec![]);
+        let result = route_command(msg, "alice", &state).await.unwrap();
+        let CommandResult::Reply(json) = result else {
+            panic!("expected Reply with validation error");
+        };
+        assert!(json.contains("missing required"));
+        assert!(json.contains("<task>"));
+    }
+
+    #[tokio::test]
+    async fn route_command_claim_with_task_passes_through() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+        let msg = make_command("test-room", "alice", "claim", vec!["fix bug".to_owned()]);
+        let result = route_command(msg, "alice", &state).await.unwrap();
+        // claim with valid params is a pass-through (no special handler)
+        assert!(matches!(result, CommandResult::Passthrough(_)));
+    }
+
+    #[tokio::test]
+    async fn route_command_who_no_params_passes_validation() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+        // /who has no required params — should always pass validation
+        let msg = make_command("test-room", "alice", "who", vec![]);
+        let result = route_command(msg, "alice", &state).await.unwrap();
+        assert!(matches!(result, CommandResult::Reply(_)));
+    }
+
+    #[tokio::test]
+    async fn route_command_reply_missing_params_gets_validation_error() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+        // /reply requires both id and message
+        let msg = make_command("test-room", "alice", "reply", vec![]);
+        let result = route_command(msg, "alice", &state).await.unwrap();
+        let CommandResult::Reply(json) = result else {
+            panic!("expected Reply with validation error");
+        };
+        assert!(json.contains("missing required"));
+    }
+
+    #[tokio::test]
+    async fn route_command_nonbuiltin_command_skips_validation() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+        // A command not in builtin_command_infos — no schema to validate against
+        let msg = make_command("test-room", "alice", "unknown_cmd", vec![]);
+        let result = route_command(msg, "alice", &state).await.unwrap();
+        // Falls through to Passthrough (no schema, no handler)
+        assert!(matches!(result, CommandResult::Passthrough(_)));
     }
 
     // ── validate_params tests ─────────────────────────────────────────────
