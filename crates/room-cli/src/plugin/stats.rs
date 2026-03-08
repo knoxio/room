@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use crate::message::Message;
 
-use super::{BoxFuture, CommandContext, CommandInfo, Completion, Plugin, PluginResult};
+use super::{BoxFuture, CommandContext, CommandInfo, ParamSchema, ParamType, Plugin, PluginResult};
 
 /// Example `/stats` plugin. Shows a statistical summary of recent chat
 /// activity: message count, participant count, time range, most active user.
@@ -21,14 +21,16 @@ impl Plugin for StatsPlugin {
             name: "stats".to_owned(),
             description: "Show statistical summary of recent chat activity".to_owned(),
             usage: "/stats [last N messages, default 50]".to_owned(),
-            completions: vec![Completion {
-                position: 0,
-                values: vec![
+            params: vec![ParamSchema {
+                name: "count".to_owned(),
+                param_type: ParamType::Choice(vec![
                     "10".to_owned(),
                     "25".to_owned(),
                     "50".to_owned(),
                     "100".to_owned(),
-                ],
+                ]),
+                required: false,
+                description: "Number of recent messages to analyze".to_owned(),
             }],
         }]
     }

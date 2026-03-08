@@ -60,17 +60,37 @@ pub struct CommandInfo {
     pub description: String,
     /// Usage string (e.g. `"/stats [last N]"`).
     pub usage: String,
-    /// Static argument completions for autocomplete.
-    pub completions: Vec<Completion>,
+    /// Typed parameter schemas for validation and autocomplete.
+    pub params: Vec<ParamSchema>,
 }
 
-/// A static autocomplete hint for a command argument.
+// ── Typed parameter schema ─────────────────────────────────────────────────
+
+/// Schema for a single command parameter — drives validation, `/help` output,
+/// and TUI argument autocomplete.
 #[derive(Debug, Clone)]
-pub struct Completion {
-    /// Argument position (0-indexed).
-    pub position: usize,
-    /// Possible values. Empty means freeform.
-    pub values: Vec<String>,
+pub struct ParamSchema {
+    /// Display name (e.g. `"username"`, `"count"`).
+    pub name: String,
+    /// What kind of value this parameter accepts.
+    pub param_type: ParamType,
+    /// Whether the parameter must be provided.
+    pub required: bool,
+    /// One-line description shown in `/help <command>`.
+    pub description: String,
+}
+
+/// The kind of value a parameter accepts.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ParamType {
+    /// Free-form text (no validation beyond presence).
+    Text,
+    /// One of a fixed set of allowed values.
+    Choice(Vec<String>),
+    /// An online username — TUI shows the mention picker.
+    Username,
+    /// An integer, optionally bounded.
+    Number { min: Option<i64>, max: Option<i64> },
 }
 
 // ── CommandContext ───────────────────────────────────────────────────────────
@@ -346,17 +366,19 @@ impl PluginRegistry {
         self.plugins.iter().flat_map(|p| p.commands()).collect()
     }
 
-    /// Static completions for a specific command at a given argument position.
+    /// Completions for a specific command at a given argument position,
+    /// derived from the parameter schema.
+    ///
+    /// Returns `Choice` values for `ParamType::Choice` parameters, or an
+    /// empty vec for freeform/username/number parameters.
     pub fn completions_for(&self, command: &str, arg_pos: usize) -> Vec<String> {
         self.all_commands()
             .iter()
             .find(|c| c.name == command)
-            .map(|c| {
-                c.completions
-                    .iter()
-                    .filter(|comp| comp.position == arg_pos)
-                    .flat_map(|comp| comp.values.clone())
-                    .collect()
+            .and_then(|c| c.params.get(arg_pos))
+            .map(|p| match &p.param_type {
+                ParamType::Choice(values) => values.clone(),
+                _ => vec![],
             })
             .unwrap_or_default()
     }
@@ -366,6 +388,133 @@ impl Default for PluginRegistry {
     fn default() -> Self {
         Self::new()
     }
+}
+
+// ── Built-in command schemas ───────────────────────────────────────────────
+
+/// Returns [`CommandInfo`] schemas for all built-in commands (those handled
+/// directly by the broker, not by plugins). Used by the TUI palette and
+/// `/help` to show a complete command list with typed parameter metadata.
+pub fn builtin_command_infos() -> Vec<CommandInfo> {
+    vec![
+        CommandInfo {
+            name: "dm".to_owned(),
+            description: "Send a private message".to_owned(),
+            usage: "/dm <user> <message>".to_owned(),
+            params: vec![
+                ParamSchema {
+                    name: "user".to_owned(),
+                    param_type: ParamType::Username,
+                    required: true,
+                    description: "Recipient username".to_owned(),
+                },
+                ParamSchema {
+                    name: "message".to_owned(),
+                    param_type: ParamType::Text,
+                    required: true,
+                    description: "Message content".to_owned(),
+                },
+            ],
+        },
+        CommandInfo {
+            name: "claim".to_owned(),
+            description: "Claim a task".to_owned(),
+            usage: "/claim <task>".to_owned(),
+            params: vec![ParamSchema {
+                name: "task".to_owned(),
+                param_type: ParamType::Text,
+                required: true,
+                description: "Task description".to_owned(),
+            }],
+        },
+        CommandInfo {
+            name: "reply".to_owned(),
+            description: "Reply to a message".to_owned(),
+            usage: "/reply <id> <message>".to_owned(),
+            params: vec![
+                ParamSchema {
+                    name: "id".to_owned(),
+                    param_type: ParamType::Text,
+                    required: true,
+                    description: "Message ID to reply to".to_owned(),
+                },
+                ParamSchema {
+                    name: "message".to_owned(),
+                    param_type: ParamType::Text,
+                    required: true,
+                    description: "Reply content".to_owned(),
+                },
+            ],
+        },
+        CommandInfo {
+            name: "set_status".to_owned(),
+            description: "Set your presence status".to_owned(),
+            usage: "/set_status <status>".to_owned(),
+            params: vec![ParamSchema {
+                name: "status".to_owned(),
+                param_type: ParamType::Text,
+                required: false,
+                description: "Status text (omit to clear)".to_owned(),
+            }],
+        },
+        CommandInfo {
+            name: "who".to_owned(),
+            description: "List users in the room".to_owned(),
+            usage: "/who".to_owned(),
+            params: vec![],
+        },
+        CommandInfo {
+            name: "kick".to_owned(),
+            description: "Kick a user from the room".to_owned(),
+            usage: "/kick <user>".to_owned(),
+            params: vec![ParamSchema {
+                name: "user".to_owned(),
+                param_type: ParamType::Username,
+                required: true,
+                description: "User to kick (host only)".to_owned(),
+            }],
+        },
+        CommandInfo {
+            name: "reauth".to_owned(),
+            description: "Invalidate a user's token".to_owned(),
+            usage: "/reauth <user>".to_owned(),
+            params: vec![ParamSchema {
+                name: "user".to_owned(),
+                param_type: ParamType::Username,
+                required: true,
+                description: "User to reauth (host only)".to_owned(),
+            }],
+        },
+        CommandInfo {
+            name: "clear-tokens".to_owned(),
+            description: "Revoke all session tokens".to_owned(),
+            usage: "/clear-tokens".to_owned(),
+            params: vec![],
+        },
+        CommandInfo {
+            name: "exit".to_owned(),
+            description: "Shut down the broker".to_owned(),
+            usage: "/exit".to_owned(),
+            params: vec![],
+        },
+        CommandInfo {
+            name: "clear".to_owned(),
+            description: "Clear the room history".to_owned(),
+            usage: "/clear".to_owned(),
+            params: vec![],
+        },
+    ]
+}
+
+/// Returns command schemas for all known commands: built-ins + default plugins.
+///
+/// Used by the TUI to build its command palette at startup without needing
+/// access to the broker's `PluginRegistry`.
+pub fn all_known_commands() -> Vec<CommandInfo> {
+    let mut cmds = builtin_command_infos();
+    cmds.extend(help::HelpPlugin.commands());
+    cmds.extend(stats::StatsPlugin.commands());
+    cmds
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────
@@ -389,7 +538,7 @@ mod tests {
                 name: self.cmd.to_owned(),
                 description: "dummy".to_owned(),
                 usage: format!("/{}", self.cmd),
-                completions: vec![],
+                params: vec![],
             }]
         }
 
@@ -460,7 +609,7 @@ mod tests {
     }
 
     #[test]
-    fn registry_completions_for_returns_values() {
+    fn registry_completions_for_returns_choice_values() {
         let mut reg = PluginRegistry::new();
         reg.register(Box::new({
             struct CompPlugin;
@@ -473,9 +622,11 @@ mod tests {
                         name: "test".to_owned(),
                         description: "test".to_owned(),
                         usage: "/test".to_owned(),
-                        completions: vec![Completion {
-                            position: 0,
-                            values: vec!["10".to_owned(), "20".to_owned()],
+                        params: vec![ParamSchema {
+                            name: "count".to_owned(),
+                            param_type: ParamType::Choice(vec!["10".to_owned(), "20".to_owned()]),
+                            required: false,
+                            description: "Number of items".to_owned(),
                         }],
                     }]
                 }
@@ -496,6 +647,42 @@ mod tests {
     }
 
     #[test]
+    fn registry_completions_for_non_choice_returns_empty() {
+        let mut reg = PluginRegistry::new();
+        reg.register(Box::new({
+            struct TextPlugin;
+            impl Plugin for TextPlugin {
+                fn name(&self) -> &str {
+                    "text"
+                }
+                fn commands(&self) -> Vec<CommandInfo> {
+                    vec![CommandInfo {
+                        name: "echo".to_owned(),
+                        description: "echo".to_owned(),
+                        usage: "/echo".to_owned(),
+                        params: vec![ParamSchema {
+                            name: "msg".to_owned(),
+                            param_type: ParamType::Text,
+                            required: true,
+                            description: "Message".to_owned(),
+                        }],
+                    }]
+                }
+                fn handle(
+                    &self,
+                    _ctx: CommandContext,
+                ) -> BoxFuture<'_, anyhow::Result<PluginResult>> {
+                    Box::pin(async { Ok(PluginResult::Handled) })
+                }
+            }
+            TextPlugin
+        }))
+        .unwrap();
+        // Text params produce no completions
+        assert!(reg.completions_for("echo", 0).is_empty());
+    }
+
+    #[test]
     fn registry_rejects_all_reserved_commands() {
         for &reserved in RESERVED_COMMANDS {
             let mut reg = PluginRegistry::new();
@@ -508,6 +695,132 @@ mod tests {
                 "should reject reserved command '{reserved}'"
             );
         }
+    }
+
+    // ── ParamSchema / ParamType tests ───────────────────────────────────────
+
+    #[test]
+    fn param_type_choice_equality() {
+        let a = ParamType::Choice(vec!["x".to_owned(), "y".to_owned()]);
+        let b = ParamType::Choice(vec!["x".to_owned(), "y".to_owned()]);
+        assert_eq!(a, b);
+        let c = ParamType::Choice(vec!["x".to_owned()]);
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn param_type_number_equality() {
+        let a = ParamType::Number {
+            min: Some(1),
+            max: Some(100),
+        };
+        let b = ParamType::Number {
+            min: Some(1),
+            max: Some(100),
+        };
+        assert_eq!(a, b);
+        let c = ParamType::Number {
+            min: None,
+            max: None,
+        };
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn param_type_variants_are_distinct() {
+        assert_ne!(ParamType::Text, ParamType::Username);
+        assert_ne!(
+            ParamType::Text,
+            ParamType::Number {
+                min: None,
+                max: None
+            }
+        );
+        assert_ne!(ParamType::Text, ParamType::Choice(vec!["a".to_owned()]));
+    }
+
+    // ── builtin_command_infos tests ───────────────────────────────────────
+
+    #[test]
+    fn builtin_command_infos_covers_all_expected_commands() {
+        let cmds = builtin_command_infos();
+        let names: Vec<&str> = cmds.iter().map(|c| c.name.as_str()).collect();
+        for expected in &[
+            "dm",
+            "claim",
+            "reply",
+            "set_status",
+            "who",
+            "kick",
+            "reauth",
+            "clear-tokens",
+            "exit",
+            "clear",
+        ] {
+            assert!(
+                names.contains(expected),
+                "missing built-in command: {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn builtin_command_infos_dm_has_username_param() {
+        let cmds = builtin_command_infos();
+        let dm = cmds.iter().find(|c| c.name == "dm").unwrap();
+        assert_eq!(dm.params.len(), 2);
+        assert_eq!(dm.params[0].param_type, ParamType::Username);
+        assert!(dm.params[0].required);
+        assert_eq!(dm.params[1].param_type, ParamType::Text);
+    }
+
+    #[test]
+    fn builtin_command_infos_kick_has_username_param() {
+        let cmds = builtin_command_infos();
+        let kick = cmds.iter().find(|c| c.name == "kick").unwrap();
+        assert_eq!(kick.params.len(), 1);
+        assert_eq!(kick.params[0].param_type, ParamType::Username);
+        assert!(kick.params[0].required);
+    }
+
+    #[test]
+    fn builtin_command_infos_set_status_is_optional() {
+        let cmds = builtin_command_infos();
+        let ss = cmds.iter().find(|c| c.name == "set_status").unwrap();
+        assert_eq!(ss.params.len(), 1);
+        assert!(!ss.params[0].required);
+    }
+
+    #[test]
+    fn builtin_command_infos_who_has_no_params() {
+        let cmds = builtin_command_infos();
+        let who = cmds.iter().find(|c| c.name == "who").unwrap();
+        assert!(who.params.is_empty());
+    }
+
+    // ── all_known_commands tests ──────────────────────────────────────────
+
+    #[test]
+    fn all_known_commands_includes_builtins_and_plugins() {
+        let cmds = all_known_commands();
+        let names: Vec<&str> = cmds.iter().map(|c| c.name.as_str()).collect();
+        // Built-ins
+        assert!(names.contains(&"dm"));
+        assert!(names.contains(&"who"));
+        assert!(names.contains(&"kick"));
+        // Plugins
+        assert!(names.contains(&"help"));
+        assert!(names.contains(&"stats"));
+    }
+
+    #[test]
+    fn all_known_commands_no_duplicates() {
+        let cmds = all_known_commands();
+        let mut names: Vec<&str> = cmds.iter().map(|c| c.name.as_str()).collect();
+        let before = names.len();
+        names.sort();
+        names.dedup();
+        assert_eq!(before, names.len(), "duplicate command names found");
     }
 
     #[tokio::test]

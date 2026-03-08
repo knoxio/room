@@ -4,7 +4,7 @@ use unicode_width::UnicodeWidthChar;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use super::widgets::{CommandPalette, MentionPicker, PALETTE_COMMANDS};
+use super::widgets::{CommandPalette, MentionPicker};
 
 /// All mutable TUI input state. Pure data — no async context or I/O.
 pub(super) struct InputState {
@@ -23,7 +23,7 @@ impl InputState {
             cursor_pos: 0,
             input_row_scroll: 0,
             scroll_offset: 0,
-            palette: CommandPalette::new(PALETTE_COMMANDS),
+            palette: CommandPalette::from_commands(crate::plugin::all_known_commands()),
             mention: MentionPicker::new(),
         }
     }
@@ -77,12 +77,7 @@ pub(super) fn handle_key(
             state.mention.deactivate();
         }
         KeyCode::Tab if state.palette.active => {
-            if let Some(usage) = state.palette.selected_usage() {
-                state.input = usage.to_owned();
-                state.cursor_pos = state.input.len();
-                state.input_row_scroll = 0;
-            }
-            state.palette.deactivate();
+            complete_palette_selection(state, online_users);
         }
         KeyCode::Enter => {
             if state.mention.active {
@@ -97,12 +92,7 @@ pub(super) fn handle_key(
                 }
                 state.mention.deactivate();
             } else if state.palette.active {
-                if let Some(usage) = state.palette.selected_usage() {
-                    state.input = usage.to_owned();
-                    state.cursor_pos = state.input.len();
-                    state.input_row_scroll = 0;
-                }
-                state.palette.deactivate();
+                complete_palette_selection(state, online_users);
             } else if key.modifiers.contains(KeyModifiers::SHIFT) {
                 // Shift+Enter: insert a newline at the cursor.
                 state.input.insert(state.cursor_pos, '\n');
@@ -437,6 +427,51 @@ fn sync_mention_after_delete(state: &mut InputState, online_users: &[String]) {
         }
     } else {
         state.mention.deactivate();
+    }
+}
+
+/// Complete the currently selected palette command.
+///
+/// If the selected command's first parameter is `Username`, sets the input to
+/// `/<command> ` and activates the mention picker so the user can tab-complete
+/// a username without typing `@`. Otherwise fills in the full usage string as
+/// before.
+fn complete_palette_selection(state: &mut InputState, online_users: &[String]) {
+    let selected_idx = state.palette.filtered.get(state.palette.selected).copied();
+    if let Some(idx) = selected_idx {
+        let cmd_name = state.palette.commands[idx].cmd.clone();
+        let is_username = state.palette.is_username_param(&cmd_name, 0);
+        let has_choices = !state.palette.completions_at(&cmd_name, 0).is_empty();
+
+        if is_username {
+            // Set input to "/<cmd> " and activate mention picker at the space.
+            let prefix = format!("/{cmd_name} ");
+            let at_byte = prefix.len();
+            state.input = prefix;
+            state.cursor_pos = at_byte;
+            state.input_row_scroll = 0;
+            state.palette.deactivate();
+            state.mention.activate(at_byte, online_users, "");
+            if state.mention.filtered.is_empty() {
+                state.mention.deactivate();
+            }
+        } else if has_choices {
+            // Set input to "/<cmd> " so the user can type/pick a choice.
+            let prefix = format!("/{cmd_name} ");
+            state.input = prefix;
+            state.cursor_pos = state.input.len();
+            state.input_row_scroll = 0;
+            state.palette.deactivate();
+        } else if let Some(usage) = state.palette.selected_usage() {
+            state.input = usage.to_owned();
+            state.cursor_pos = state.input.len();
+            state.input_row_scroll = 0;
+            state.palette.deactivate();
+        } else {
+            state.palette.deactivate();
+        }
+    } else {
+        state.palette.deactivate();
     }
 }
 
@@ -1808,5 +1843,80 @@ mod tests {
         // Backspace to "@zz" — still no user matches "zz".
         handle_key(make_key(KeyCode::Backspace), &mut state, &users, 10, 80);
         assert!(!state.mention.active);
+    }
+
+    // ── complete_palette_selection tests (#257) ───────────────────────────────
+
+    #[test]
+    fn tab_on_dm_activates_mention_picker() {
+        let mut state = InputState::new();
+        let users = vec!["alice".to_owned(), "bob".to_owned()];
+        // Type "/dm" to activate and filter palette
+        for c in "/dm".chars() {
+            handle_key(make_key(KeyCode::Char(c)), &mut state, &users, 10, 80);
+        }
+        assert!(state.palette.active);
+        // Tab to complete — should set input to "/dm " and activate mention picker
+        handle_key(make_key(KeyCode::Tab), &mut state, &users, 10, 80);
+        assert_eq!(state.input, "/dm ");
+        assert!(!state.palette.active, "palette should deactivate");
+        assert!(
+            state.mention.active,
+            "mention picker should activate for Username param"
+        );
+    }
+
+    #[test]
+    fn tab_on_kick_activates_mention_picker() {
+        let mut state = InputState::new();
+        let users = vec!["alice".to_owned()];
+        for c in "/kick".chars() {
+            handle_key(make_key(KeyCode::Char(c)), &mut state, &users, 10, 80);
+        }
+        assert!(state.palette.active);
+        handle_key(make_key(KeyCode::Tab), &mut state, &users, 10, 80);
+        assert_eq!(state.input, "/kick ");
+        assert!(state.mention.active);
+    }
+
+    #[test]
+    fn tab_on_stats_sets_short_prefix_for_choices() {
+        let mut state = InputState::new();
+        let users: Vec<String> = vec![];
+        for c in "/stats".chars() {
+            handle_key(make_key(KeyCode::Char(c)), &mut state, &users, 10, 80);
+        }
+        assert!(state.palette.active);
+        handle_key(make_key(KeyCode::Tab), &mut state, &users, 10, 80);
+        // stats has Choice param — should set "/stats " for the user to type a number
+        assert_eq!(state.input, "/stats ");
+        assert!(!state.palette.active);
+        assert!(!state.mention.active);
+    }
+
+    #[test]
+    fn tab_on_who_fills_full_usage() {
+        let mut state = InputState::new();
+        let users: Vec<String> = vec![];
+        for c in "/who".chars() {
+            handle_key(make_key(KeyCode::Char(c)), &mut state, &users, 10, 80);
+        }
+        handle_key(make_key(KeyCode::Tab), &mut state, &users, 10, 80);
+        // who has no params — fills in the full usage string
+        assert_eq!(state.input, "/who");
+        assert!(!state.palette.active);
+    }
+
+    #[test]
+    fn enter_on_dm_activates_mention_picker() {
+        let mut state = InputState::new();
+        let users = vec!["alice".to_owned()];
+        for c in "/dm".chars() {
+            handle_key(make_key(KeyCode::Char(c)), &mut state, &users, 10, 80);
+        }
+        // Enter also completes palette selection
+        handle_key(make_key(KeyCode::Enter), &mut state, &users, 10, 80);
+        assert_eq!(state.input, "/dm ");
+        assert!(state.mention.active);
     }
 }

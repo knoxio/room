@@ -1,75 +1,19 @@
+use crate::plugin::{CommandInfo, ParamType};
+
 // ── Command palette ───────────────────────────────────────────────────────────
 
+/// A single entry in the command palette.
+///
+/// Constructed from [`CommandInfo`] schemas via [`CommandPalette::from_commands`],
+/// or directly for testing. Owns its strings so the palette can be built
+/// dynamically at runtime from the plugin registry.
 pub(super) struct PaletteItem {
-    pub(super) cmd: &'static str,
-    pub(super) usage: &'static str,
-    pub(super) description: &'static str,
+    pub(super) cmd: String,
+    pub(super) usage: String,
+    pub(super) description: String,
+    /// Typed parameter schemas — drives argument-level autocomplete.
+    pub(super) params: Vec<crate::plugin::ParamSchema>,
 }
-
-pub(super) const PALETTE_COMMANDS: &[PaletteItem] = &[
-    PaletteItem {
-        cmd: "dm",
-        usage: "/dm <user> <message>",
-        description: "Send a private message",
-    },
-    PaletteItem {
-        cmd: "claim",
-        usage: "/claim <task>",
-        description: "Claim a task",
-    },
-    PaletteItem {
-        cmd: "reply",
-        usage: "/reply <id> <message>",
-        description: "Reply to a message",
-    },
-    PaletteItem {
-        cmd: "set_status",
-        usage: "/set_status <status>",
-        description: "Set your presence status",
-    },
-    PaletteItem {
-        cmd: "who",
-        usage: "/who",
-        description: "List users in the room",
-    },
-    // Plugin commands
-    PaletteItem {
-        cmd: "help",
-        usage: "/help [command]",
-        description: "List available commands or get help for a specific command",
-    },
-    PaletteItem {
-        cmd: "stats",
-        usage: "/stats [last N]",
-        description: "Show statistical summary of recent chat activity",
-    },
-    // Admin commands
-    PaletteItem {
-        cmd: "kick",
-        usage: "/kick <user>",
-        description: "Kick a user from the room",
-    },
-    PaletteItem {
-        cmd: "reauth",
-        usage: "/reauth <user>",
-        description: "Invalidate a user's token",
-    },
-    PaletteItem {
-        cmd: "clear-tokens",
-        usage: "/clear-tokens",
-        description: "Revoke all session tokens",
-    },
-    PaletteItem {
-        cmd: "exit",
-        usage: "/exit",
-        description: "Shut down the broker",
-    },
-    PaletteItem {
-        cmd: "clear",
-        usage: "/clear",
-        description: "Clear the room history",
-    },
-];
 
 pub(super) struct CommandPalette {
     pub(super) active: bool,
@@ -77,15 +21,26 @@ pub(super) struct CommandPalette {
     /// Indices into `commands` that match the current query.
     pub(super) filtered: Vec<usize>,
     /// The command list this palette draws from.
-    pub(super) commands: &'static [PaletteItem],
+    pub(super) commands: Vec<PaletteItem>,
 }
 
 impl CommandPalette {
-    pub(super) fn new(commands: &'static [PaletteItem]) -> Self {
+    /// Build a palette from a list of [`CommandInfo`] schemas.
+    pub(super) fn from_commands(infos: Vec<CommandInfo>) -> Self {
+        let commands: Vec<PaletteItem> = infos
+            .into_iter()
+            .map(|c| PaletteItem {
+                cmd: c.name,
+                usage: c.usage,
+                description: c.description,
+                params: c.params,
+            })
+            .collect();
+        let filtered = (0..commands.len()).collect();
         Self {
             active: false,
             selected: 0,
-            filtered: (0..commands.len()).collect(),
+            filtered,
             commands,
         }
     }
@@ -133,10 +88,35 @@ impl CommandPalette {
     }
 
     /// The full usage string (e.g. `/dm <user>`) of the selected entry.
-    pub(super) fn selected_usage(&self) -> Option<&'static str> {
+    pub(super) fn selected_usage(&self) -> Option<&str> {
         self.filtered
             .get(self.selected)
-            .map(|&i| self.commands[i].usage)
+            .map(|&i| self.commands[i].usage.as_str())
+    }
+
+    /// Look up a command by name and return completions for the given argument
+    /// position. Returns `Choice` values or an empty vec.
+    pub(super) fn completions_at(&self, cmd_name: &str, arg_pos: usize) -> Vec<String> {
+        self.commands
+            .iter()
+            .find(|c| c.cmd == cmd_name)
+            .and_then(|c| c.params.get(arg_pos))
+            .map(|p| match &p.param_type {
+                ParamType::Choice(values) => values.clone(),
+                _ => vec![],
+            })
+            .unwrap_or_default()
+    }
+
+    /// Check if the parameter at `arg_pos` for `cmd_name` is a `Username` type
+    /// (for triggering the mention picker instead of a choice picker).
+    pub(super) fn is_username_param(&self, cmd_name: &str, arg_pos: usize) -> bool {
+        self.commands
+            .iter()
+            .find(|c| c.cmd == cmd_name)
+            .and_then(|c| c.params.get(arg_pos))
+            .map(|p| matches!(p.param_type, ParamType::Username))
+            .unwrap_or(false)
     }
 }
 
@@ -205,19 +185,24 @@ impl MentionPicker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::plugin::all_known_commands;
+
+    fn make_palette() -> CommandPalette {
+        CommandPalette::from_commands(all_known_commands())
+    }
 
     // ── CommandPalette unit tests ─────────────────────────────────────────────
 
     #[test]
     fn palette_starts_inactive() {
-        let p = CommandPalette::new(PALETTE_COMMANDS);
+        let p = make_palette();
         assert!(!p.active);
         assert_eq!(p.filtered.len(), p.commands.len());
     }
 
     #[test]
     fn palette_activate_resets_state() {
-        let mut p = CommandPalette::new(PALETTE_COMMANDS);
+        let mut p = make_palette();
         p.selected = 2;
         p.filtered = vec![1];
         p.activate();
@@ -228,7 +213,7 @@ mod tests {
 
     #[test]
     fn palette_deactivate_clears_active() {
-        let mut p = CommandPalette::new(PALETTE_COMMANDS);
+        let mut p = make_palette();
         p.activate();
         p.deactivate();
         assert!(!p.active);
@@ -236,8 +221,7 @@ mod tests {
 
     #[test]
     fn palette_filter_by_cmd_prefix() {
-        let mut p = CommandPalette::new(PALETTE_COMMANDS);
-        // "dm" matches exactly one command by cmd prefix (no description ambiguity)
+        let mut p = make_palette();
         p.update_filter("dm");
         assert_eq!(p.filtered.len(), 1);
         assert_eq!(p.commands[p.filtered[0]].cmd, "dm");
@@ -245,7 +229,7 @@ mod tests {
 
     #[test]
     fn palette_filter_dm_exact() {
-        let mut p = CommandPalette::new(PALETTE_COMMANDS);
+        let mut p = make_palette();
         p.update_filter("dm");
         assert_eq!(p.filtered.len(), 1);
         assert_eq!(p.commands[p.filtered[0]].cmd, "dm");
@@ -253,29 +237,28 @@ mod tests {
 
     #[test]
     fn palette_filter_empty_query_shows_all() {
-        let mut p = CommandPalette::new(PALETTE_COMMANDS);
+        let mut p = make_palette();
         p.update_filter("");
         assert_eq!(p.filtered.len(), p.commands.len());
     }
 
     #[test]
     fn palette_filter_no_match_returns_empty() {
-        let mut p = CommandPalette::new(PALETTE_COMMANDS);
+        let mut p = make_palette();
         p.update_filter("zzz_no_match");
         assert!(p.filtered.is_empty());
     }
 
     #[test]
     fn palette_filter_by_description_keyword() {
-        let mut p = CommandPalette::new(PALETTE_COMMANDS);
+        let mut p = make_palette();
         p.update_filter("private");
-        // Should match "dm" whose description is "Send a private message"
         assert!(p.filtered.iter().any(|&i| p.commands[i].cmd == "dm"));
     }
 
     #[test]
     fn palette_move_up_clamps_at_zero() {
-        let mut p = CommandPalette::new(PALETTE_COMMANDS);
+        let mut p = make_palette();
         p.activate();
         p.move_up();
         assert_eq!(p.selected, 0);
@@ -283,7 +266,7 @@ mod tests {
 
     #[test]
     fn palette_move_down_clamps_at_end() {
-        let mut p = CommandPalette::new(PALETTE_COMMANDS);
+        let mut p = make_palette();
         p.activate();
         for _ in 0..100 {
             p.move_down();
@@ -293,7 +276,7 @@ mod tests {
 
     #[test]
     fn palette_move_up_down_navigate() {
-        let mut p = CommandPalette::new(PALETTE_COMMANDS);
+        let mut p = make_palette();
         p.activate();
         p.move_down();
         p.move_down();
@@ -304,48 +287,46 @@ mod tests {
 
     #[test]
     fn palette_selected_usage_returns_usage_string() {
-        let mut p = CommandPalette::new(PALETTE_COMMANDS);
+        let mut p = make_palette();
         p.activate();
-        // First entry in unfiltered list
         let usage = p.selected_usage().unwrap();
         assert!(usage.starts_with('/'));
     }
 
     #[test]
     fn palette_selected_usage_empty_when_no_filtered() {
-        let mut p = CommandPalette::new(PALETTE_COMMANDS);
+        let mut p = make_palette();
         p.filtered.clear();
         assert!(p.selected_usage().is_none());
     }
 
     #[test]
     fn palette_selected_clamps_after_filter_narrows() {
-        let mut p = CommandPalette::new(PALETTE_COMMANDS);
+        let mut p = make_palette();
         p.activate();
-        // Navigate to last entry
         for _ in 0..100 {
             p.move_down();
         }
         assert_eq!(p.selected, p.commands.len() - 1);
-        // Now narrow filter so fewer entries remain
         p.update_filter("dm");
         assert_eq!(p.filtered.len(), 1);
-        assert_eq!(p.selected, 0); // clamped
+        assert_eq!(p.selected, 0);
     }
 
-    // ── PALETTE_COMMANDS completeness tests ───────────────────────────────────
+    // ── Completeness tests ───────────────────────────────────────────────────
 
     #[test]
     fn palette_commands_contains_set_status() {
+        let p = make_palette();
         assert!(
-            PALETTE_COMMANDS.iter().any(|c| c.cmd == "set_status"),
-            "PALETTE_COMMANDS must include set_status"
+            p.commands.iter().any(|c| c.cmd == "set_status"),
+            "palette must include set_status"
         );
     }
 
     #[test]
     fn palette_filter_set_status() {
-        let mut p = CommandPalette::new(PALETTE_COMMANDS);
+        let mut p = make_palette();
         p.update_filter("set");
         assert!(
             p.filtered
@@ -355,18 +336,10 @@ mod tests {
         );
     }
 
-    // ── ADMIN_COMMANDS palette tests ──────────────────────────────────────────
-
-    #[test]
-    fn unified_palette_starts_inactive() {
-        let p = CommandPalette::new(PALETTE_COMMANDS);
-        assert!(!p.active);
-        assert_eq!(p.filtered.len(), PALETTE_COMMANDS.len());
-    }
-
     #[test]
     fn palette_contains_all_admin_commands() {
-        let cmds: Vec<&str> = PALETTE_COMMANDS.iter().map(|c| c.cmd).collect();
+        let p = make_palette();
+        let cmds: Vec<&str> = p.commands.iter().map(|c| c.cmd.as_str()).collect();
         assert!(cmds.contains(&"kick"));
         assert!(cmds.contains(&"reauth"));
         assert!(cmds.contains(&"clear-tokens"));
@@ -376,9 +349,10 @@ mod tests {
 
     #[test]
     fn admin_usages_use_slash_prefix() {
+        let p = make_palette();
         let admin_cmds = ["kick", "reauth", "clear-tokens", "exit", "clear"];
-        for item in PALETTE_COMMANDS {
-            if admin_cmds.contains(&item.cmd) {
+        for item in &p.commands {
+            if admin_cmds.contains(&item.cmd.as_str()) {
                 assert!(
                     item.usage.starts_with('/'),
                     "admin command '{}' usage must start with /",
@@ -390,7 +364,7 @@ mod tests {
 
     #[test]
     fn palette_filter_kick() {
-        let mut p = CommandPalette::new(PALETTE_COMMANDS);
+        let mut p = make_palette();
         p.update_filter("ki");
         assert_eq!(p.filtered.len(), 1);
         assert_eq!(p.commands[p.filtered[0]].cmd, "kick");
@@ -398,9 +372,8 @@ mod tests {
 
     #[test]
     fn admin_selected_usage_slash() {
-        let mut p = CommandPalette::new(PALETTE_COMMANDS);
+        let mut p = make_palette();
         p.activate();
-        // All commands use / prefix
         let usage = p.selected_usage().unwrap();
         assert!(usage.starts_with('/'));
     }
@@ -409,23 +382,18 @@ mod tests {
 
     #[test]
     fn palette_filter_ranks_prefix_before_description() {
-        // "se" matches "set_status" by cmd prefix AND "dm" by description ("Send a private message").
-        // Prefix matches must appear first in the filtered list.
-        let mut p = CommandPalette::new(PALETTE_COMMANDS);
+        let mut p = make_palette();
         p.update_filter("se");
         assert!(
             p.filtered.len() >= 2,
             "expected at least 2 matches for 'se', got {}",
             p.filtered.len()
         );
-        // First match must be the cmd-prefix match (set_status).
-        let first_cmd = p.commands[p.filtered[0]].cmd;
+        let first_cmd = &p.commands[p.filtered[0]].cmd;
         assert_eq!(
             first_cmd, "set_status",
-            "first match should be 'set_status' (prefix), not '{}'",
-            first_cmd
+            "first match should be 'set_status' (prefix), not '{first_cmd}'"
         );
-        // Description-only matches (like "dm" whose description starts with "Send") come after.
         let prefix_count = p
             .filtered
             .iter()
@@ -446,9 +414,7 @@ mod tests {
 
     #[test]
     fn palette_filter_description_match_appears_after_all_prefix_matches() {
-        // "re" matches "reply" and "reauth" by prefix. It also matches "set_status" by description
-        // ("Set your presence status"). Prefix matches must come first.
-        let mut p = CommandPalette::new(PALETTE_COMMANDS);
+        let mut p = make_palette();
         p.update_filter("re");
         let prefix_count = p
             .filtered
@@ -469,19 +435,68 @@ mod tests {
         }
     }
 
+    // ── completions_at / is_username_param tests ──────────────────────────────
+
+    #[test]
+    fn completions_at_returns_choice_values() {
+        let p = make_palette();
+        let completions = p.completions_at("stats", 0);
+        assert!(
+            completions.contains(&"10".to_owned()),
+            "stats param 0 should include '10'"
+        );
+        assert!(
+            completions.contains(&"50".to_owned()),
+            "stats param 0 should include '50'"
+        );
+    }
+
+    #[test]
+    fn completions_at_returns_empty_for_text_param() {
+        let p = make_palette();
+        // set_status param is Text — no completions
+        assert!(p.completions_at("set_status", 0).is_empty());
+    }
+
+    #[test]
+    fn completions_at_returns_empty_for_unknown_command() {
+        let p = make_palette();
+        assert!(p.completions_at("nonexistent", 0).is_empty());
+    }
+
+    #[test]
+    fn is_username_param_true_for_dm_first_arg() {
+        let p = make_palette();
+        assert!(p.is_username_param("dm", 0));
+    }
+
+    #[test]
+    fn is_username_param_true_for_kick() {
+        let p = make_palette();
+        assert!(p.is_username_param("kick", 0));
+    }
+
+    #[test]
+    fn is_username_param_false_for_text_param() {
+        let p = make_palette();
+        assert!(!p.is_username_param("set_status", 0));
+    }
+
+    #[test]
+    fn is_username_param_false_for_unknown_command() {
+        let p = make_palette();
+        assert!(!p.is_username_param("nonexistent", 0));
+    }
+
     // ── MentionPicker tests ───────────────────────────────────────────────────
 
     #[test]
     fn mention_picker_shows_user_added_from_message_sender() {
-        // Simulate: a user r2d2 sends a message; their name is seeded into online_users
-        // (the drain loop adds Message::Message senders if not already present).
         let mut online_users: Vec<String> = Vec::new();
-        // Replicate the drain-loop guard exactly as written in the source.
         let user = "r2d2".to_owned();
         if !online_users.contains(&user) {
             online_users.push(user);
         }
-        // MentionPicker should now find this user when activated with an empty query.
         let mut picker = MentionPicker::new();
         picker.activate(0, &online_users, "");
         assert!(picker.active);
@@ -491,7 +506,6 @@ mod tests {
     #[test]
     fn message_sender_not_duplicated_if_already_online() {
         let mut online_users = vec!["alice".to_owned()];
-        // Same guard as the drain loop.
         let user = "alice".to_owned();
         if !online_users.contains(&user) {
             online_users.push(user);

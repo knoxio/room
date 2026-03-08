@@ -1,6 +1,9 @@
 use crate::{
     message::{make_system, Message},
-    plugin::{ChatWriter, CommandContext, HistoryReader, PluginResult, RoomMetadata},
+    plugin::{
+        ChatWriter, CommandContext, CommandInfo, HistoryReader, ParamType, PluginResult,
+        RoomMetadata,
+    },
 };
 
 use super::{fanout::broadcast_and_persist, state::RoomState};
@@ -129,6 +132,64 @@ pub(crate) async fn route_command(
     Ok(CommandResult::Passthrough(msg))
 }
 
+/// Validate `params` against a command's [`CommandInfo`] schema.
+///
+/// Returns `Ok(())` if all constraints pass, or `Err(message)` with a
+/// human-readable error suitable for sending back as a reply.
+///
+/// Validation rules:
+/// - Required params must be present (not blank).
+/// - `ParamType::Choice` values must be in the allowed set.
+/// - `ParamType::Number` values must parse as `i64` and respect min/max bounds.
+/// - `ParamType::Text` and `ParamType::Username` are accepted as-is (no
+///   server-side validation — username existence is not checked here).
+fn validate_params(params: &[String], schema: &CommandInfo) -> Result<(), String> {
+    for (i, ps) in schema.params.iter().enumerate() {
+        let value = params.get(i).map(String::as_str).unwrap_or("");
+        if ps.required && value.is_empty() {
+            return Err(format!(
+                "/{}: missing required parameter <{}>",
+                schema.name, ps.name
+            ));
+        }
+        if value.is_empty() {
+            continue;
+        }
+        match &ps.param_type {
+            ParamType::Choice(allowed) => {
+                if !allowed.iter().any(|a| a == value) {
+                    return Err(format!(
+                        "/{}: <{}> must be one of: {}",
+                        schema.name,
+                        ps.name,
+                        allowed.join(", ")
+                    ));
+                }
+            }
+            ParamType::Number { min, max } => {
+                let Ok(n) = value.parse::<i64>() else {
+                    return Err(format!(
+                        "/{}: <{}> must be a number, got '{}'",
+                        schema.name, ps.name, value
+                    ));
+                };
+                if let Some(lo) = min {
+                    if n < *lo {
+                        return Err(format!("/{}: <{}> must be >= {lo}", schema.name, ps.name));
+                    }
+                }
+                if let Some(hi) = max {
+                    if n > *hi {
+                        return Err(format!("/{}: <{}> must be <= {hi}", schema.name, ps.name));
+                    }
+                }
+            }
+            ParamType::Text | ParamType::Username => {}
+        }
+    }
+    Ok(())
+}
+
 /// Build a [`CommandContext`] and call a plugin's `handle` method, translating
 /// the [`PluginResult`] into a [`CommandResult`] the broker understands.
 async fn dispatch_plugin(
@@ -147,6 +208,20 @@ async fn dispatch_plugin(
         } => (cmd, params, id, ts),
         _ => return Ok(CommandResult::Passthrough(msg.clone())),
     };
+
+    // Schema validation — check params against the plugin's declared schema
+    // before invoking the handler.
+    if let Some(cmd_info) = plugin.commands().iter().find(|c| c.name == *cmd) {
+        if let Err(err_msg) = validate_params(params, cmd_info) {
+            let sys = make_system(
+                &state.room_id,
+                &format!("plugin:{}", plugin.name()),
+                err_msg,
+            );
+            let json = serde_json::to_string(&sys)?;
+            return Ok(CommandResult::Reply(json));
+        }
+    }
 
     let history = HistoryReader::new(&state.chat_path, username);
     let writer = ChatWriter::new(
@@ -584,5 +659,213 @@ mod tests {
             !contents.contains("some existing history"),
             "prior history must be gone after clear"
         );
+    }
+
+    // ── validate_params tests ─────────────────────────────────────────────
+
+    mod validation_tests {
+        use super::super::validate_params;
+        use crate::plugin::{CommandInfo, ParamSchema, ParamType};
+
+        fn cmd_with_params(params: Vec<ParamSchema>) -> CommandInfo {
+            CommandInfo {
+                name: "test".to_owned(),
+                description: "test".to_owned(),
+                usage: "/test".to_owned(),
+                params,
+            }
+        }
+
+        #[test]
+        fn validate_empty_schema_always_passes() {
+            let cmd = cmd_with_params(vec![]);
+            assert!(validate_params(&[], &cmd).is_ok());
+            assert!(validate_params(&["extra".to_owned()], &cmd).is_ok());
+        }
+
+        #[test]
+        fn validate_required_param_missing() {
+            let cmd = cmd_with_params(vec![ParamSchema {
+                name: "user".to_owned(),
+                param_type: ParamType::Text,
+                required: true,
+                description: "target user".to_owned(),
+            }]);
+            let err = validate_params(&[], &cmd).unwrap_err();
+            assert!(err.contains("missing required"));
+            assert!(err.contains("<user>"));
+        }
+
+        #[test]
+        fn validate_required_param_present() {
+            let cmd = cmd_with_params(vec![ParamSchema {
+                name: "user".to_owned(),
+                param_type: ParamType::Text,
+                required: true,
+                description: "target user".to_owned(),
+            }]);
+            assert!(validate_params(&["alice".to_owned()], &cmd).is_ok());
+        }
+
+        #[test]
+        fn validate_optional_param_missing_is_ok() {
+            let cmd = cmd_with_params(vec![ParamSchema {
+                name: "count".to_owned(),
+                param_type: ParamType::Number {
+                    min: None,
+                    max: None,
+                },
+                required: false,
+                description: "count".to_owned(),
+            }]);
+            assert!(validate_params(&[], &cmd).is_ok());
+        }
+
+        #[test]
+        fn validate_choice_valid_value() {
+            let cmd = cmd_with_params(vec![ParamSchema {
+                name: "color".to_owned(),
+                param_type: ParamType::Choice(vec!["red".to_owned(), "blue".to_owned()]),
+                required: true,
+                description: "pick a color".to_owned(),
+            }]);
+            assert!(validate_params(&["red".to_owned()], &cmd).is_ok());
+            assert!(validate_params(&["blue".to_owned()], &cmd).is_ok());
+        }
+
+        #[test]
+        fn validate_choice_invalid_value() {
+            let cmd = cmd_with_params(vec![ParamSchema {
+                name: "color".to_owned(),
+                param_type: ParamType::Choice(vec!["red".to_owned(), "blue".to_owned()]),
+                required: true,
+                description: "pick a color".to_owned(),
+            }]);
+            let err = validate_params(&["green".to_owned()], &cmd).unwrap_err();
+            assert!(err.contains("must be one of"));
+            assert!(err.contains("red"));
+            assert!(err.contains("blue"));
+        }
+
+        #[test]
+        fn validate_number_valid() {
+            let cmd = cmd_with_params(vec![ParamSchema {
+                name: "count".to_owned(),
+                param_type: ParamType::Number {
+                    min: Some(1),
+                    max: Some(100),
+                },
+                required: true,
+                description: "count".to_owned(),
+            }]);
+            assert!(validate_params(&["50".to_owned()], &cmd).is_ok());
+            assert!(validate_params(&["1".to_owned()], &cmd).is_ok());
+            assert!(validate_params(&["100".to_owned()], &cmd).is_ok());
+        }
+
+        #[test]
+        fn validate_number_not_a_number() {
+            let cmd = cmd_with_params(vec![ParamSchema {
+                name: "count".to_owned(),
+                param_type: ParamType::Number {
+                    min: None,
+                    max: None,
+                },
+                required: true,
+                description: "count".to_owned(),
+            }]);
+            let err = validate_params(&["abc".to_owned()], &cmd).unwrap_err();
+            assert!(err.contains("must be a number"));
+        }
+
+        #[test]
+        fn validate_number_below_min() {
+            let cmd = cmd_with_params(vec![ParamSchema {
+                name: "count".to_owned(),
+                param_type: ParamType::Number {
+                    min: Some(10),
+                    max: None,
+                },
+                required: true,
+                description: "count".to_owned(),
+            }]);
+            let err = validate_params(&["5".to_owned()], &cmd).unwrap_err();
+            assert!(err.contains("must be >= 10"));
+        }
+
+        #[test]
+        fn validate_number_above_max() {
+            let cmd = cmd_with_params(vec![ParamSchema {
+                name: "count".to_owned(),
+                param_type: ParamType::Number {
+                    min: None,
+                    max: Some(50),
+                },
+                required: true,
+                description: "count".to_owned(),
+            }]);
+            let err = validate_params(&["100".to_owned()], &cmd).unwrap_err();
+            assert!(err.contains("must be <= 50"));
+        }
+
+        #[test]
+        fn validate_text_always_passes() {
+            let cmd = cmd_with_params(vec![ParamSchema {
+                name: "msg".to_owned(),
+                param_type: ParamType::Text,
+                required: true,
+                description: "message".to_owned(),
+            }]);
+            assert!(validate_params(&["anything at all".to_owned()], &cmd).is_ok());
+        }
+
+        #[test]
+        fn validate_username_always_passes() {
+            let cmd = cmd_with_params(vec![ParamSchema {
+                name: "user".to_owned(),
+                param_type: ParamType::Username,
+                required: true,
+                description: "user".to_owned(),
+            }]);
+            assert!(validate_params(&["alice".to_owned()], &cmd).is_ok());
+        }
+
+        #[test]
+        fn validate_multiple_params() {
+            let cmd = cmd_with_params(vec![
+                ParamSchema {
+                    name: "user".to_owned(),
+                    param_type: ParamType::Username,
+                    required: true,
+                    description: "target".to_owned(),
+                },
+                ParamSchema {
+                    name: "count".to_owned(),
+                    param_type: ParamType::Number {
+                        min: Some(1),
+                        max: Some(100),
+                    },
+                    required: false,
+                    description: "count".to_owned(),
+                },
+            ]);
+            // Both present and valid
+            assert!(validate_params(&["alice".to_owned(), "50".to_owned()], &cmd).is_ok());
+            // First present, second omitted (optional)
+            assert!(validate_params(&["alice".to_owned()], &cmd).is_ok());
+            // First missing (required)
+            assert!(validate_params(&[], &cmd).is_err());
+        }
+
+        #[test]
+        fn validate_choice_optional_missing_is_ok() {
+            let cmd = cmd_with_params(vec![ParamSchema {
+                name: "level".to_owned(),
+                param_type: ParamType::Choice(vec!["low".to_owned(), "high".to_owned()]),
+                required: false,
+                description: "level".to_owned(),
+            }]);
+            assert!(validate_params(&[], &cmd).is_ok());
+        }
     }
 }

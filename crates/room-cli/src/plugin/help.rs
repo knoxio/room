@@ -1,4 +1,4 @@
-use super::{BoxFuture, CommandContext, CommandInfo, Plugin, PluginResult};
+use super::{BoxFuture, CommandContext, CommandInfo, ParamType, Plugin, PluginResult};
 
 /// Built-in `/help` plugin. Lists all available commands or shows details
 /// for a specific command. Dogfoods the plugin API — uses
@@ -16,7 +16,12 @@ impl Plugin for HelpPlugin {
             name: "help".to_owned(),
             description: "List available commands or get help for a specific command".to_owned(),
             usage: "/help [command]".to_owned(),
-            completions: vec![],
+            params: vec![super::ParamSchema {
+                name: "command".to_owned(),
+                param_type: ParamType::Text,
+                required: false,
+                description: "Command name to get help for".to_owned(),
+            }],
         }]
     }
 
@@ -25,29 +30,25 @@ impl Plugin for HelpPlugin {
             if let Some(target) = ctx.params.first() {
                 // Show help for a specific command
                 let target = target.strip_prefix('/').unwrap_or(target);
+
+                // Check plugin/available commands first
                 if let Some(cmd) = ctx.available_commands.iter().find(|c| c.name == target) {
-                    let text = format!("{}\n  {}", cmd.usage, cmd.description);
-                    return Ok(PluginResult::Reply(text));
+                    return Ok(PluginResult::Reply(format_command_help(cmd)));
                 }
                 // Also check built-in commands
-                let builtin = builtin_help(target);
-                if let Some(text) = builtin {
-                    return Ok(PluginResult::Reply(text));
+                let builtins = super::builtin_command_infos();
+                if let Some(cmd) = builtins.iter().find(|c| c.name == target) {
+                    return Ok(PluginResult::Reply(format_command_help(cmd)));
                 }
                 return Ok(PluginResult::Reply(format!("unknown command: /{target}")));
             }
 
             // List all commands: built-ins first, then plugins
-            let mut lines = vec![
-                "available commands:".to_owned(),
-                "  /who — show online users".to_owned(),
-                "  /set_status <status> — set your status".to_owned(),
-                "  /kick <user> — kick a user (host only)".to_owned(),
-                "  /reauth <user> — clear a user's token (host only)".to_owned(),
-                "  /clear-tokens — clear all tokens (host only)".to_owned(),
-                "  /clear — clear chat history (host only)".to_owned(),
-                "  /exit — shut down the room (host only)".to_owned(),
-            ];
+            let builtins = super::builtin_command_infos();
+            let mut lines = vec!["available commands:".to_owned()];
+            for cmd in &builtins {
+                lines.push(format!("  {} — {}", cmd.usage, cmd.description));
+            }
             for cmd in &ctx.available_commands {
                 lines.push(format!("  {} — {}", cmd.usage, cmd.description));
             }
@@ -57,31 +58,41 @@ impl Plugin for HelpPlugin {
     }
 }
 
-fn builtin_help(cmd: &str) -> Option<String> {
-    match cmd {
-        "who" => Some("/who\n  Show online users and their status".to_owned()),
-        "set_status" => {
-            Some("/set_status <status>\n  Set your status (visible in /who)".to_owned())
+/// Format detailed help for a single command, including typed parameter info.
+fn format_command_help(cmd: &CommandInfo) -> String {
+    let mut lines = vec![cmd.usage.clone(), format!("  {}", cmd.description)];
+    if !cmd.params.is_empty() {
+        lines.push("  parameters:".to_owned());
+        for p in &cmd.params {
+            let req = if p.required { "required" } else { "optional" };
+            let type_hint = match &p.param_type {
+                ParamType::Text => "text".to_owned(),
+                ParamType::Username => "username".to_owned(),
+                ParamType::Number { min, max } => match (min, max) {
+                    (Some(lo), Some(hi)) => format!("number ({lo}..{hi})"),
+                    (Some(lo), None) => format!("number ({lo}..)"),
+                    (None, Some(hi)) => format!("number (..{hi})"),
+                    (None, None) => "number".to_owned(),
+                },
+                ParamType::Choice(values) => {
+                    format!("one of: {}", values.join(", "))
+                }
+            };
+            lines.push(format!(
+                "    <{}> — {} [{}] {}",
+                p.name, p.description, req, type_hint
+            ));
         }
-        "kick" => Some(
-            "/kick <username>\n  Kick a user and invalidate their token (host only)".to_owned(),
-        ),
-        "reauth" => Some(
-            "/reauth <username>\n  Clear a user's token so they can rejoin (host only)".to_owned(),
-        ),
-        "clear-tokens" => {
-            Some("/clear-tokens\n  Clear all tokens; all users must rejoin (host only)".to_owned())
-        }
-        "clear" => Some("/clear\n  Truncate chat history (host only)".to_owned()),
-        "exit" => Some("/exit\n  Shut down the room (host only)".to_owned()),
-        _ => None,
     }
+    lines.join("\n")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plugin::{ChatWriter, Completion, HistoryReader, RoomMetadata, UserInfo};
+    use crate::plugin::{
+        ChatWriter, HistoryReader, ParamSchema, ParamType, RoomMetadata, UserInfo,
+    };
     use chrono::Utc;
     use std::sync::{atomic::AtomicU64, Arc};
     use tempfile::NamedTempFile;
@@ -122,13 +133,13 @@ mod tests {
                 name: "stats".to_owned(),
                 description: "Show stats".to_owned(),
                 usage: "/stats [N]".to_owned(),
-                completions: vec![],
+                params: vec![],
             },
             CommandInfo {
                 name: "help".to_owned(),
                 description: "Show help".to_owned(),
                 usage: "/help [cmd]".to_owned(),
-                completions: vec![],
+                params: vec![],
             },
         ];
         let ctx = make_test_context(vec![], commands);
@@ -148,7 +159,7 @@ mod tests {
             name: "stats".to_owned(),
             description: "Show stats".to_owned(),
             usage: "/stats [N]".to_owned(),
-            completions: vec![],
+            params: vec![],
         }];
         let ctx = make_test_context(vec!["stats".to_owned()], commands);
         let result = HelpPlugin.handle(ctx).await.unwrap();
@@ -167,7 +178,7 @@ mod tests {
             panic!("expected Reply");
         };
         assert!(text.contains("/who"));
-        assert!(text.contains("Show online users"));
+        assert!(text.contains("List users in the room"));
     }
 
     #[tokio::test]
@@ -186,9 +197,14 @@ mod tests {
             name: "stats".to_owned(),
             description: "Show stats".to_owned(),
             usage: "/stats [N]".to_owned(),
-            completions: vec![Completion {
-                position: 0,
-                values: vec!["10".to_owned()],
+            params: vec![ParamSchema {
+                name: "count".to_owned(),
+                param_type: ParamType::Number {
+                    min: Some(1),
+                    max: None,
+                },
+                required: false,
+                description: "Number of messages".to_owned(),
             }],
         }];
         let ctx = make_test_context(vec!["/stats".to_owned()], commands);
@@ -200,5 +216,46 @@ mod tests {
             text.contains("/stats [N]"),
             "should find stats even with leading /"
         );
+    }
+
+    #[tokio::test]
+    async fn help_specific_command_shows_param_info() {
+        let commands = vec![CommandInfo {
+            name: "stats".to_owned(),
+            description: "Show stats".to_owned(),
+            usage: "/stats [N]".to_owned(),
+            params: vec![ParamSchema {
+                name: "count".to_owned(),
+                param_type: ParamType::Choice(vec![
+                    "10".to_owned(),
+                    "25".to_owned(),
+                    "50".to_owned(),
+                ]),
+                required: false,
+                description: "Number of messages".to_owned(),
+            }],
+        }];
+        let ctx = make_test_context(vec!["stats".to_owned()], commands);
+        let result = HelpPlugin.handle(ctx).await.unwrap();
+        let PluginResult::Reply(text) = result else {
+            panic!("expected Reply");
+        };
+        assert!(text.contains("parameters:"), "should show param section");
+        assert!(text.contains("<count>"), "should show param name");
+        assert!(text.contains("optional"), "should show required flag");
+        assert!(text.contains("one of:"), "should show choices");
+    }
+
+    #[tokio::test]
+    async fn help_builtin_command_shows_param_info() {
+        // /kick is a built-in with a Username param
+        let ctx = make_test_context(vec!["kick".to_owned()], vec![]);
+        let result = HelpPlugin.handle(ctx).await.unwrap();
+        let PluginResult::Reply(text) = result else {
+            panic!("expected Reply");
+        };
+        assert!(text.contains("parameters:"));
+        assert!(text.contains("username"));
+        assert!(text.contains("required"));
     }
 }
