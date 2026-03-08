@@ -42,6 +42,38 @@ use super::{
     ws::{self, DaemonWsState},
 };
 
+/// Characters that are unsafe in filesystem paths or shell contexts.
+const UNSAFE_CHARS: &[char] = &['/', '\\', ':', '*', '?', '"', '<', '>', '|', '\0'];
+
+/// Maximum allowed length for a room ID.
+const MAX_ROOM_ID_LEN: usize = 64;
+
+/// Validate a room ID for filesystem safety.
+///
+/// Rejects IDs that are empty, too long, contain path traversal sequences
+/// (`..`), whitespace, or filesystem-unsafe characters.
+pub fn validate_room_id(room_id: &str) -> Result<(), String> {
+    if room_id.is_empty() {
+        return Err("room ID cannot be empty".into());
+    }
+    if room_id.len() > MAX_ROOM_ID_LEN {
+        return Err(format!(
+            "room ID too long ({} chars, max {MAX_ROOM_ID_LEN})",
+            room_id.len()
+        ));
+    }
+    if room_id == "." || room_id == ".." || room_id.contains("..") {
+        return Err("room ID cannot contain '..'".into());
+    }
+    if room_id.chars().any(|c| c.is_whitespace()) {
+        return Err("room ID cannot contain whitespace".into());
+    }
+    if let Some(bad) = room_id.chars().find(|c| UNSAFE_CHARS.contains(c)) {
+        return Err(format!("room ID contains unsafe character: {bad:?}"));
+    }
+    Ok(())
+}
+
 /// Configuration for the daemon.
 #[derive(Debug, Clone)]
 pub struct DaemonConfig {
@@ -95,8 +127,10 @@ impl DaemonState {
         }
     }
 
-    /// Create a room and register it. Returns `Err` if the room already exists.
+    /// Create a room and register it. Returns `Err` if the room ID is invalid
+    /// or the room already exists.
     pub async fn create_room(&self, room_id: &str) -> Result<(), String> {
+        validate_room_id(room_id)?;
         let mut rooms = self.rooms.lock().await;
         if rooms.contains_key(room_id) {
             return Err(format!("room already exists: {room_id}"));
@@ -130,12 +164,14 @@ impl DaemonState {
         Ok(())
     }
 
-    /// Create a room with explicit configuration. Returns `Err` if room already exists.
+    /// Create a room with explicit configuration. Returns `Err` if the room ID
+    /// is invalid or the room already exists.
     pub async fn create_room_with_config(
         &self,
         room_id: &str,
         config: room_protocol::RoomConfig,
     ) -> Result<(), String> {
+        validate_room_id(room_id)?;
         let mut rooms = self.rooms.lock().await;
         if rooms.contains_key(room_id) {
             return Err(format!("room already exists: {room_id}"));
@@ -631,5 +667,105 @@ mod tests {
         assert!(daemon.has_room("dm-alice-bob").await);
         // Reverse order gives the same room_id
         assert_eq!(room_protocol::dm_room_id("alice", "bob"), "dm-alice-bob");
+    }
+
+    // ── validate_room_id ──────────────────────────────────────────────────
+
+    #[test]
+    fn valid_room_ids() {
+        for id in [
+            "lobby",
+            "agent-room-2",
+            "my_room",
+            "Room.1",
+            "dm-alice-bob",
+            "a",
+            &"x".repeat(MAX_ROOM_ID_LEN),
+        ] {
+            assert!(validate_room_id(id).is_ok(), "should accept: {id:?}");
+        }
+    }
+
+    #[test]
+    fn empty_room_id_rejected() {
+        let err = validate_room_id("").unwrap_err();
+        assert!(err.contains("empty"), "{err}");
+    }
+
+    #[test]
+    fn room_id_too_long_rejected() {
+        let long = "x".repeat(MAX_ROOM_ID_LEN + 1);
+        let err = validate_room_id(&long).unwrap_err();
+        assert!(err.contains("too long"), "{err}");
+    }
+
+    #[test]
+    fn dot_dot_traversal_rejected() {
+        for id in ["..", "room/../etc", "..secret", "a..b"] {
+            let err = validate_room_id(id).unwrap_err();
+            assert!(err.contains(".."), "should reject {id:?}: {err}");
+        }
+    }
+
+    #[test]
+    fn single_dot_rejected() {
+        let err = validate_room_id(".").unwrap_err();
+        assert!(err.contains(".."), "{err}");
+    }
+
+    #[test]
+    fn slash_rejected() {
+        for id in ["room/sub", "/etc/passwd", "a/b/c"] {
+            let err = validate_room_id(id).unwrap_err();
+            assert!(err.contains("unsafe"), "should reject {id:?}: {err}");
+        }
+    }
+
+    #[test]
+    fn backslash_rejected() {
+        let err = validate_room_id("room\\sub").unwrap_err();
+        assert!(err.contains("unsafe"), "{err}");
+    }
+
+    #[test]
+    fn null_byte_rejected() {
+        let err = validate_room_id("room\0id").unwrap_err();
+        assert!(err.contains("unsafe"), "{err}");
+    }
+
+    #[test]
+    fn whitespace_rejected() {
+        for id in ["room name", "room\tid", "room\nid", " leading", "trailing "] {
+            let err = validate_room_id(id).unwrap_err();
+            assert!(err.contains("whitespace"), "should reject {id:?}: {err}");
+        }
+    }
+
+    #[test]
+    fn other_unsafe_chars_rejected() {
+        for ch in [':', '*', '?', '"', '<', '>', '|'] {
+            let id = format!("room{ch}id");
+            let err = validate_room_id(&id).unwrap_err();
+            assert!(err.contains("unsafe"), "should reject {ch:?}: {err}");
+        }
+    }
+
+    #[tokio::test]
+    async fn create_room_rejects_invalid_id() {
+        let daemon = DaemonState::new(DaemonConfig::default());
+        assert!(daemon.create_room("room/sub").await.is_err());
+        assert!(daemon.create_room("..").await.is_err());
+        assert!(daemon.create_room("").await.is_err());
+        assert!(daemon.create_room("room name").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn create_room_with_config_rejects_invalid_id() {
+        let daemon = DaemonState::new(DaemonConfig::default());
+        let config = room_protocol::RoomConfig::public("owner");
+        assert!(daemon
+            .create_room_with_config("../etc", config)
+            .await
+            .is_err());
     }
 }
