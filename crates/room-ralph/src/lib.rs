@@ -58,9 +58,21 @@ pub struct Cli {
     #[arg(long = "add-dir")]
     pub add_dirs: Vec<PathBuf>,
 
-    /// Allowed tools for claude (comma-separated, passed as --allowedTools)
+    /// Allowed tools for claude (comma-separated, passed as --allowedTools).
+    /// Controls auto-approval — tools not listed may still be available
+    /// but require user approval (which auto-denies in -p mode for most tools).
     #[arg(long = "allow-tools", value_delimiter = ',')]
     pub allow_tools: Vec<String>,
+
+    /// Disallowed tools for claude (comma-separated, passed as --disallowedTools).
+    /// Hard-blocks tools — they are completely removed from the session.
+    /// Supports granular patterns like `Bash(python3:*)`.
+    #[arg(
+        long = "disallow-tools",
+        env = "RALPH_DISALLOWED_TOOLS",
+        value_delimiter = ','
+    )]
+    pub disallow_tools: Vec<String>,
 
     /// Print the prompt that would be sent, then exit
     #[arg(long)]
@@ -78,7 +90,13 @@ mod tests {
 
     /// Helper: clear all RALPH_* env vars to avoid cross-test contamination.
     fn clear_ralph_env() {
-        for key in ["RALPH_ROOM", "RALPH_USERNAME", "RALPH_MODEL", "RALPH_ISSUE"] {
+        for key in [
+            "RALPH_ROOM",
+            "RALPH_USERNAME",
+            "RALPH_MODEL",
+            "RALPH_ISSUE",
+            "RALPH_DISALLOWED_TOOLS",
+        ] {
             unsafe { std::env::remove_var(key) };
         }
     }

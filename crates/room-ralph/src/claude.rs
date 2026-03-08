@@ -3,6 +3,9 @@ use std::process::Command;
 
 /// Safe default tools that ralph passes to claude when no explicit
 /// --allow-tools flag or RALPH_ALLOWED_TOOLS env var is set.
+///
+/// These control auto-approval — tools not listed may still be available
+/// but require user approval (which auto-denies in `-p` mode for most tools).
 pub const DEFAULT_ALLOWED_TOOLS: &[&str] = &[
     "Read",
     "Glob",
@@ -13,6 +16,12 @@ pub const DEFAULT_ALLOWED_TOOLS: &[&str] = &[
     "Bash(git log)",
     "Bash(git diff)",
 ];
+
+/// Default disallowed tools — hard-blocked from the session entirely.
+///
+/// Empty by default (no tools blocked). Users can add restrictions via
+/// `--disallow-tools` or `RALPH_DISALLOWED_TOOLS` env var.
+pub const DEFAULT_DISALLOWED_TOOLS: &[&str] = &[];
 
 /// Resolve the effective allowed-tools list.
 ///
@@ -45,6 +54,39 @@ pub fn resolve_allowed_tools(cli_tools: &[String]) -> Vec<String> {
         .collect()
 }
 
+/// Resolve the effective disallowed-tools list.
+///
+/// Precedence: CLI --disallow-tools > RALPH_DISALLOWED_TOOLS env > defaults.
+/// Special value "none" (case-insensitive) clears all disallowed tools.
+pub fn resolve_disallowed_tools(cli_tools: &[String]) -> Vec<String> {
+    // CLI takes highest precedence
+    if !cli_tools.is_empty() {
+        if cli_tools.len() == 1 && cli_tools[0].eq_ignore_ascii_case("none") {
+            return Vec::new();
+        }
+        return cli_tools.to_vec();
+    }
+
+    // Check env var (clap handles this for the CLI flag, but we keep the
+    // manual check for consistency with resolve_allowed_tools and to support
+    // the "none" sentinel when set via env)
+    if let Ok(env_val) = std::env::var("RALPH_DISALLOWED_TOOLS") {
+        let trimmed = env_val.trim();
+        if trimmed.eq_ignore_ascii_case("none") {
+            return Vec::new();
+        }
+        if !trimmed.is_empty() {
+            return trimmed.split(',').map(|s| s.trim().to_string()).collect();
+        }
+    }
+
+    // Fall back to defaults (empty)
+    DEFAULT_DISALLOWED_TOOLS
+        .iter()
+        .map(|s| (*s).to_string())
+        .collect()
+}
+
 /// Output from a claude -p invocation.
 pub struct ClaudeOutput {
     /// Raw JSON output from claude --output-format json
@@ -61,7 +103,12 @@ pub struct ClaudeOutput {
 const STRIPPED_ENV_VARS: &[&str] = &["CLAUDECODE", "CLAUDE_CODE_ENTRY_POINT"];
 
 /// Build the `claude` command with all flags, ready to spawn.
-fn build_claude_command(model: &str, add_dirs: &[PathBuf], allowed_tools: &[String]) -> Command {
+fn build_claude_command(
+    model: &str,
+    add_dirs: &[PathBuf],
+    allowed_tools: &[String],
+    disallowed_tools: &[String],
+) -> Command {
     let mut cmd = Command::new("claude");
     for var in STRIPPED_ENV_VARS {
         cmd.env_remove(var);
@@ -72,6 +119,9 @@ fn build_claude_command(model: &str, add_dirs: &[PathBuf], allowed_tools: &[Stri
     }
     for tool in allowed_tools {
         cmd.args(["--allowedTools", tool]);
+    }
+    for tool in disallowed_tools {
+        cmd.args(["--disallowedTools", tool]);
     }
     cmd
 }
@@ -85,11 +135,12 @@ pub fn spawn_claude(
     prompt_file: &Path,
     add_dirs: &[PathBuf],
     allowed_tools: &[String],
+    disallowed_tools: &[String],
 ) -> Result<ClaudeOutput, String> {
     let prompt = std::fs::read_to_string(prompt_file)
         .map_err(|e| format!("cannot read prompt file {}: {e}", prompt_file.display()))?;
 
-    let mut cmd = build_claude_command(model, add_dirs, allowed_tools);
+    let mut cmd = build_claude_command(model, add_dirs, allowed_tools, disallowed_tools);
     cmd.stdin(std::process::Stdio::piped());
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
@@ -232,7 +283,7 @@ mod tests {
 
     #[test]
     fn build_command_base_args() {
-        let cmd = build_claude_command("opus", &[], &[]);
+        let cmd = build_claude_command("opus", &[], &[], &[]);
         let args: Vec<_> = cmd
             .get_args()
             .map(|a| a.to_string_lossy().to_string())
@@ -243,7 +294,7 @@ mod tests {
     #[test]
     fn build_command_with_add_dirs() {
         let dirs = vec![PathBuf::from("/tmp/dir1"), PathBuf::from("/tmp/dir2")];
-        let cmd = build_claude_command("sonnet", &dirs, &[]);
+        let cmd = build_claude_command("sonnet", &dirs, &[], &[]);
         let args: Vec<_> = cmd
             .get_args()
             .map(|a| a.to_string_lossy().to_string())
@@ -256,7 +307,7 @@ mod tests {
     #[test]
     fn build_command_with_allowed_tools() {
         let tools = vec!["Bash".to_string(), "Read".to_string(), "Write".to_string()];
-        let cmd = build_claude_command("opus", &[], &tools);
+        let cmd = build_claude_command("opus", &[], &tools, &[]);
         let args: Vec<_> = cmd
             .get_args()
             .map(|a| a.to_string_lossy().to_string())
@@ -272,7 +323,7 @@ mod tests {
 
     #[test]
     fn build_command_empty_allowed_tools() {
-        let cmd = build_claude_command("opus", &[], &[]);
+        let cmd = build_claude_command("opus", &[], &[], &[]);
         let args: Vec<_> = cmd
             .get_args()
             .map(|a| a.to_string_lossy().to_string())
@@ -284,7 +335,7 @@ mod tests {
     fn build_command_with_dirs_and_tools() {
         let dirs = vec![PathBuf::from("/tmp/work")];
         let tools = vec!["Bash".to_string()];
-        let cmd = build_claude_command("opus", &dirs, &tools);
+        let cmd = build_claude_command("opus", &dirs, &tools, &[]);
         let args: Vec<_> = cmd
             .get_args()
             .map(|a| a.to_string_lossy().to_string())
@@ -404,7 +455,7 @@ mod tests {
 
     #[test]
     fn build_command_strips_claudecode_env_vars() {
-        let cmd = build_claude_command("opus", &[], &[]);
+        let cmd = build_claude_command("opus", &[], &[], &[]);
         let removals: Vec<_> = cmd
             .get_envs()
             .filter(|(_, val)| val.is_none())
@@ -422,5 +473,140 @@ mod tests {
     fn stripped_env_vars_contains_expected_entries() {
         assert!(STRIPPED_ENV_VARS.contains(&"CLAUDECODE"));
         assert!(STRIPPED_ENV_VARS.contains(&"CLAUDE_CODE_ENTRY_POINT"));
+    }
+
+    // --- disallowed tools tests ---
+
+    #[test]
+    fn build_command_with_disallowed_tools() {
+        let disallowed = vec![
+            "Write".to_string(),
+            "Edit".to_string(),
+            "Bash(python3:*)".to_string(),
+        ];
+        let cmd = build_claude_command("opus", &[], &[], &disallowed);
+        let args: Vec<_> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+        let disallowed_flags: Vec<_> = args
+            .windows(2)
+            .filter(|w| w[0] == "--disallowedTools")
+            .map(|w| w[1].clone())
+            .collect();
+        assert_eq!(disallowed_flags, ["Write", "Edit", "Bash(python3:*)"]);
+    }
+
+    #[test]
+    fn build_command_empty_disallowed_tools() {
+        let cmd = build_claude_command("opus", &[], &[], &[]);
+        let args: Vec<_> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+        assert!(!args.contains(&"--disallowedTools".to_string()));
+    }
+
+    #[test]
+    fn build_command_both_allowed_and_disallowed() {
+        let allowed = vec!["Read".to_string(), "Glob".to_string()];
+        let disallowed = vec!["Write".to_string(), "Edit".to_string()];
+        let cmd = build_claude_command("opus", &[], &allowed, &disallowed);
+        let args: Vec<_> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+        let allow_flags: Vec<_> = args
+            .windows(2)
+            .filter(|w| w[0] == "--allowedTools")
+            .map(|w| w[1].clone())
+            .collect();
+        let disallow_flags: Vec<_> = args
+            .windows(2)
+            .filter(|w| w[0] == "--disallowedTools")
+            .map(|w| w[1].clone())
+            .collect();
+        assert_eq!(allow_flags, ["Read", "Glob"]);
+        assert_eq!(disallow_flags, ["Write", "Edit"]);
+    }
+
+    #[test]
+    fn resolve_disallowed_defaults_empty() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("RALPH_DISALLOWED_TOOLS");
+        let result = resolve_disallowed_tools(&[]);
+        assert!(result.is_empty());
+        std::env::remove_var("RALPH_DISALLOWED_TOOLS");
+    }
+
+    #[test]
+    fn resolve_disallowed_cli_overrides() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("RALPH_DISALLOWED_TOOLS");
+        let cli = vec!["Write".to_string(), "Edit".to_string()];
+        let result = resolve_disallowed_tools(&cli);
+        assert_eq!(result, vec!["Write", "Edit"]);
+        std::env::remove_var("RALPH_DISALLOWED_TOOLS");
+    }
+
+    #[test]
+    fn resolve_disallowed_cli_none_clears() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("RALPH_DISALLOWED_TOOLS");
+        let cli = vec!["none".to_string()];
+        let result = resolve_disallowed_tools(&cli);
+        assert!(result.is_empty());
+        std::env::remove_var("RALPH_DISALLOWED_TOOLS");
+    }
+
+    #[test]
+    fn resolve_disallowed_env_overrides() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("RALPH_DISALLOWED_TOOLS");
+        std::env::set_var("RALPH_DISALLOWED_TOOLS", "Bash,Write");
+        let result = resolve_disallowed_tools(&[]);
+        assert_eq!(result, vec!["Bash", "Write"]);
+        std::env::remove_var("RALPH_DISALLOWED_TOOLS");
+    }
+
+    #[test]
+    fn resolve_disallowed_cli_takes_precedence_over_env() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("RALPH_DISALLOWED_TOOLS");
+        std::env::set_var("RALPH_DISALLOWED_TOOLS", "Bash,Write");
+        let cli = vec!["Edit".to_string()];
+        let result = resolve_disallowed_tools(&cli);
+        assert_eq!(result, vec!["Edit"]);
+        std::env::remove_var("RALPH_DISALLOWED_TOOLS");
+    }
+
+    #[test]
+    fn resolve_disallowed_env_none_clears() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("RALPH_DISALLOWED_TOOLS");
+        std::env::set_var("RALPH_DISALLOWED_TOOLS", "none");
+        let result = resolve_disallowed_tools(&[]);
+        assert!(result.is_empty());
+        std::env::remove_var("RALPH_DISALLOWED_TOOLS");
+    }
+
+    #[test]
+    fn resolve_disallowed_env_trims_whitespace() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("RALPH_DISALLOWED_TOOLS");
+        std::env::set_var("RALPH_DISALLOWED_TOOLS", " Write , Edit , Bash(rm:*) ");
+        let result = resolve_disallowed_tools(&[]);
+        assert_eq!(result, vec!["Write", "Edit", "Bash(rm:*)"]);
+        std::env::remove_var("RALPH_DISALLOWED_TOOLS");
+    }
+
+    #[test]
+    fn resolve_disallowed_env_empty_uses_defaults() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("RALPH_DISALLOWED_TOOLS");
+        std::env::set_var("RALPH_DISALLOWED_TOOLS", "");
+        let result = resolve_disallowed_tools(&[]);
+        assert!(result.is_empty()); // defaults are empty
+        std::env::remove_var("RALPH_DISALLOWED_TOOLS");
     }
 }
