@@ -429,20 +429,23 @@ crates/room-protocol/src/
   lib.rs               — Message enum, constructors, serde impls, parse_client_line
 
 crates/room-cli/src/
-  main.rs              — CLI parsing, subcommand dispatch (join / send / poll / watch / list)
+  main.rs              — CLI parsing, subcommand dispatch (join / send / poll / watch / list / daemon)
   lib.rs               — Re-exports all modules (required for integration tests)
   client.rs            — Connects to broker, runs TUI or agent mode
   message.rs           — Re-exports room_protocol::* + CLI-specific helpers
   history.rs           — NDJSON load/append
+  registry.rs          — Persistent UserRegistry (user CRUD, token auth, room membership, global status)
   broker/
-    mod.rs             — Accept loop, handle_client, handle_oneshot_send
+    mod.rs             — Accept loop, handle_client, handle_oneshot_send, run_interactive_session
     state.rs           — RoomState struct and type aliases (ClientMap, StatusMap, etc.)
     auth.rs            — Token issuance (issue_token) and validation (validate_token)
-    commands.rs        — Unified command routing (route_command, handle_admin_cmd, dispatch_plugin)
+    commands.rs        — Unified command routing (route_command, handle_admin_cmd, dispatch_plugin, validate_params)
+    daemon.rs          — Multi-room daemon (DaemonState, room lifecycle, ROOM: handshake, UDS dispatch)
     fanout.rs          — broadcast_and_persist, dm_and_persist
-    ws.rs              — WebSocket upgrade, REST endpoints, WS session lifecycle
+    ws.rs              — WebSocket upgrade, REST endpoints, WS session lifecycle, daemon REST handlers
   plugin/
-    mod.rs             — Plugin trait, PluginRegistry, CommandContext, HistoryReader, ChatWriter
+    mod.rs             — Plugin trait, PluginRegistry, CommandContext, HistoryReader, ChatWriter,
+                          ParamSchema, ParamType, builtin_command_infos, all_known_commands
     help.rs            — Built-in /help plugin
     stats.rs           — Built-in /stats plugin
   oneshot/
@@ -455,7 +458,7 @@ crates/room-cli/src/
     mod.rs             — Main run() loop and TUI state
     input.rs           — InputState, handle_key, Action enum
     render.rs          — format_message, wrap_words, rendering helpers
-    widgets.rs         — CommandPalette, MentionPicker
+    widgets.rs         — CommandPalette (dynamic, schema-driven), MentionPicker
 crates/room-cli/tests/
   integration.rs       — Integration tests against a live broker (UDS + WS)
   ws_smoke.rs          — End-to-end smoke tests spawning the real binary with --ws-port
@@ -470,12 +473,15 @@ crates/room-ralph/src/
   room.rs              — Room CLI wrapper: join/send/poll/set_status via Command::new
   claude.rs            — Claude subprocess wrapper: spawn, parse output, resolve_allowed/disallowed_tools
 
+docs/
+  design-253-room-visibility.md — Design doc for room visibility and ACLs
+
 scripts/
   pre-push.sh          — Git hook: check + fmt + clippy + test
   ralph-room.sh        — Legacy shell agent wrapper (superseded by room-ralph)
   context-monitor.sh   — Legacy shell context monitor (superseded by room-ralph)
-  test-ralph-room.sh   — Shell tests for ralph-room.sh (46 tests)
-  test-context-monitor.sh — Shell tests for context-monitor.sh (41 tests)
+  test-ralph-room.sh   — Shell tests for ralph-room.sh (59 tests)
+  test-context-monitor.sh — Shell tests for context-monitor.sh (48 tests)
   progress-template.md — Structured progress file template
 ```
 
@@ -533,11 +539,11 @@ All tests must remain green. Add tests for any new behaviour.
 
 ## Baseline test count
 
-**Current baseline: 476 Rust tests + 107 shell tests**
+**Current baseline: 562 Rust tests + 107 shell tests**
 
 Rust breakdown:
 - room-protocol: 20 unit tests
-- room-cli: 256 unit + 71 integration + 5 smoke = 332 tests
+- room-cli: 336 unit + 77 integration + 5 smoke = 418 tests
 - room-ralph: 111 unit + 8 integration = 119 tests (+ 1 ignored live-broker test)
 - agentroom: 5 integration tests (deprecation shim)
 
