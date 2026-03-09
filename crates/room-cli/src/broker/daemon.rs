@@ -433,11 +433,12 @@ impl DaemonState {
                     let rooms = self.rooms.clone();
                     let next_id = self.next_client_id.clone();
                     let cfg = self.config.clone();
+                    let sys_tokens = self.system_token_map.clone();
                     let registry = self.user_registry.clone();
                     let tx = close_tx.clone();
 
                     tokio::spawn(async move {
-                        if let Err(e) = dispatch_connection(stream, &rooms, &next_id, &cfg, &registry).await {
+                        if let Err(e) = dispatch_connection(stream, &rooms, &next_id, &cfg, &sys_tokens, &registry).await {
                             eprintln!("[daemon] connection error: {e:#}");
                         }
                         count.fetch_sub(1, Ordering::SeqCst);
@@ -578,6 +579,7 @@ async fn handle_create(
     write_half: &mut tokio::net::unix::OwnedWriteHalf,
     rooms: &RoomMap,
     daemon_config: &DaemonConfig,
+    system_token_map: &TokenMap,
 ) -> anyhow::Result<()> {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
@@ -679,7 +681,6 @@ async fn handle_create(
 
     // Build RoomState (mirrors DaemonState::create_room_with_config).
     let chat_path = daemon_config.chat_path(room_id);
-    let token_map_path = daemon_config.token_map_path(room_id);
     let subscription_map_path = daemon_config.subscription_map_path(room_id);
     let (shutdown_tx, _) = watch::channel(false);
 
@@ -703,18 +704,21 @@ async fn handle_create(
         return Ok(());
     }
 
-    let initial_subs = build_initial_subscriptions(&room_config);
-    let persisted_tokens = super::auth::load_token_map(&token_map_path);
+    // Merge persisted subscriptions with config defaults (DM auto-subscribe).
+    let mut merged_subs = build_initial_subscriptions(&room_config);
+    let persisted_subs = super::commands::load_subscription_map(&subscription_map_path);
+    merged_subs.extend(persisted_subs);
 
     let state = Arc::new(RoomState {
         clients: Arc::new(Mutex::new(HashMap::new())),
         status_map: Arc::new(Mutex::new(HashMap::new())),
         host_user: Arc::new(Mutex::new(None)),
-        token_map: Arc::new(Mutex::new(persisted_tokens)),
+        // Share the daemon's system-level token map so tokens work across rooms.
+        token_map: Arc::clone(system_token_map),
         claim_map: Arc::new(Mutex::new(HashMap::new())),
-        subscription_map: Arc::new(Mutex::new(initial_subs)),
+        subscription_map: Arc::new(Mutex::new(merged_subs)),
         chat_path: Arc::new(chat_path),
-        token_map_path: Arc::new(token_map_path),
+        token_map_path: Arc::new(daemon_config.system_tokens_path()),
         subscription_map_path: Arc::new(subscription_map_path),
         room_id: Arc::new(room_id.to_owned()),
         shutdown: Arc::new(shutdown_tx),
@@ -743,6 +747,7 @@ async fn dispatch_connection(
     rooms: &RoomMap,
     next_client_id: &Arc<AtomicU64>,
     daemon_config: &DaemonConfig,
+    system_token_map: &TokenMap,
     user_registry: &Arc<tokio::sync::Mutex<UserRegistry>>,
 ) -> anyhow::Result<()> {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -760,7 +765,15 @@ async fn dispatch_connection(
 
     // Handle CREATE:<room_id> — daemon-level room creation.
     if let Some(room_id) = first_line.strip_prefix("CREATE:") {
-        return handle_create(room_id, &mut reader, &mut write_half, rooms, daemon_config).await;
+        return handle_create(
+            room_id,
+            &mut reader,
+            &mut write_half,
+            rooms,
+            daemon_config,
+            system_token_map,
+        )
+        .await;
     }
 
     // Parse ROOM:<room_id>:<rest>
