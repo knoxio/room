@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use chrono::DateTime;
 use clap::{Parser, Subcommand};
 use room_cli::{
     broker::{
@@ -8,7 +9,9 @@ use room_cli::{
     },
     client::Client,
     history::default_chat_path,
-    oneshot,
+    message::parse_message_id,
+    oneshot::{self, QueryOptions},
+    query::QueryFilter,
 };
 use tokio::net::UnixStream;
 
@@ -37,7 +40,61 @@ enum Cmd {
         #[arg(trailing_var_arg = true, num_args = 1..)]
         message: Vec<String>,
     },
-    /// Poll for new messages, printing NDJSON to stdout.
+    /// Query message history with optional filters.
+    ///
+    /// Without flags, returns all messages (newest-first). Use `--new` to return
+    /// only messages since the last poll (advancing the cursor). Use `--wait` to
+    /// block until at least one new foreign message arrives.
+    ///
+    /// Flags compose freely: `-r dev -n 20 --user alice --new` returns the 20 most
+    /// recent messages from alice in the dev room that arrived since your last poll.
+    Query {
+        /// Single room ID (omit when using -r/--room)
+        room_id: Option<String>,
+        /// Session token from `room join` (required)
+        #[arg(short = 't', long)]
+        token: String,
+        /// Filter by room IDs — comma-separated or repeated (overrides positional room_id)
+        #[arg(short = 'r', long = "room", value_delimiter = ',')]
+        rooms: Vec<String>,
+        /// Only include messages sent by this user
+        #[arg(long)]
+        user: Option<String>,
+        /// Only messages after this position — format `<room>:<seq>` (exclusive)
+        #[arg(long)]
+        from: Option<String>,
+        /// Only messages at or before this position — format `<room>:<seq>` (inclusive)
+        #[arg(long)]
+        to: Option<String>,
+        /// Only messages after this timestamp (ISO 8601, e.g. `2026-03-01T00:00:00Z`)
+        #[arg(long)]
+        since: Option<String>,
+        /// Only messages before this timestamp (ISO 8601)
+        #[arg(long)]
+        until: Option<String>,
+        /// Limit output to N messages
+        #[arg(short = 'n')]
+        count: Option<usize>,
+        /// Only messages that @mention the caller
+        #[arg(short = 'm', long = "mentions-only")]
+        mentions_only: bool,
+        /// Return only new messages since last poll (advances cursor)
+        #[arg(long)]
+        new: bool,
+        /// Block until at least one new message arrives (implies --new)
+        #[arg(long)]
+        wait: bool,
+        /// Sort oldest-first (default when --new is used)
+        #[arg(long, conflicts_with = "desc")]
+        asc: bool,
+        /// Sort newest-first (default for history queries)
+        #[arg(long, conflicts_with = "asc")]
+        desc: bool,
+        /// Poll interval in seconds when --wait is used (default: 5)
+        #[arg(long, default_value_t = 5)]
+        interval: u64,
+    },
+    /// Poll for new messages — alias for `room query --new`.
     ///
     /// Updates a per-user cursor file so subsequent calls return only unseen messages.
     /// Use `--rooms r1,r2` (comma-separated or repeated) to poll multiple rooms at once;
@@ -71,11 +128,11 @@ enum Cmd {
         #[arg(short = 'n', default_value_t = 20)]
         count: usize,
     },
-    /// Watch for new messages from other users, blocking until at least one arrives.
+    /// Watch for new messages — alias for `room query --new --wait`.
     ///
     /// Polls the chat file on a configurable interval. Shares the cursor file with
-    /// `room poll` so no messages are re-delivered. Exits after printing the first
-    /// batch of foreign messages as NDJSON.
+    /// `room poll` and `room query --new` so no messages are re-delivered. Exits
+    /// after printing the first batch of foreign messages as NDJSON.
     Watch {
         room_id: String,
         /// Session token from `room join` (required)
@@ -179,6 +236,111 @@ async fn main() -> anyhow::Result<()> {
             let content = message.join(" ");
             oneshot::cmd_send(&room_id, &token, to.as_deref(), &content).await?;
         }
+        Some(Cmd::Query {
+            room_id,
+            token,
+            rooms,
+            user,
+            from,
+            to,
+            since,
+            until,
+            count,
+            mentions_only,
+            new,
+            wait,
+            asc,
+            desc,
+            interval,
+        }) => {
+            // Resolve the effective room list.
+            let effective_rooms: Vec<String> = if !rooms.is_empty() {
+                if room_id.is_some() {
+                    anyhow::bail!(
+                        "cannot specify both positional room_id and -r/--room; use one or the other"
+                    );
+                }
+                rooms
+            } else if let Some(id) = room_id {
+                vec![id]
+            } else {
+                anyhow::bail!(
+                    "room_id is required — pass it as a positional argument or use -r/--room"
+                );
+            };
+
+            // Parse --from / --to as room:seq.
+            let after_seq = from
+                .as_deref()
+                .map(|s| {
+                    parse_message_id(s).map_err(|e| anyhow::anyhow!("invalid --from value: {e}"))
+                })
+                .transpose()?;
+
+            let before_seq = to
+                .as_deref()
+                .map(|s| {
+                    parse_message_id(s)
+                        // --to is inclusive: convert to exclusive by adding 1.
+                        .map(|(room, seq)| (room, seq.saturating_add(1)))
+                        .map_err(|e| anyhow::anyhow!("invalid --to value: {e}"))
+                })
+                .transpose()?;
+
+            // Parse --since / --until as ISO 8601 timestamps.
+            let after_ts = since
+                .as_deref()
+                .map(|s| {
+                    DateTime::parse_from_rfc3339(s)
+                        .map(|dt| dt.with_timezone(&chrono::Utc))
+                        .map_err(|e| {
+                            anyhow::anyhow!("invalid --since value (expected ISO 8601): {e}")
+                        })
+                })
+                .transpose()?;
+
+            let before_ts = until
+                .as_deref()
+                .map(|s| {
+                    DateTime::parse_from_rfc3339(s)
+                        .map(|dt| dt.with_timezone(&chrono::Utc))
+                        .map_err(|e| {
+                            anyhow::anyhow!("invalid --until value (expected ISO 8601): {e}")
+                        })
+                })
+                .transpose()?;
+
+            // Default sort: ascending when --new/--wait, descending otherwise.
+            let ascending = if asc {
+                true
+            } else if desc {
+                false
+            } else {
+                new || wait
+            };
+
+            let filter = QueryFilter {
+                rooms: effective_rooms.clone(),
+                users: user.map(|u| vec![u]).unwrap_or_default(),
+                after_seq,
+                before_seq,
+                after_ts,
+                before_ts,
+                limit: count,
+                ascending,
+                ..Default::default()
+            };
+
+            let opts = QueryOptions {
+                new_only: new || wait,
+                wait,
+                interval_secs: interval,
+                mentions_only,
+                since_uuid: None,
+            };
+
+            oneshot::cmd_query(&effective_rooms, &token, filter, opts).await?;
+        }
         Some(Cmd::Poll {
             room_id,
             token,
@@ -186,18 +348,31 @@ async fn main() -> anyhow::Result<()> {
             rooms,
             mentions_only,
         }) => {
-            if !rooms.is_empty() {
+            // Alias for `room query --new`. Delegates to cmd_query.
+            let effective_rooms: Vec<String> = if !rooms.is_empty() {
                 if since.is_some() {
                     anyhow::bail!("--since is not supported with --rooms (use per-room cursors)");
                 }
-                oneshot::cmd_poll_multi(&rooms, &token, mentions_only).await?;
+                rooms
+            } else if let Some(id) = room_id {
+                vec![id]
             } else {
-                let room_id = room_id.unwrap_or_else(|| {
-                    eprintln!("error: room_id is required when --rooms is not given");
-                    std::process::exit(1);
-                });
-                oneshot::cmd_poll(&room_id, &token, since, mentions_only).await?;
-            }
+                eprintln!("error: room_id is required when --rooms is not given");
+                std::process::exit(1);
+            };
+
+            let filter = QueryFilter {
+                rooms: effective_rooms.clone(),
+                ..Default::default()
+            };
+            let opts = QueryOptions {
+                new_only: true,
+                wait: false,
+                interval_secs: 5,
+                mentions_only,
+                since_uuid: since,
+            };
+            oneshot::cmd_query(&effective_rooms, &token, filter, opts).await?;
         }
         Some(Cmd::Pull {
             room_id,
@@ -211,7 +386,21 @@ async fn main() -> anyhow::Result<()> {
             token,
             interval,
         }) => {
-            oneshot::cmd_watch(&room_id, &token, interval).await?;
+            // Alias for `room query --new --wait`. Delegates to cmd_query.
+            let effective_rooms = vec![room_id];
+            let filter = QueryFilter {
+                rooms: effective_rooms.clone(),
+                ascending: true,
+                ..Default::default()
+            };
+            let opts = QueryOptions {
+                new_only: true,
+                wait: true,
+                interval_secs: interval,
+                mentions_only: false,
+                since_uuid: None,
+            };
+            oneshot::cmd_query(&effective_rooms, &token, filter, opts).await?;
         }
         Some(Cmd::Who {
             room_id,

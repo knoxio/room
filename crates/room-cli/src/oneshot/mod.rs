@@ -6,8 +6,8 @@ pub mod who;
 
 pub use list::cmd_list;
 pub use poll::{
-    cmd_poll, cmd_poll_multi, cmd_pull, cmd_watch, poll_messages, poll_messages_multi,
-    pull_messages,
+    cmd_poll, cmd_poll_multi, cmd_pull, cmd_query, cmd_watch, poll_messages, poll_messages_multi,
+    pull_messages, QueryOptions,
 };
 pub use token::{cmd_join, token_file_path, username_from_token};
 pub use transport::{join_session, send_message, send_message_with_token};
