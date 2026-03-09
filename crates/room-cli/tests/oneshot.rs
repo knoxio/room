@@ -191,10 +191,15 @@ async fn poll_returns_messages_since_id() {
     let dir = tempfile::tempdir().unwrap();
     let cursor_path = dir.path().join("test.cursor");
 
-    let msgs =
-        room_cli::oneshot::poll_messages(&broker.chat_path, &cursor_path, None, Some(m1.id()))
-            .await
-            .unwrap();
+    let msgs = room_cli::oneshot::poll_messages(
+        &broker.chat_path,
+        &cursor_path,
+        None,
+        None,
+        Some(m1.id()),
+    )
+    .await
+    .unwrap();
 
     let contents: Vec<&str> = msgs
         .iter()
@@ -232,7 +237,7 @@ async fn poll_updates_cursor_file() {
     let cursor_path = dir.path().join("alice.cursor");
 
     // First poll: returns messages, writes cursor
-    let msgs = room_cli::oneshot::poll_messages(&broker.chat_path, &cursor_path, None, None)
+    let msgs = room_cli::oneshot::poll_messages(&broker.chat_path, &cursor_path, None, None, None)
         .await
         .unwrap();
     assert!(!msgs.is_empty(), "first poll should return messages");
@@ -242,7 +247,7 @@ async fn poll_updates_cursor_file() {
     );
 
     // Second poll: cursor is up to date, nothing new
-    let msgs2 = room_cli::oneshot::poll_messages(&broker.chat_path, &cursor_path, None, None)
+    let msgs2 = room_cli::oneshot::poll_messages(&broker.chat_path, &cursor_path, None, None, None)
         .await
         .unwrap();
     assert!(
@@ -261,7 +266,7 @@ async fn poll_with_no_broker_reads_file_directly() {
     let msg = room_cli::message::make_message("offline", "ghost", "written directly");
     room_cli::history::append(&chat_path, &msg).await.unwrap();
 
-    let msgs = room_cli::oneshot::poll_messages(&chat_path, &cursor_path, None, None)
+    let msgs = room_cli::oneshot::poll_messages(&chat_path, &cursor_path, None, None, None)
         .await
         .unwrap();
 
@@ -377,9 +382,10 @@ async fn poll_filters_dm_for_non_party_viewer() {
     room_cli::history::append(&chat_path, &dm).await.unwrap();
 
     // carol is not party to the DM — she should see nothing
-    let msgs = room_cli::oneshot::poll_messages(&chat_path, &cursor_path, Some("carol"), None)
-        .await
-        .unwrap();
+    let msgs =
+        room_cli::oneshot::poll_messages(&chat_path, &cursor_path, Some("carol"), None, None)
+            .await
+            .unwrap();
     assert!(
         msgs.is_empty(),
         "carol should not see a DM she is not party to"
@@ -387,14 +393,15 @@ async fn poll_filters_dm_for_non_party_viewer() {
 
     // alice (sender) should see it
     let alice_cursor = dir.path().join("alice.cursor");
-    let msgs = room_cli::oneshot::poll_messages(&chat_path, &alice_cursor, Some("alice"), None)
-        .await
-        .unwrap();
+    let msgs =
+        room_cli::oneshot::poll_messages(&chat_path, &alice_cursor, Some("alice"), None, None)
+            .await
+            .unwrap();
     assert_eq!(msgs.len(), 1, "alice should see the DM she sent");
 
     // bob (recipient) should see it
     let bob_cursor = dir.path().join("bob.cursor");
-    let msgs = room_cli::oneshot::poll_messages(&chat_path, &bob_cursor, Some("bob"), None)
+    let msgs = room_cli::oneshot::poll_messages(&chat_path, &bob_cursor, Some("bob"), None, None)
         .await
         .unwrap();
     assert_eq!(msgs.len(), 1, "bob should see the DM addressed to him");
@@ -525,7 +532,7 @@ async fn pull_messages_returns_last_n() {
             .await;
     }
 
-    let msgs = room_cli::oneshot::pull_messages(&broker.chat_path, 3, None)
+    let msgs = room_cli::oneshot::pull_messages(&broker.chat_path, 3, None, None)
         .await
         .unwrap();
     // Last 3 of 5 messages sent
@@ -556,7 +563,7 @@ async fn pull_messages_returns_all_when_fewer_than_n() {
         .recv_until(|m| matches!(m, Message::Message { content, .. } if content == "only message"))
         .await;
 
-    let msgs = room_cli::oneshot::pull_messages(&broker.chat_path, 100, None)
+    let msgs = room_cli::oneshot::pull_messages(&broker.chat_path, 100, None, None)
         .await
         .unwrap();
     assert!(
@@ -572,7 +579,7 @@ async fn pull_messages_empty_history_returns_empty() {
     let dir = tempfile::tempdir().unwrap();
     let chat_path = dir.path().join("empty.chat");
     // file does not exist yet
-    let msgs = room_cli::oneshot::pull_messages(&chat_path, 20, None)
+    let msgs = room_cli::oneshot::pull_messages(&chat_path, 20, None, None)
         .await
         .unwrap();
     assert!(msgs.is_empty());
@@ -645,6 +652,7 @@ async fn pull_messages_does_not_update_cursor() {
         &broker.chat_path,
         &cursor_path,
         Some("alice"),
+        None,
         Some(&cursor_after_poll),
     )
     .await
@@ -695,7 +703,7 @@ async fn pull_messages_filters_dms_for_viewer() {
         .await;
 
     // carol (a third party) pulls history — should not see the DM
-    let carol_msgs = room_cli::oneshot::pull_messages(&broker.chat_path, 50, Some("carol"))
+    let carol_msgs = room_cli::oneshot::pull_messages(&broker.chat_path, 50, Some("carol"), None)
         .await
         .unwrap();
     assert!(
@@ -706,7 +714,7 @@ async fn pull_messages_filters_dms_for_viewer() {
     );
 
     // alice pulls — should see the DM
-    let alice_msgs = room_cli::oneshot::pull_messages(&broker.chat_path, 50, Some("alice"))
+    let alice_msgs = room_cli::oneshot::pull_messages(&broker.chat_path, 50, Some("alice"), None)
         .await
         .unwrap();
     assert!(

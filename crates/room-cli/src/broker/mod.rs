@@ -255,11 +255,22 @@ pub(crate) async fn run_interactive_session(
         }
     }
 
-    // Register as host if no host has been set yet (first to complete handshake)
+    // Register as host if no host has been set yet (first to complete handshake).
+    // Persist the host username to the room meta file so oneshot commands (poll,
+    // pull, query) can apply the same DM visibility rules without a live broker.
     {
         let mut host = state.host_user.lock().await;
         if host.is_none() {
             *host = Some(username.clone());
+            let meta_path = crate::paths::room_meta_path(&state.room_id);
+            if meta_path.exists() {
+                if let Ok(data) = std::fs::read_to_string(&meta_path) {
+                    if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&data) {
+                        v["host"] = serde_json::Value::String(username.clone());
+                        let _ = std::fs::write(&meta_path, v.to_string());
+                    }
+                }
+            }
         }
     }
 

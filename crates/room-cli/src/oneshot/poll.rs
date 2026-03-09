@@ -92,14 +92,19 @@ pub struct QueryOptions {
 /// stored position. A `None` cursor means all messages are returned.
 ///
 /// `viewer` is the username of the caller. When `Some`, `DirectMessage` entries are
-/// filtered to only those where the viewer is the sender or the recipient. Pass `None`
-/// to skip DM filtering (e.g. in tests that don't involve DMs).
+/// filtered using [`Message::is_visible_to`], which grants access to the sender,
+/// recipient, and the room host. Pass `None` to skip DM filtering (e.g. in tests
+/// that don't involve DMs).
+///
+/// `host` is the room host username (typically the first user to join). When `Some`,
+/// the host can see all DMs regardless of sender/recipient.
 ///
 /// The cursor file is updated to the last returned message's ID after each successful call.
 pub async fn poll_messages(
     chat_path: &Path,
     cursor_path: &Path,
     viewer: Option<&str>,
+    host: Option<&str>,
     since: Option<&str>,
 ) -> anyhow::Result<Vec<Message>> {
     let effective_since: Option<String> = since
@@ -119,12 +124,7 @@ pub async fn poll_messages(
 
     let result: Vec<Message> = messages[start..]
         .iter()
-        .filter(|m| match m {
-            Message::DirectMessage { user, to, .. } => viewer
-                .map(|v| v == user.as_str() || v == to.as_str())
-                .unwrap_or(true),
-            _ => true,
-        })
+        .filter(|m| viewer.map(|v| m.is_visible_to(v, host)).unwrap_or(true))
         .cloned()
         .collect();
 
@@ -137,23 +137,22 @@ pub async fn poll_messages(
 
 /// Return the last `n` messages from history without updating the poll cursor.
 ///
-/// DM entries are filtered so that `viewer` only sees messages where they are
-/// the sender or the recipient. Pass `None` to skip DM filtering.
+/// DM entries are filtered using [`Message::is_visible_to`] so that `viewer` only
+/// sees messages they are party to (sender, recipient, or host). Pass `None` to
+/// skip DM filtering.
+///
+/// `host` is the room host username. When `Some`, the host can see all DMs.
 pub async fn pull_messages(
     chat_path: &Path,
     n: usize,
     viewer: Option<&str>,
+    host: Option<&str>,
 ) -> anyhow::Result<Vec<Message>> {
     let clamped = n.min(200);
     let all = history::tail(chat_path, clamped).await?;
     let visible: Vec<Message> = all
         .into_iter()
-        .filter(|m| match m {
-            Message::DirectMessage { user, to, .. } => viewer
-                .map(|v| v == user.as_str() || v == to.as_str())
-                .unwrap_or(true),
-            _ => true,
-        })
+        .filter(|m| viewer.map(|v| m.is_visible_to(v, host)).unwrap_or(true))
         .collect();
     Ok(visible)
 }
@@ -167,7 +166,8 @@ pub async fn cmd_pull(room_id: &str, token: &str, n: usize) -> anyhow::Result<()
     let meta_path = paths::room_meta_path(room_id);
     let chat_path = chat_path_from_meta(room_id, &meta_path);
 
-    let mut messages = pull_messages(&chat_path, n, Some(&username)).await?;
+    let host = read_host_from_meta(&meta_path);
+    let mut messages = pull_messages(&chat_path, n, Some(&username), host.as_deref()).await?;
     let tier = load_user_tier(room_id, &username);
     apply_tier_filter(&mut messages, tier, &username);
     for msg in &messages {
@@ -188,9 +188,17 @@ pub async fn cmd_watch(room_id: &str, token: &str, interval_secs: u64) -> anyhow
     let meta_path = paths::room_meta_path(room_id);
     let chat_path = chat_path_from_meta(room_id, &meta_path);
     let cursor_path = paths::cursor_path(room_id, &username);
+    let host = read_host_from_meta(&meta_path);
 
     loop {
-        let messages = poll_messages(&chat_path, &cursor_path, Some(&username), None).await?;
+        let messages = poll_messages(
+            &chat_path,
+            &cursor_path,
+            Some(&username),
+            host.as_deref(),
+            None,
+        )
+        .await?;
 
         let foreign: Vec<&Message> = messages
             .iter()
@@ -227,9 +235,16 @@ pub async fn cmd_poll(
     let meta_path = paths::room_meta_path(room_id);
     let chat_path = chat_path_from_meta(room_id, &meta_path);
     let cursor_path = paths::cursor_path(room_id, &username);
+    let host = read_host_from_meta(&meta_path);
 
-    let messages =
-        poll_messages(&chat_path, &cursor_path, Some(&username), since.as_deref()).await?;
+    let messages = poll_messages(
+        &chat_path,
+        &cursor_path,
+        Some(&username),
+        host.as_deref(),
+        since.as_deref(),
+    )
+    .await?;
     for msg in &messages {
         if mentions_only && !msg.mentions().iter().any(|m| m == &username) {
             continue;
@@ -252,7 +267,16 @@ pub async fn poll_messages_multi(
 
     for &(room_id, chat_path) in rooms {
         let cursor_path = paths::cursor_path(room_id, username);
-        let msgs = poll_messages(chat_path, &cursor_path, Some(username), None).await?;
+        let meta_path = paths::room_meta_path(room_id);
+        let host = read_host_from_meta(&meta_path);
+        let msgs = poll_messages(
+            chat_path,
+            &cursor_path,
+            Some(username),
+            host.as_deref(),
+            None,
+        )
+        .await?;
         all_messages.extend(msgs);
     }
 
@@ -342,10 +366,12 @@ async fn cmd_query_new(
             let meta_path = paths::room_meta_path(room_id);
             let chat_path = chat_path_from_meta(room_id, &meta_path);
             let cursor_path = paths::cursor_path(room_id, username);
+            let host = read_host_from_meta(&meta_path);
             poll_messages(
                 &chat_path,
                 &cursor_path,
                 Some(username),
+                host.as_deref(),
                 opts.since_uuid.as_deref(),
             )
             .await?
@@ -477,6 +503,19 @@ fn resolve_username_from_rooms(room_ids: &[String], token: &str) -> anyhow::Resu
     )
 }
 
+/// Read the room host username from the meta file, if present.
+///
+/// Returns `None` if the meta file does not exist, cannot be parsed, or has no
+/// `"host"` field. Callers should treat `None` the same as no host information.
+pub(super) fn read_host_from_meta(meta_path: &Path) -> Option<String> {
+    if !meta_path.exists() {
+        return None;
+    }
+    let data = std::fs::read_to_string(meta_path).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&data).ok()?;
+    v["host"].as_str().map(str::to_owned)
+}
+
 pub(super) fn chat_path_from_meta(room_id: &str, meta_path: &Path) -> PathBuf {
     if meta_path.exists() {
         if let Ok(data) = std::fs::read_to_string(meta_path) {
@@ -506,7 +545,7 @@ mod tests {
         let msg = make_message("r", "alice", "hello");
         crate::history::append(chat.path(), &msg).await.unwrap();
 
-        let result = poll_messages(chat.path(), &cursor, None, None)
+        let result = poll_messages(chat.path(), &cursor, None, None, None)
             .await
             .unwrap();
         assert_eq!(result.len(), 1);
@@ -523,11 +562,11 @@ mod tests {
         let msg = make_message("r", "alice", "hello");
         crate::history::append(chat.path(), &msg).await.unwrap();
 
-        poll_messages(chat.path(), &cursor, None, None)
+        poll_messages(chat.path(), &cursor, None, None, None)
             .await
             .unwrap();
 
-        let second = poll_messages(chat.path(), &cursor, None, None)
+        let second = poll_messages(chat.path(), &cursor, None, None, None)
             .await
             .unwrap();
         assert!(
@@ -554,7 +593,7 @@ mod tests {
             .unwrap();
 
         // bob sees only his DM
-        let result = poll_messages(chat.path(), &cursor, Some("bob"), None)
+        let result = poll_messages(chat.path(), &cursor, Some("bob"), None, None)
             .await
             .unwrap();
         assert_eq!(result.len(), 1);
@@ -577,7 +616,7 @@ mod tests {
         crate::history::append(chat.path(), &msg).await.unwrap();
 
         // Simulate what cmd_watch does: poll, then filter for foreign messages + DMs
-        let messages = poll_messages(chat.path(), &cursor, Some("bob"), None)
+        let messages = poll_messages(chat.path(), &cursor, Some("bob"), None, None)
             .await
             .unwrap();
 
@@ -613,7 +652,7 @@ mod tests {
         let dm = make_dm("r", "bob", "alice", "from bob");
         crate::history::append(chat.path(), &dm).await.unwrap();
 
-        let messages = poll_messages(chat.path(), &cursor, Some("bob"), None)
+        let messages = poll_messages(chat.path(), &cursor, Some("bob"), None, None)
             .await
             .unwrap();
 
@@ -631,6 +670,63 @@ mod tests {
             foreign.is_empty(),
             "DMs sent by the watcher should not wake watch"
         );
+    }
+
+    /// Host sees all DMs in poll regardless of sender/recipient.
+    #[tokio::test]
+    async fn poll_messages_host_sees_all_dms() {
+        use crate::message::make_dm;
+        let chat = NamedTempFile::new().unwrap();
+        let cursor_dir = TempDir::new().unwrap();
+        let cursor = cursor_dir.path().join("cursor");
+
+        let dm_alice_bob = make_dm("r", "alice", "bob", "private");
+        let dm_carol_dave = make_dm("r", "carol", "dave", "also private");
+        crate::history::append(chat.path(), &dm_alice_bob)
+            .await
+            .unwrap();
+        crate::history::append(chat.path(), &dm_carol_dave)
+            .await
+            .unwrap();
+
+        // host "eve" can see both DMs
+        let result = poll_messages(chat.path(), &cursor, Some("eve"), Some("eve"), None)
+            .await
+            .unwrap();
+        assert_eq!(result.len(), 2, "host should see all DMs");
+    }
+
+    /// Non-host third party cannot see DMs they are not party to.
+    #[tokio::test]
+    async fn poll_messages_non_host_cannot_see_unrelated_dms() {
+        use crate::message::make_dm;
+        let chat = NamedTempFile::new().unwrap();
+        let cursor_dir = TempDir::new().unwrap();
+        let cursor = cursor_dir.path().join("cursor");
+
+        let dm = make_dm("r", "alice", "bob", "private");
+        crate::history::append(chat.path(), &dm).await.unwrap();
+
+        // carol is not a party and is not host
+        let result = poll_messages(chat.path(), &cursor, Some("carol"), None, None)
+            .await
+            .unwrap();
+        assert!(result.is_empty(), "non-host third party should not see DM");
+    }
+
+    /// Host reads from pull_messages as well.
+    #[tokio::test]
+    async fn pull_messages_host_sees_all_dms() {
+        use crate::message::make_dm;
+        let chat = NamedTempFile::new().unwrap();
+
+        let dm = make_dm("r", "alice", "bob", "secret");
+        crate::history::append(chat.path(), &dm).await.unwrap();
+
+        let result = pull_messages(chat.path(), 10, Some("eve"), Some("eve"))
+            .await
+            .unwrap();
+        assert_eq!(result.len(), 1, "host should see the DM via pull");
     }
 
     // ── poll_messages_multi tests ──────────────────────────────────────────
@@ -1431,11 +1527,11 @@ mod tests {
                 .unwrap();
         }
 
-        let pulled = pull_messages(chat.path(), 3, None).await.unwrap();
+        let pulled = pull_messages(chat.path(), 3, None, None).await.unwrap();
         assert_eq!(pulled.len(), 3);
 
         // cursor untouched — poll still returns all 5
-        let polled = poll_messages(chat.path(), &cursor, None, None)
+        let polled = poll_messages(chat.path(), &cursor, None, None, None)
             .await
             .unwrap();
         assert_eq!(polled.len(), 5);

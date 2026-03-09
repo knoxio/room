@@ -49,7 +49,7 @@ async fn scripted_three_agent_join_send_poll() {
     let dir = tempfile::tempdir().unwrap();
     for agent in &["agent-a", "agent-b", "agent-c"] {
         let cursor = dir.path().join(format!("{agent}.cursor"));
-        let polled = room_cli::oneshot::poll_messages(&broker.chat_path, &cursor, None, None)
+        let polled = room_cli::oneshot::poll_messages(&broker.chat_path, &cursor, None, None, None)
             .await
             .unwrap();
 
@@ -158,7 +158,7 @@ async fn scripted_dm_exchange_with_bystander_isolation() {
     // agent-b polls: should see the DM
     let cursor_b = dir.path().join("b.cursor");
     let polled_b =
-        room_cli::oneshot::poll_messages(&broker.chat_path, &cursor_b, Some("agent-b"), None)
+        room_cli::oneshot::poll_messages(&broker.chat_path, &cursor_b, Some("agent-b"), None, None)
             .await
             .unwrap();
     let b_contents: Vec<&str> = polled_b
@@ -176,7 +176,7 @@ async fn scripted_dm_exchange_with_bystander_isolation() {
     // agent-c polls: should NOT see the DM
     let cursor_c = dir.path().join("c.cursor");
     let polled_c =
-        room_cli::oneshot::poll_messages(&broker.chat_path, &cursor_c, Some("agent-c"), None)
+        room_cli::oneshot::poll_messages(&broker.chat_path, &cursor_c, Some("agent-c"), None, None)
             .await
             .unwrap();
     let c_dm_contents: Vec<&str> = polled_c
@@ -225,7 +225,7 @@ async fn scripted_token_auth_send_poll_workflow() {
     let dir = tempfile::tempdir().unwrap();
     let cursor = dir.path().join("bot1.cursor");
     let polled =
-        room_cli::oneshot::poll_messages(&broker.chat_path, &cursor, None, Some(&anchor_id))
+        room_cli::oneshot::poll_messages(&broker.chat_path, &cursor, None, None, Some(&anchor_id))
             .await
             .unwrap();
 
@@ -317,9 +317,10 @@ async fn scripted_mention_filter_in_poll() {
     // Poll all messages — should see all 3
     let dir = tempfile::tempdir().unwrap();
     let cursor_all = dir.path().join("all.cursor");
-    let all_msgs = room_cli::oneshot::poll_messages(&broker.chat_path, &cursor_all, None, None)
-        .await
-        .unwrap();
+    let all_msgs =
+        room_cli::oneshot::poll_messages(&broker.chat_path, &cursor_all, None, None, None)
+            .await
+            .unwrap();
     let all_contents: Vec<&str> = all_msgs
         .iter()
         .filter_map(|m| match m {
@@ -332,7 +333,7 @@ async fn scripted_mention_filter_in_poll() {
     // Filter to mentions of agent-b using Message::mentions()
     let cursor_mentions = dir.path().join("mentions.cursor");
     let mention_msgs =
-        room_cli::oneshot::poll_messages(&broker.chat_path, &cursor_mentions, None, None)
+        room_cli::oneshot::poll_messages(&broker.chat_path, &cursor_mentions, None, None, None)
             .await
             .unwrap();
     let mentioned: Vec<&str> = mention_msgs
@@ -436,7 +437,7 @@ async fn scripted_full_coordination_lifecycle() {
     // Verify: poll the full history — messages are in order with correct senders
     let dir = tempfile::tempdir().unwrap();
     let cursor = dir.path().join("verify.cursor");
-    let history = room_cli::oneshot::poll_messages(&broker.chat_path, &cursor, None, None)
+    let history = room_cli::oneshot::poll_messages(&broker.chat_path, &cursor, None, None, None)
         .await
         .unwrap();
 
@@ -486,7 +487,7 @@ async fn scripted_cursor_isolation_between_agents() {
 
     // agent-a polls — sees all 3, advances its cursor
     let cursor_a = dir.path().join("a.cursor");
-    let polled_a = room_cli::oneshot::poll_messages(&broker.chat_path, &cursor_a, None, None)
+    let polled_a = room_cli::oneshot::poll_messages(&broker.chat_path, &cursor_a, None, None, None)
         .await
         .unwrap();
     let a_contents: Vec<&str> = polled_a
@@ -499,9 +500,10 @@ async fn scripted_cursor_isolation_between_agents() {
     assert_eq!(a_contents, vec!["msg-1", "msg-2", "msg-3"]);
 
     // agent-a polls again — nothing new
-    let polled_a2 = room_cli::oneshot::poll_messages(&broker.chat_path, &cursor_a, None, None)
-        .await
-        .unwrap();
+    let polled_a2 =
+        room_cli::oneshot::poll_messages(&broker.chat_path, &cursor_a, None, None, None)
+            .await
+            .unwrap();
     let a2_msgs: Vec<&str> = polled_a2
         .iter()
         .filter_map(|m| match m {
@@ -513,7 +515,7 @@ async fn scripted_cursor_isolation_between_agents() {
 
     // agent-b polls with independent cursor — sees all 3
     let cursor_b = dir.path().join("b.cursor");
-    let polled_b = room_cli::oneshot::poll_messages(&broker.chat_path, &cursor_b, None, None)
+    let polled_b = room_cli::oneshot::poll_messages(&broker.chat_path, &cursor_b, None, None, None)
         .await
         .unwrap();
     let b_contents: Vec<&str> = polled_b
@@ -532,9 +534,10 @@ async fn scripted_cursor_isolation_between_agents() {
         .unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    let polled_a3 = room_cli::oneshot::poll_messages(&broker.chat_path, &cursor_a, None, None)
-        .await
-        .unwrap();
+    let polled_a3 =
+        room_cli::oneshot::poll_messages(&broker.chat_path, &cursor_a, None, None, None)
+            .await
+            .unwrap();
     let a3_contents: Vec<&str> = polled_a3
         .iter()
         .filter_map(|m| match m {
@@ -544,9 +547,10 @@ async fn scripted_cursor_isolation_between_agents() {
         .collect();
     assert_eq!(a3_contents, vec!["msg-4"], "agent-a should see only msg-4");
 
-    let polled_b2 = room_cli::oneshot::poll_messages(&broker.chat_path, &cursor_b, None, None)
-        .await
-        .unwrap();
+    let polled_b2 =
+        room_cli::oneshot::poll_messages(&broker.chat_path, &cursor_b, None, None, None)
+            .await
+            .unwrap();
     let b2_contents: Vec<&str> = polled_b2
         .iter()
         .filter_map(|m| match m {
