@@ -224,6 +224,10 @@ enum Cmd {
         /// Room IDs to create on startup (can be repeated)
         #[arg(long = "room")]
         rooms: Vec<String>,
+        /// Seconds to wait after the last connection closes before shutting down.
+        /// Set to 0 for immediate shutdown. Default: 30.
+        #[arg(long, default_value_t = 30)]
+        grace_period: u64,
     },
 }
 
@@ -515,6 +519,7 @@ async fn main() -> anyhow::Result<()> {
             state_dir,
             ws_port,
             rooms,
+            grace_period,
         }) => {
             run_daemon(
                 socket.unwrap_or_else(paths::room_socket_path),
@@ -522,6 +527,7 @@ async fn main() -> anyhow::Result<()> {
                 state_dir.unwrap_or_else(paths::room_state_dir),
                 ws_port,
                 rooms,
+                grace_period,
             )
             .await?;
         }
@@ -669,6 +675,7 @@ async fn run_daemon(
     state_dir: PathBuf,
     ws_port: Option<u16>,
     rooms: Vec<String>,
+    grace_period_secs: u64,
 ) -> anyhow::Result<()> {
     paths::ensure_room_dirs().map_err(|e| anyhow::anyhow!("cannot create ~/.room dirs: {e}"))?;
     let config = DaemonConfig {
@@ -676,6 +683,7 @@ async fn run_daemon(
         data_dir,
         state_dir,
         ws_port,
+        grace_period_secs,
     };
 
     let daemon = DaemonState::new(config);

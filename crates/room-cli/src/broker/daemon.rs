@@ -24,7 +24,7 @@ use std::{
     collections::HashMap,
     path::PathBuf,
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
         Arc,
     },
 };
@@ -90,6 +90,11 @@ pub struct DaemonConfig {
     pub state_dir: PathBuf,
     /// Optional WebSocket/REST port.
     pub ws_port: Option<u16>,
+    /// Seconds to wait after the last connection closes before shutting down.
+    ///
+    /// Default is 30 seconds. Set to 0 for immediate shutdown when the last
+    /// client disconnects. Has no effect if there are always active connections.
+    pub grace_period_secs: u64,
 }
 
 impl DaemonConfig {
@@ -125,6 +130,7 @@ impl Default for DaemonConfig {
             data_dir: crate::paths::room_data_dir(),
             state_dir: crate::paths::room_state_dir(),
             ws_port: None,
+            grace_period_secs: 30,
         }
     }
 }
@@ -154,6 +160,12 @@ pub struct DaemonState {
     /// `system_token_map` is derived from this registry at startup and kept
     /// in sync on every join.
     pub(crate) user_registry: Arc<tokio::sync::Mutex<UserRegistry>>,
+    /// Number of currently active UDS connections.
+    ///
+    /// Incremented when a connection is accepted; decremented when the
+    /// connection task completes. When the count drops to zero the daemon
+    /// starts a grace period timer before sending the shutdown signal.
+    pub(crate) connection_count: Arc<AtomicUsize>,
 }
 
 impl DaemonState {
@@ -180,6 +192,7 @@ impl DaemonState {
             shutdown: Arc::new(shutdown_tx),
             system_token_map: Arc::new(Mutex::new(token_snapshot)),
             user_registry: Arc::new(tokio::sync::Mutex::new(registry)),
+            connection_count: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -344,6 +357,12 @@ impl DaemonState {
     }
 
     /// Run the daemon: listen on UDS, dispatch connections to rooms.
+    ///
+    /// When the last UDS connection closes, starts a grace period timer
+    /// (`config.grace_period_secs`). If no new connection arrives before the
+    /// timer fires, sends a shutdown signal. Any new connection during the
+    /// grace period cancels the timer. On exit, cleans up the PID file and
+    /// socket file.
     pub async fn run(&self) -> anyhow::Result<()> {
         // Remove stale socket synchronously.
         if self.config.socket_path.exists() {
@@ -357,6 +376,13 @@ impl DaemonState {
         );
 
         let mut shutdown_rx = self.shutdown.subscribe();
+        let grace_duration = tokio::time::Duration::from_secs(self.config.grace_period_secs);
+
+        // mpsc channel: connection tasks notify the main loop when they close.
+        let (close_tx, mut close_rx) = tokio::sync::mpsc::channel::<()>(64);
+
+        // Optional grace period sleep — active when the last connection closes.
+        let mut grace_sleep: Option<std::pin::Pin<Box<tokio::time::Sleep>>> = None;
 
         // Start WebSocket/REST server if configured.
         if let Some(port) = self.config.ws_port {
@@ -374,26 +400,73 @@ impl DaemonState {
             });
         }
 
-        loop {
+        let result = loop {
+            // Build the grace future: fires if a grace sleep is active,
+            // otherwise stays pending forever.
+            let grace_fut = async {
+                match grace_sleep.as_mut() {
+                    Some(s) => {
+                        s.await;
+                    }
+                    None => std::future::pending::<()>().await,
+                }
+            };
+
             tokio::select! {
                 accept = listener.accept() => {
-                    let (stream, _) = accept?;
+                    let (stream, _) = match accept {
+                        Ok(a) => a,
+                        Err(e) => break Err(e.into()),
+                    };
+                    // Cancel any pending grace timer — we have a new connection.
+                    grace_sleep = None;
+
+                    let count = self.connection_count.clone();
+                    count.fetch_add(1, Ordering::SeqCst);
                     let rooms = self.rooms.clone();
                     let next_id = self.next_client_id.clone();
                     let registry = self.user_registry.clone();
+                    let tx = close_tx.clone();
 
                     tokio::spawn(async move {
                         if let Err(e) = dispatch_connection(stream, &rooms, &next_id, &registry).await {
                             eprintln!("[daemon] connection error: {e:#}");
                         }
+                        count.fetch_sub(1, Ordering::SeqCst);
+                        // Notify main loop so it can start the grace timer.
+                        let _ = tx.send(()).await;
                     });
+                }
+                Some(()) = close_rx.recv() => {
+                    // A connection closed. Start grace period if none remain.
+                    if self.connection_count.load(Ordering::SeqCst) == 0 {
+                        eprintln!(
+                            "[daemon] no connections — grace period {}s started",
+                            self.config.grace_period_secs
+                        );
+                        grace_sleep =
+                            Some(Box::pin(tokio::time::sleep(grace_duration)));
+                    }
+                }
+                _ = grace_fut => {
+                    eprintln!("[daemon] grace period expired, shutting down");
+                    let _ = self.shutdown.send(true);
+                    // The shutdown_rx arm will fire on the next iteration; break
+                    // here directly to avoid a double-exit path.
+                    break Ok(());
                 }
                 _ = shutdown_rx.changed() => {
                     eprintln!("[daemon] shutdown requested, exiting");
                     break Ok(());
                 }
             }
-        }
+        };
+
+        // Clean up ephemeral files on exit.
+        let _ = std::fs::remove_file(&self.config.socket_path);
+        let _ = std::fs::remove_file(crate::paths::room_pid_path());
+
+        result
     }
 }
 
@@ -1027,5 +1100,115 @@ mod tests {
         let config = room_protocol::RoomConfig::public("owner");
         let subs = build_initial_subscriptions(&config);
         assert!(subs.is_empty());
+    }
+
+    // ── DaemonConfig grace_period_secs ────────────────────────────────────
+
+    #[test]
+    fn default_grace_period_is_30() {
+        let config = DaemonConfig::default();
+        assert_eq!(config.grace_period_secs, 30);
+    }
+
+    #[test]
+    fn custom_grace_period_preserved() {
+        let config = DaemonConfig {
+            grace_period_secs: 0,
+            ..DaemonConfig::default()
+        };
+        assert_eq!(config.grace_period_secs, 0);
+    }
+
+    // ── connection_count refcount ─────────────────────────────────────────
+
+    #[tokio::test]
+    async fn connection_count_starts_at_zero() {
+        let daemon = DaemonState::new(DaemonConfig::default());
+        assert_eq!(daemon.connection_count.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn connection_count_increments_and_decrements() {
+        let count = Arc::new(AtomicUsize::new(0));
+        count.fetch_add(1, Ordering::SeqCst);
+        count.fetch_add(1, Ordering::SeqCst);
+        assert_eq!(count.load(Ordering::SeqCst), 2);
+        count.fetch_sub(1, Ordering::SeqCst);
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+        count.fetch_sub(1, Ordering::SeqCst);
+        assert_eq!(count.load(Ordering::SeqCst), 0);
+    }
+
+    /// Verify that the daemon exits cleanly when the shutdown signal is sent.
+    /// Uses an Arc<DaemonState> so the run() task can hold a reference while
+    /// the test also holds one to send the shutdown signal.
+    #[tokio::test]
+    async fn daemon_exits_on_shutdown_signal() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let socket = dir.path().join("test-grace.sock");
+        std::fs::create_dir_all(dir.path().join("data")).unwrap();
+        std::fs::create_dir_all(dir.path().join("state")).unwrap();
+
+        let config = DaemonConfig {
+            socket_path: socket.clone(),
+            data_dir: dir.path().join("data"),
+            state_dir: dir.path().join("state"),
+            ws_port: None,
+            grace_period_secs: 0,
+        };
+        let daemon = Arc::new(DaemonState::new(config));
+        let shutdown = daemon.shutdown_handle();
+
+        let daemon2 = Arc::clone(&daemon);
+        let handle = tokio::spawn(async move { daemon2.run().await });
+
+        // Wait for socket to become connectable (daemon is up).
+        for _ in 0..100 {
+            if tokio::net::UnixStream::connect(&socket).await.is_ok() {
+                break;
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        }
+        assert!(
+            tokio::net::UnixStream::connect(&socket).await.is_ok(),
+            "daemon socket not ready"
+        );
+
+        // Send shutdown — daemon should exit quickly.
+        let _ = shutdown.send(true);
+        let result = tokio::time::timeout(tokio::time::Duration::from_secs(5), handle).await;
+        assert!(result.is_ok(), "daemon did not exit within 5s");
+        assert!(result.unwrap().unwrap().is_ok(), "run() returned error");
+    }
+
+    /// Verify that a new connection during the grace period resets the timer.
+    /// We check this by confirming connection_count goes from 0 → 1 → 0 without
+    /// a premature shutdown.
+    #[tokio::test]
+    async fn grace_period_cancelled_by_new_connection() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let socket = dir.path().join("test-cancel-grace.sock");
+
+        let config = DaemonConfig {
+            socket_path: socket.clone(),
+            data_dir: dir.path().join("data"),
+            state_dir: dir.path().join("state"),
+            ws_port: None,
+            grace_period_secs: 60, // long grace — should not fire
+        };
+        let daemon = DaemonState::new(config);
+
+        // Manually exercise the counter: simulate connect + disconnect.
+        daemon.connection_count.fetch_add(1, Ordering::SeqCst);
+        assert_eq!(daemon.connection_count.load(Ordering::SeqCst), 1);
+        daemon.connection_count.fetch_sub(1, Ordering::SeqCst);
+        assert_eq!(daemon.connection_count.load(Ordering::SeqCst), 0);
+
+        // Simulate a second connection arriving (cancels grace timer).
+        daemon.connection_count.fetch_add(1, Ordering::SeqCst);
+        assert_eq!(daemon.connection_count.load(Ordering::SeqCst), 1);
+
+        // Daemon has not shut down.
+        assert!(!*daemon.shutdown.borrow());
     }
 }

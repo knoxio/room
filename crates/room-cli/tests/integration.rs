@@ -2682,6 +2682,7 @@ impl TestDaemon {
             data_dir: dir.path().to_owned(),
             state_dir: dir.path().to_owned(),
             ws_port: None,
+            grace_period_secs: 30,
         };
 
         let daemon = Arc::new(DaemonState::new(config));
@@ -2718,6 +2719,7 @@ impl TestDaemon {
             data_dir: dir.path().to_owned(),
             state_dir: dir.path().to_owned(),
             ws_port: Some(port),
+            grace_period_secs: 30,
         };
 
         let daemon = Arc::new(DaemonState::new(config));

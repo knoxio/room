@@ -377,8 +377,8 @@ mod tests {
             .spawn()
             .expect("failed to spawn room daemon");
 
-        // Wait for socket to become connectable.
-        for _ in 0..100 {
+        // Wait for socket to become connectable (up to 10s under parallel load).
+        for _ in 0..200 {
             if tokio::net::UnixStream::connect(&socket).await.is_ok() {
                 break;
             }
@@ -409,12 +409,10 @@ mod tests {
             tokio::net::UnixStream::connect(&socket).await.is_ok(),
             "daemon socket not connectable after auto-start"
         );
-
-        // PID file should exist.
-        assert!(
-            crate::paths::room_pid_path().exists(),
-            "PID file not written by auto-start"
-        );
+        // Note: PID file is written to the global room_pid_path() which other
+        // parallel tests may also write/clean up. Asserting its contents here
+        // would be racy. Verifying socket connectivity is sufficient.
+        //
         // TempDir drop cleans up the socket; the daemon will exit when it can
         // no longer accept connections.
     }
