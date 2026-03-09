@@ -17,9 +17,14 @@ pub fn token_file_path(room_id: &str, username: &str) -> PathBuf {
 ///
 /// Runs `room join <room_id> <username>` and parses the token from JSON output.
 /// Falls back to cached token file if join fails.
-pub fn join_room(room_id: &str, username: &str) -> Result<String, String> {
-    let output = Command::new("room")
-        .args(["join", room_id, username])
+/// If `socket` is provided, passes `--socket <path>` to the `room` command.
+pub fn join_room(room_id: &str, username: &str, socket: Option<&str>) -> Result<String, String> {
+    let mut cmd = Command::new("room");
+    cmd.args(["join", room_id, username]);
+    if let Some(s) = socket {
+        cmd.args(["--socket", s]);
+    }
+    let output = cmd
         .output()
         .map_err(|e| format!("failed to run `room join`: {e}"))?;
 
@@ -40,9 +45,19 @@ pub fn join_room(room_id: &str, username: &str) -> Result<String, String> {
 /// Send a message to the room.
 ///
 /// Runs `room send <room_id> -t <token> <message>`.
-pub fn send_message(room_id: &str, token: &str, message: &str) -> Result<(), String> {
-    let output = Command::new("room")
-        .args(["send", room_id, "-t", token, message])
+/// If `socket` is provided, passes `--socket <path>` to the `room` command.
+pub fn send_message(
+    room_id: &str,
+    token: &str,
+    message: &str,
+    socket: Option<&str>,
+) -> Result<(), String> {
+    let mut cmd = Command::new("room");
+    cmd.args(["send", room_id, "-t", token, message]);
+    if let Some(s) = socket {
+        cmd.args(["--socket", s]);
+    }
+    let output = cmd
         .output()
         .map_err(|e| format!("failed to run `room send`: {e}"))?;
 
@@ -59,9 +74,18 @@ pub fn send_message(room_id: &str, token: &str, message: &str) -> Result<(), Str
 /// Runs `room poll <room_id> -t <token>` and parses NDJSON output into Messages.
 /// Returns `Err` on non-zero exit (e.g. invalid token) so the caller can detect
 /// token expiry and re-join.
-pub fn poll_messages(room_id: &str, token: &str) -> Result<Vec<Message>, String> {
-    let output = Command::new("room")
-        .args(["poll", room_id, "-t", token])
+/// If `socket` is provided, passes `--socket <path>` to the `room` command.
+pub fn poll_messages(
+    room_id: &str,
+    token: &str,
+    socket: Option<&str>,
+) -> Result<Vec<Message>, String> {
+    let mut cmd = Command::new("room");
+    cmd.args(["poll", room_id, "-t", token]);
+    if let Some(s) = socket {
+        cmd.args(["--socket", s]);
+    }
+    let output = cmd
         .output()
         .map_err(|e| format!("failed to run `room poll`: {e}"))?;
 
@@ -89,9 +113,15 @@ pub fn poll_messages(room_id: &str, token: &str) -> Result<Vec<Message>, String>
 ///
 /// Delegates to `send_message` with the formatted `/set_status` command.
 /// Pass an empty string to clear the status.
-pub fn set_status(room_id: &str, token: &str, status: &str) -> Result<(), String> {
+/// If `socket` is provided, passes it through to `send_message`.
+pub fn set_status(
+    room_id: &str,
+    token: &str,
+    status: &str,
+    socket: Option<&str>,
+) -> Result<(), String> {
     let message = build_set_status_message(status);
-    send_message(room_id, token, &message)
+    send_message(room_id, token, &message, socket)
 }
 
 fn build_set_status_message(status: &str) -> String {

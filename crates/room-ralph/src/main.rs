@@ -72,6 +72,10 @@ fn launch_tmux(cli: &Cli) -> Result<(), String> {
         args.push("--profile".into());
         args.push(profile.to_string());
     }
+    if let Some(socket) = &cli.socket {
+        args.push("--socket".into());
+        args.push(socket.display().to_string());
+    }
 
     let cmd_str = format!("{} {}", exe.display(), args.join(" "));
     std::process::Command::new("tmux")
@@ -167,7 +171,9 @@ async fn main() -> ExitCode {
         cli.max_iter,
     );
 
-    let token = match room::join_room(&cli.room_id, &cli.username) {
+    let socket_str = cli.socket.as_ref().map(|p| p.display().to_string());
+    let socket_ref = socket_str.as_deref();
+    let token = match room::join_room(&cli.room_id, &cli.username, socket_ref) {
         Ok(t) => t,
         Err(e) => {
             tracing::error!("failed to join room: {}", e);
@@ -179,7 +185,7 @@ async fn main() -> ExitCode {
         "online (room-ralph, model={}, iter limit={})",
         cli.model, cli.max_iter
     );
-    room::send_message(&cli.room_id, &token, &announce).ok();
+    room::send_message(&cli.room_id, &token, &announce, socket_ref).ok();
 
     match loop_runner::run_loop(&cli, token, &running).await {
         Ok(()) => ExitCode::SUCCESS,

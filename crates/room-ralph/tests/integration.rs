@@ -32,6 +32,7 @@ fn test_cli(f: impl FnOnce(&mut Cli)) -> Cli {
         allow_tools: vec![],
         disallow_tools: vec![],
         profile: None,
+        socket: None,
         dry_run: false,
     };
     f(&mut cli);
@@ -329,7 +330,7 @@ fn poll_messages_parses_ndjson() {
     create_mock_room(mock_dir.path(), ndjson);
 
     let original = prepend_path(mock_dir.path());
-    let messages = room::poll_messages("test-room", "mock-tok").unwrap();
+    let messages = room::poll_messages("test-room", "mock-tok", None).unwrap();
     restore_path(&original);
 
     assert_eq!(messages.len(), 2, "should parse 2 messages from NDJSON");
@@ -382,13 +383,14 @@ async fn personality_appears_in_dry_run_output() {
 async fn live_broker_join_and_announce() {
     let room_id = "ralph-live-test";
 
-    match room::join_room(room_id, "ralph-integ-agent") {
+    match room::join_room(room_id, "ralph-integ-agent", None) {
         Ok(token) => {
             assert!(!token.is_empty(), "token should be non-empty");
-            let result = room::send_message(room_id, &token, "integration test: hello from ralph");
+            let result =
+                room::send_message(room_id, &token, "integration test: hello from ralph", None);
             assert!(result.is_ok(), "send should succeed: {result:?}");
 
-            let messages = room::poll_messages(room_id, &token).unwrap();
+            let messages = room::poll_messages(room_id, &token, None).unwrap();
             // At minimum, we should see our own announce message
             assert!(
                 !messages.is_empty(),

@@ -16,6 +16,8 @@ pub async fn run_loop(cli: &Cli, token: String, running: &Arc<AtomicBool>) -> Re
     let progress_file = progress::progress_file_path(cli.issue.as_deref(), &cli.username);
     let mut iteration: u32 = 0;
     let mut token = token;
+    let socket_str = cli.socket.as_ref().map(|p| p.display().to_string());
+    let socket_ref = socket_str.as_deref();
 
     while running.load(Ordering::SeqCst) {
         iteration += 1;
@@ -26,6 +28,7 @@ pub async fn run_loop(cli: &Cli, token: String, running: &Arc<AtomicBool>) -> Re
                 &cli.room_id,
                 &token,
                 &format!("max iterations reached ({}), shutting down", cli.max_iter),
+                socket_ref,
             )
             .ok();
             break;
@@ -34,15 +37,15 @@ pub async fn run_loop(cli: &Cli, token: String, running: &Arc<AtomicBool>) -> Re
         tracing::info!("--- iteration {} ---", iteration);
 
         // Poll room for recent messages — re-join if token is stale (broker restart)
-        let messages = match room::poll_messages(&cli.room_id, &token) {
+        let messages = match room::poll_messages(&cli.room_id, &token, socket_ref) {
             Ok(msgs) => msgs,
             Err(e) if room::detect_token_expiry(&e) => {
                 tracing::warn!("token expired during poll, re-joining: {}", e);
-                match room::join_room(&cli.room_id, &cli.username) {
+                match room::join_room(&cli.room_id, &cli.username, socket_ref) {
                     Ok(new_token) => {
                         tracing::info!("re-joined with new token");
                         token = new_token;
-                        room::poll_messages(&cli.room_id, &token).unwrap_or_default()
+                        room::poll_messages(&cli.room_id, &token, socket_ref).unwrap_or_default()
                     }
                     Err(join_err) => {
                         tracing::error!("re-join failed: {}", join_err);
@@ -83,7 +86,7 @@ pub async fn run_loop(cli: &Cli, token: String, running: &Arc<AtomicBool>) -> Re
             Some(issue) => format!("running claude — iteration {iteration} for #{issue}"),
             None => format!("running claude — iteration {iteration}"),
         };
-        room::set_status(&cli.room_id, &token, &status_text).ok();
+        room::set_status(&cli.room_id, &token, &status_text, socket_ref).ok();
 
         // Run claude
         tracing::info!(
@@ -151,13 +154,14 @@ pub async fn run_loop(cli: &Cli, token: String, running: &Arc<AtomicBool>) -> Re
                 &cli.room_id,
                 &token,
                 &format!("restarting — context limit at iteration {iteration}"),
+                socket_ref,
             )
             .ok();
             let msg = format!(
                 "context limit at iteration {} (tokens: {}), restarting with fresh context",
                 iteration, input_tokens
             );
-            room::send_message(&cli.room_id, &token, &msg).ok();
+            room::send_message(&cli.room_id, &token, &msg, socket_ref).ok();
         } else if claude_output.exit_code != 0 {
             tracing::warn!(
                 "claude failed (exit {}), will retry after cooldown",
@@ -170,13 +174,14 @@ pub async fn run_loop(cli: &Cli, token: String, running: &Arc<AtomicBool>) -> Re
                     "retrying — claude error (code {}) at iteration {iteration}",
                     claude_output.exit_code
                 ),
+                socket_ref,
             )
             .ok();
             let msg = format!(
                 "claude exited with error (code {}), retrying in {}s",
                 claude_output.exit_code, cli.cooldown
             );
-            room::send_message(&cli.room_id, &token, &msg).ok();
+            room::send_message(&cli.room_id, &token, &msg, socket_ref).ok();
         }
 
         // Cooldown
@@ -184,11 +189,12 @@ pub async fn run_loop(cli: &Cli, token: String, running: &Arc<AtomicBool>) -> Re
     }
 
     tracing::info!("room-ralph stopped after {} iterations", iteration);
-    room::set_status(&cli.room_id, &token, "offline").ok();
+    room::set_status(&cli.room_id, &token, "offline", socket_ref).ok();
     room::send_message(
         &cli.room_id,
         &token,
         &format!("offline (room-ralph stopped after {iteration} iterations)"),
+        socket_ref,
     )
     .ok();
     Ok(())

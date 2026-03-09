@@ -86,6 +86,11 @@ pub struct Cli {
     #[arg(long, env = "RALPH_PROFILE", value_parser = parse_profile)]
     pub profile: Option<claude::Profile>,
 
+    /// Override the broker socket path (passed through to all `room` subcommands).
+    /// Useful for connecting to a daemon socket instead of the default per-room socket.
+    #[arg(long, env = "ROOM_SOCKET")]
+    pub socket: Option<PathBuf>,
+
     /// Print the prompt that would be sent, then exit
     #[arg(long)]
     pub dry_run: bool,
@@ -100,7 +105,7 @@ mod tests {
     /// Mutex to serialize env-var tests (env is process-global state).
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
-    /// Helper: clear all RALPH_* env vars to avoid cross-test contamination.
+    /// Helper: clear all RALPH_*/ROOM_* env vars to avoid cross-test contamination.
     fn clear_ralph_env() {
         for key in [
             "RALPH_ROOM",
@@ -109,6 +114,7 @@ mod tests {
             "RALPH_ISSUE",
             "RALPH_DISALLOWED_TOOLS",
             "RALPH_PROFILE",
+            "ROOM_SOCKET",
         ] {
             unsafe { std::env::remove_var(key) };
         }
@@ -282,6 +288,74 @@ mod tests {
         let cli =
             Cli::try_parse_from(["room-ralph", "myroom", "myuser", "--profile", "notion"]).unwrap();
         assert_eq!(cli.profile, Some(claude::Profile::Notion));
+        clear_ralph_env();
+    }
+
+    #[test]
+    fn socket_flag_sets_path() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        clear_ralph_env();
+
+        let cli = Cli::try_parse_from([
+            "room-ralph",
+            "myroom",
+            "myuser",
+            "--socket",
+            "/tmp/roomd.sock",
+        ])
+        .unwrap();
+        assert_eq!(
+            cli.socket,
+            Some(PathBuf::from("/tmp/roomd.sock")),
+            "socket should be set from --socket flag"
+        );
+        clear_ralph_env();
+    }
+
+    #[test]
+    fn socket_defaults_to_none() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        clear_ralph_env();
+
+        let cli = Cli::try_parse_from(["room-ralph", "myroom", "myuser"]).unwrap();
+        assert!(cli.socket.is_none(), "socket should default to None");
+        clear_ralph_env();
+    }
+
+    #[test]
+    fn socket_from_env_var() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        clear_ralph_env();
+
+        unsafe { std::env::set_var("ROOM_SOCKET", "/tmp/daemon.sock") };
+        let cli = Cli::try_parse_from(["room-ralph", "myroom", "myuser"]).unwrap();
+        assert_eq!(
+            cli.socket,
+            Some(PathBuf::from("/tmp/daemon.sock")),
+            "socket should be set from ROOM_SOCKET env var"
+        );
+        clear_ralph_env();
+    }
+
+    #[test]
+    fn socket_flag_overrides_env() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        clear_ralph_env();
+
+        unsafe { std::env::set_var("ROOM_SOCKET", "/tmp/env.sock") };
+        let cli = Cli::try_parse_from([
+            "room-ralph",
+            "myroom",
+            "myuser",
+            "--socket",
+            "/tmp/flag.sock",
+        ])
+        .unwrap();
+        assert_eq!(
+            cli.socket,
+            Some(PathBuf::from("/tmp/flag.sock")),
+            "CLI --socket should override ROOM_SOCKET env var"
+        );
         clear_ralph_env();
     }
 }
