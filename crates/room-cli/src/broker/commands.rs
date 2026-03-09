@@ -516,6 +516,7 @@ pub(crate) async fn handle_admin_cmd(
 /// Handle `/room-info` — display room visibility, config, and member count.
 async fn handle_room_info(state: &RoomState) -> String {
     let member_count = state.status_map.lock().await.len();
+    let sub_count = state.subscription_map.lock().await.len();
     match &state.config {
         Some(config) => {
             let vis = serde_json::to_string(&config.visibility).unwrap_or_default();
@@ -525,14 +526,14 @@ async fn handle_room_info(state: &RoomState) -> String {
                 .unwrap_or_else(|| "unlimited".to_owned());
             let invites: Vec<&str> = config.invite_list.iter().map(|s| s.as_str()).collect();
             format!(
-                "room: {} | visibility: {} | max members: {} | members online: {} | invited: [{}] | created by: {}",
-                state.room_id, vis, max, member_count, invites.join(", "), config.created_by
+                "room: {} | visibility: {} | max members: {} | members online: {} | subscribers: {} | invited: [{}] | created by: {}",
+                state.room_id, vis, max, member_count, sub_count, invites.join(", "), config.created_by
             )
         }
         None => {
             format!(
-                "room: {} | visibility: public (legacy) | members online: {}",
-                state.room_id, member_count
+                "room: {} | visibility: public (legacy) | members online: {} | subscribers: {}",
+                state.room_id, member_count, sub_count
             )
         }
     }

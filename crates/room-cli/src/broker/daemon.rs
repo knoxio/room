@@ -190,13 +190,16 @@ impl DaemonState {
             .register(Box::new(plugin::stats::StatsPlugin))
             .map_err(|e| format!("plugin error: {e}"))?;
 
+        // Auto-subscribe DM participants at Full tier.
+        let initial_subs = build_initial_subscriptions(&config);
+
         let state = Arc::new(RoomState {
             clients: Arc::new(Mutex::new(HashMap::new())),
             status_map: Arc::new(Mutex::new(HashMap::new())),
             host_user: Arc::new(Mutex::new(None)),
             token_map: Arc::new(Mutex::new(HashMap::new())),
             claim_map: Arc::new(Mutex::new(HashMap::new())),
-            subscription_map: Arc::new(Mutex::new(HashMap::new())),
+            subscription_map: Arc::new(Mutex::new(initial_subs)),
             chat_path: Arc::new(chat_path),
             room_id: Arc::new(room_id.to_owned()),
             shutdown: Arc::new(shutdown_tx),
@@ -298,6 +301,24 @@ impl DaemonState {
             }
         }
     }
+}
+
+/// Build the initial subscription map for a room based on its config.
+///
+/// DM rooms auto-subscribe both participants at `Full` so they receive all
+/// messages without an explicit `/subscribe` call. Other room types start
+/// with an empty subscription map (users subscribe explicitly or via
+/// auto-subscribe-on-mention).
+fn build_initial_subscriptions(
+    config: &room_protocol::RoomConfig,
+) -> HashMap<String, room_protocol::SubscriptionTier> {
+    let mut subs = HashMap::new();
+    if config.visibility == room_protocol::RoomVisibility::Dm {
+        for user in &config.invite_list {
+            subs.insert(user.clone(), room_protocol::SubscriptionTier::Full);
+        }
+    }
+    subs
 }
 
 /// Parse the `ROOM:<room_id>:` prefix from a handshake line.
@@ -775,5 +796,86 @@ mod tests {
             .create_room_with_config("../etc", config)
             .await
             .is_err());
+    }
+
+    // ── DM auto-subscribe ─────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn dm_room_auto_subscribes_both_participants() {
+        let daemon = DaemonState::new(DaemonConfig::default());
+        let config = room_protocol::RoomConfig::dm("alice", "bob");
+        daemon
+            .create_room_with_config("dm-alice-bob", config)
+            .await
+            .unwrap();
+
+        let state = get_room(&daemon, "dm-alice-bob").await;
+        let subs = state.subscription_map.lock().await;
+        assert_eq!(subs.len(), 2);
+        assert_eq!(
+            subs.get("alice"),
+            Some(&room_protocol::SubscriptionTier::Full)
+        );
+        assert_eq!(
+            subs.get("bob"),
+            Some(&room_protocol::SubscriptionTier::Full)
+        );
+    }
+
+    #[tokio::test]
+    async fn public_room_starts_with_no_subscriptions() {
+        let daemon = DaemonState::new(DaemonConfig::default());
+        let config = room_protocol::RoomConfig::public("owner");
+        daemon
+            .create_room_with_config("lobby", config)
+            .await
+            .unwrap();
+
+        let state = get_room(&daemon, "lobby").await;
+        let subs = state.subscription_map.lock().await;
+        assert!(subs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn unconfigured_room_starts_with_no_subscriptions() {
+        let daemon = DaemonState::new(DaemonConfig::default());
+        daemon.create_room("plain").await.unwrap();
+
+        let state = get_room(&daemon, "plain").await;
+        let subs = state.subscription_map.lock().await;
+        assert!(subs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn dm_auto_subscribe_uses_full_tier() {
+        let daemon = DaemonState::new(DaemonConfig::default());
+        let config = room_protocol::RoomConfig::dm("carol", "dave");
+        daemon
+            .create_room_with_config("dm-carol-dave", config)
+            .await
+            .unwrap();
+
+        let state = get_room(&daemon, "dm-carol-dave").await;
+        let subs = state.subscription_map.lock().await;
+        // Verify it's Full, not MentionsOnly
+        for (_, tier) in subs.iter() {
+            assert_eq!(*tier, room_protocol::SubscriptionTier::Full);
+        }
+    }
+
+    #[test]
+    fn build_initial_subscriptions_dm_populates() {
+        let config = room_protocol::RoomConfig::dm("alice", "bob");
+        let subs = build_initial_subscriptions(&config);
+        assert_eq!(subs.len(), 2);
+        assert_eq!(subs["alice"], room_protocol::SubscriptionTier::Full);
+        assert_eq!(subs["bob"], room_protocol::SubscriptionTier::Full);
+    }
+
+    #[test]
+    fn build_initial_subscriptions_public_empty() {
+        let config = room_protocol::RoomConfig::public("owner");
+        let subs = build_initial_subscriptions(&config);
+        assert!(subs.is_empty());
     }
 }

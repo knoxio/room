@@ -30,6 +30,7 @@ pub(crate) type ClaimMap = Arc<Mutex<HashMap<String, String>>>;
 
 /// Maps username → subscription tier for this room. Ephemeral; persistence
 /// is handled by E3-2 (#311) once the durable state directory lands.
+/// DM rooms auto-subscribe both participants at `Full` on creation.
 pub(crate) type SubscriptionMap = Arc<Mutex<HashMap<String, SubscriptionTier>>>;
 
 /// Shared broker state passed to every client handler.
