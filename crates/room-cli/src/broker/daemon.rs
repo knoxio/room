@@ -268,6 +268,26 @@ impl DaemonState {
         self.rooms.lock().await.keys().cloned().collect()
     }
 
+    /// Insert a token directly into a room's token map, bypassing the join
+    /// permission check. Intended for integration tests only.
+    #[doc(hidden)]
+    pub async fn test_inject_token(
+        &self,
+        room_id: &str,
+        username: &str,
+        token: &str,
+    ) -> Result<(), String> {
+        let rooms = self.rooms.lock().await;
+        let room = rooms
+            .get(room_id)
+            .ok_or_else(|| format!("room not found: {room_id}"))?;
+        room.token_map
+            .lock()
+            .await
+            .insert(token.to_owned(), username.to_owned());
+        Ok(())
+    }
+
     /// Run the daemon: listen on UDS, dispatch connections to rooms.
     pub async fn run(&self) -> anyhow::Result<()> {
         // Remove stale socket synchronously.
