@@ -362,6 +362,17 @@ async fn cmd_query_history(
 
     apply_sort_and_limit(&mut filtered, &filter);
 
+    // If a specific target_id was requested and nothing was found, report an error.
+    if filtered.is_empty() {
+        if let Some((ref target_room, target_seq)) = filter.target_id {
+            use room_protocol::format_message_id;
+            anyhow::bail!(
+                "message not found: {}",
+                format_message_id(target_room, target_seq)
+            );
+        }
+    }
+
     for msg in &filtered {
         println!("{}", serde_json::to_string(msg)?);
     }

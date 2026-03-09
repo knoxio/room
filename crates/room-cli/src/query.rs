@@ -44,6 +44,11 @@ pub struct QueryFilter {
     pub mention_user: Option<String>,
     /// Exclude `DirectMessage` variants (public-channel filter).
     pub public_only: bool,
+    /// Only include the single message with this exact `(room_id, seq)`.
+    ///
+    /// When set, all other seq-based filters are ignored; the match is exact.
+    /// DM privacy is still enforced externally by the caller.
+    pub target_id: Option<(String, u64)>,
     /// Maximum number of messages to return. Applied externally by the caller.
     pub limit: Option<usize>,
     /// If `true`, return messages oldest-first. If `false`, newest-first.
@@ -100,6 +105,19 @@ impl QueryFilter {
             }
         }
 
+        // ── target_id: exact (room, seq) match ───────────────────────────────
+        if let Some((ref target_room, target_seq)) = self.target_id {
+            if room_id != target_room {
+                return false;
+            }
+            match msg.seq() {
+                Some(seq) if seq == target_seq => {}
+                _ => return false,
+            }
+            // When target_id is set, skip the range seq filters below.
+            return true;
+        }
+
         // ── seq range filter ──────────────────────────────────────────────────
         // Constraints only apply when the message's room matches the filter room.
         if let Some((ref filter_room, filter_seq)) = self.after_seq {
@@ -135,6 +153,26 @@ impl QueryFilter {
 
         true
     }
+}
+
+/// Returns `true` if `filter` contains at least one narrowing criterion.
+///
+/// Used to validate that the `-p/--public` flag is not used alone. The
+/// narrowing criteria are: rooms, users, content_search, content_regex,
+/// after_seq, before_seq, after_ts, before_ts, mention_user, target_id,
+/// or a `limit`.
+pub fn has_narrowing_filter(filter: &QueryFilter) -> bool {
+    !filter.rooms.is_empty()
+        || !filter.users.is_empty()
+        || filter.content_search.is_some()
+        || filter.content_regex.is_some()
+        || filter.after_seq.is_some()
+        || filter.before_seq.is_some()
+        || filter.after_ts.is_some()
+        || filter.before_ts.is_some()
+        || filter.mention_user.is_some()
+        || filter.target_id.is_some()
+        || filter.limit.is_some()
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -541,6 +579,110 @@ mod tests {
         };
         let msg = msg_with_ts("r", "u", "x", cutoff);
         assert!(!f.matches(&msg, "r"));
+    }
+
+    // ── target_id filter ──────────────────────────────────────────────────────
+
+    #[test]
+    fn target_id_passes_exact_match() {
+        let f = QueryFilter {
+            target_id: Some(("r".into(), 7)),
+            ..Default::default()
+        };
+        assert!(f.matches(&msg_with_seq("r", "u", "x", 7), "r"));
+    }
+
+    #[test]
+    fn target_id_rejects_wrong_seq() {
+        let f = QueryFilter {
+            target_id: Some(("r".into(), 7)),
+            ..Default::default()
+        };
+        assert!(!f.matches(&msg_with_seq("r", "u", "x", 8), "r"));
+        assert!(!f.matches(&msg_with_seq("r", "u", "x", 6), "r"));
+    }
+
+    #[test]
+    fn target_id_rejects_wrong_room() {
+        let f = QueryFilter {
+            target_id: Some(("dev".into(), 7)),
+            ..Default::default()
+        };
+        assert!(!f.matches(&msg_with_seq("prod", "u", "x", 7), "prod"));
+    }
+
+    #[test]
+    fn target_id_rejects_no_seq() {
+        let f = QueryFilter {
+            target_id: Some(("r".into(), 1)),
+            ..Default::default()
+        };
+        let msg = make_message("r", "u", "no seq");
+        assert!(!f.matches(&msg, "r"));
+    }
+
+    #[test]
+    fn target_id_short_circuits_other_seq_filters() {
+        // after_seq would reject seq=7, but target_id=7 should still pass.
+        let f = QueryFilter {
+            target_id: Some(("r".into(), 7)),
+            after_seq: Some(("r".into(), 10)),
+            ..Default::default()
+        };
+        assert!(f.matches(&msg_with_seq("r", "u", "x", 7), "r"));
+    }
+
+    // ── has_narrowing_filter ───────────────────────────────────────────────────
+
+    #[test]
+    fn has_narrowing_filter_empty_is_false() {
+        assert!(!has_narrowing_filter(&QueryFilter::default()));
+    }
+
+    #[test]
+    fn has_narrowing_filter_rooms_is_true() {
+        let f = QueryFilter {
+            rooms: vec!["r".into()],
+            ..Default::default()
+        };
+        assert!(has_narrowing_filter(&f));
+    }
+
+    #[test]
+    fn has_narrowing_filter_limit_is_true() {
+        let f = QueryFilter {
+            limit: Some(10),
+            ..Default::default()
+        };
+        assert!(has_narrowing_filter(&f));
+    }
+
+    #[test]
+    fn has_narrowing_filter_target_id_is_true() {
+        let f = QueryFilter {
+            target_id: Some(("r".into(), 1)),
+            ..Default::default()
+        };
+        assert!(has_narrowing_filter(&f));
+    }
+
+    #[test]
+    fn has_narrowing_filter_content_search_is_true() {
+        let f = QueryFilter {
+            content_search: Some("foo".into()),
+            ..Default::default()
+        };
+        assert!(has_narrowing_filter(&f));
+    }
+
+    #[test]
+    fn has_narrowing_filter_public_only_alone_is_false() {
+        // public_only by itself is not a narrowing filter.
+        let f = QueryFilter {
+            public_only: true,
+            ..Default::default()
+        };
+        assert!(!has_narrowing_filter(&f));
     }
 
     // ── combined filters ──────────────────────────────────────────────────────

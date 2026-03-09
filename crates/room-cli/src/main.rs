@@ -11,7 +11,7 @@ use room_cli::{
     history::default_chat_path,
     message::parse_message_id,
     oneshot::{self, QueryOptions},
-    query::QueryFilter,
+    query::{has_narrowing_filter, QueryFilter},
 };
 use tokio::net::UnixStream;
 
@@ -93,6 +93,18 @@ enum Cmd {
         /// Poll interval in seconds when --wait is used (default: 5)
         #[arg(long, default_value_t = 5)]
         interval: u64,
+        /// Bypass subscription filter — query any public room regardless of subscription.
+        ///
+        /// Must be combined with at least one narrowing filter (-n, -r, --user, --from,
+        /// --to, --since, --until, --id, or a content search). DM privacy is still
+        /// enforced regardless of this flag.
+        #[arg(short = 'p', long = "public")]
+        public: bool,
+        /// Look up a single message by ID — format `<room>:<seq>` (e.g. `dev:42`).
+        ///
+        /// Returns the message with that exact sequence number, or an error if not found.
+        #[arg(long)]
+        id: Option<String>,
     },
     /// Poll for new messages — alias for `room query --new`.
     ///
@@ -267,6 +279,8 @@ async fn main() -> anyhow::Result<()> {
             asc,
             desc,
             interval,
+            public,
+            id,
         }) => {
             // Resolve the effective room list.
             let effective_rooms: Vec<String> = if !rooms.is_empty() {
@@ -325,6 +339,14 @@ async fn main() -> anyhow::Result<()> {
                 })
                 .transpose()?;
 
+            // Parse --id as room:seq.
+            let target_id = id
+                .as_deref()
+                .map(|s| {
+                    parse_message_id(s).map_err(|e| anyhow::anyhow!("invalid --id value: {e}"))
+                })
+                .transpose()?;
+
             // Default sort: ascending when --new/--wait, descending otherwise.
             let ascending = if asc {
                 true
@@ -343,8 +365,18 @@ async fn main() -> anyhow::Result<()> {
                 before_ts,
                 limit: count,
                 ascending,
+                public_only: public,
+                target_id,
                 ..Default::default()
             };
+
+            // -p/--public requires at least one narrowing filter.
+            if public && !has_narrowing_filter(&filter) {
+                anyhow::bail!(
+                    "-p/--public requires at least one narrowing filter (-n, -r, --user, \
+                     --from, --to, --since, --until, --id, or a content search)"
+                );
+            }
 
             let opts = QueryOptions {
                 new_only: new || wait,
