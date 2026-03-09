@@ -28,25 +28,48 @@ pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 // ── Plugin trait ────────────────────────────────────────────────────────────
 
-/// A plugin that handles one or more `/` commands.
+/// A plugin that handles one or more `/` commands and/or reacts to room
+/// lifecycle events.
 ///
 /// Implement this trait and register it with [`PluginRegistry`] to add
 /// custom commands to a room broker. The broker dispatches matching
 /// `Message::Command` messages to the plugin's [`handle`](Plugin::handle)
-/// method.
+/// method, and calls [`on_user_join`](Plugin::on_user_join) /
+/// [`on_user_leave`](Plugin::on_user_leave) when users enter or leave.
+///
+/// Only [`name`](Plugin::name) and [`handle`](Plugin::handle) are required.
+/// All other methods have no-op / empty-vec defaults so that adding new
+/// lifecycle hooks in future releases does not break existing plugins.
 pub trait Plugin: Send + Sync {
     /// Unique identifier for this plugin (e.g. `"stats"`, `"help"`).
     fn name(&self) -> &str;
 
     /// Commands this plugin handles. Each entry drives `/help` output
     /// and TUI autocomplete.
-    fn commands(&self) -> Vec<CommandInfo>;
+    ///
+    /// Defaults to an empty vec for plugins that only use lifecycle hooks
+    /// and do not register any commands.
+    fn commands(&self) -> Vec<CommandInfo> {
+        vec![]
+    }
 
     /// Handle an invocation of one of this plugin's commands.
     ///
     /// Returns a boxed future for dyn compatibility (required because the
     /// registry stores `Box<dyn Plugin>`).
     fn handle(&self, ctx: CommandContext) -> BoxFuture<'_, anyhow::Result<PluginResult>>;
+
+    /// Called after a user joins the room. The default is a no-op.
+    ///
+    /// Invoked synchronously during the join broadcast path. Implementations
+    /// must not block — spawn a task if async work is needed.
+    fn on_user_join(&self, _user: &str) {}
+
+    /// Called after a user leaves the room. The default is a no-op.
+    ///
+    /// Invoked synchronously during the leave broadcast path. Implementations
+    /// must not block — spawn a task if async work is needed.
+    fn on_user_leave(&self, _user: &str) {}
 }
 
 // ── CommandInfo ─────────────────────────────────────────────────────────────
@@ -373,6 +396,24 @@ impl PluginRegistry {
     /// All registered commands across all plugins.
     pub fn all_commands(&self) -> Vec<CommandInfo> {
         self.plugins.iter().flat_map(|p| p.commands()).collect()
+    }
+
+    /// Notify all registered plugins that a user has joined the room.
+    ///
+    /// Calls [`Plugin::on_user_join`] on every plugin in registration order.
+    pub fn notify_join(&self, user: &str) {
+        for plugin in &self.plugins {
+            plugin.on_user_join(user);
+        }
+    }
+
+    /// Notify all registered plugins that a user has left the room.
+    ///
+    /// Calls [`Plugin::on_user_leave`] on every plugin in registration order.
+    pub fn notify_leave(&self, user: &str) {
+        for plugin in &self.plugins {
+            plugin.on_user_leave(user);
+        }
     }
 
     /// Completions for a specific command at a given argument position,
@@ -939,5 +980,96 @@ mod tests {
         let reader = HistoryReader::new(path, "u");
         let since = reader.since(&id1).await.unwrap();
         assert_eq!(since.len(), 2);
+    }
+
+    // ── Plugin trait default methods ──────────────────────────────────────
+
+    /// A plugin that only provides a name and handle — no commands override,
+    /// no lifecycle hooks override. Demonstrates the defaults compile and work.
+    struct MinimalPlugin;
+
+    impl Plugin for MinimalPlugin {
+        fn name(&self) -> &str {
+            "minimal"
+        }
+
+        fn handle(&self, _ctx: CommandContext) -> BoxFuture<'_, anyhow::Result<PluginResult>> {
+            Box::pin(async { Ok(PluginResult::Handled) })
+        }
+        // commands(), on_user_join(), on_user_leave() all use defaults
+    }
+
+    #[test]
+    fn default_commands_returns_empty_vec() {
+        assert!(MinimalPlugin.commands().is_empty());
+    }
+
+    #[test]
+    fn default_lifecycle_hooks_are_noop() {
+        // These should not panic or do anything observable
+        MinimalPlugin.on_user_join("alice");
+        MinimalPlugin.on_user_leave("alice");
+    }
+
+    #[test]
+    fn registry_notify_join_calls_all_plugins() {
+        use std::sync::{Arc, Mutex};
+
+        struct TrackingPlugin {
+            joined: Arc<Mutex<Vec<String>>>,
+            left: Arc<Mutex<Vec<String>>>,
+        }
+
+        impl Plugin for TrackingPlugin {
+            fn name(&self) -> &str {
+                "tracking"
+            }
+
+            fn handle(&self, _ctx: CommandContext) -> BoxFuture<'_, anyhow::Result<PluginResult>> {
+                Box::pin(async { Ok(PluginResult::Handled) })
+            }
+
+            fn on_user_join(&self, user: &str) {
+                self.joined.lock().unwrap().push(user.to_owned());
+            }
+
+            fn on_user_leave(&self, user: &str) {
+                self.left.lock().unwrap().push(user.to_owned());
+            }
+        }
+
+        let joined = Arc::new(Mutex::new(Vec::<String>::new()));
+        let left = Arc::new(Mutex::new(Vec::<String>::new()));
+        let mut reg = PluginRegistry::new();
+        reg.register(Box::new(TrackingPlugin {
+            joined: joined.clone(),
+            left: left.clone(),
+        }))
+        .unwrap();
+
+        reg.notify_join("alice");
+        reg.notify_join("bob");
+        reg.notify_leave("alice");
+
+        assert_eq!(*joined.lock().unwrap(), vec!["alice", "bob"]);
+        assert_eq!(*left.lock().unwrap(), vec!["alice"]);
+    }
+
+    #[test]
+    fn registry_notify_join_empty_registry_is_noop() {
+        let reg = PluginRegistry::new();
+        // Should not panic with zero plugins
+        reg.notify_join("alice");
+        reg.notify_leave("alice");
+    }
+
+    #[test]
+    fn minimal_plugin_can_be_registered_without_commands() {
+        let mut reg = PluginRegistry::new();
+        // MinimalPlugin has no commands, so registration must succeed
+        // (the only validation in register() is command name conflicts)
+        reg.register(Box::new(MinimalPlugin)).unwrap();
+        // It won't show up in resolve() since it has no commands
+        assert_eq!(reg.all_commands().len(), 0);
     }
 }
