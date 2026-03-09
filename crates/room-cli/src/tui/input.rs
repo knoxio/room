@@ -41,6 +41,11 @@ pub(super) enum Action {
     PrevTab,
     /// Switch to a specific tab by index (Ctrl+1–9).
     SwitchTab(usize),
+    /// Open or reuse a DM room with the target user and send a message.
+    DmRoom {
+        target_user: String,
+        content: String,
+    },
 }
 
 /// Handle a single key event, mutating `state` in place.
@@ -108,6 +113,15 @@ pub(super) fn handle_key(
                 // Backslash + Enter: strip the trailing '\' and insert a newline.
                 state.cursor_pos = new_pos;
             } else if !state.input.is_empty() {
+                // Intercept `/dm <user> <msg>` to return a DmRoom action
+                // instead of sending an intra-room DM.
+                if let Some(dm) = parse_dm_input(&state.input) {
+                    state.input.clear();
+                    state.cursor_pos = 0;
+                    state.input_row_scroll = 0;
+                    state.scroll_offset = 0;
+                    return Some(dm);
+                }
                 let payload = build_payload(&state.input);
                 state.input.clear();
                 state.cursor_pos = 0;
@@ -529,9 +543,28 @@ pub(super) fn apply_backslash_enter(buf: &mut String, cursor_pos: usize) -> Opti
     }
 }
 
+/// Parse `/dm <user> <message>` input into a `DmRoom` action.
+///
+/// Returns `Some(Action::DmRoom { .. })` when the input is a valid `/dm`
+/// command with both a target user and message content. Returns `None` for
+/// incomplete input (missing user or message) — those fall through to
+/// `build_payload` for backwards-compatible intra-room DM handling.
+fn parse_dm_input(input: &str) -> Option<Action> {
+    let rest = input.strip_prefix("/dm ")?;
+    let mut parts = rest.splitn(2, ' ');
+    let target_user = parts.next().filter(|s| !s.is_empty())?;
+    let content = parts.next().filter(|s| !s.is_empty())?;
+    Some(Action::DmRoom {
+        target_user: target_user.to_owned(),
+        content: content.to_owned(),
+    })
+}
+
 /// Convert TUI input to a JSON envelope for the broker.
 pub(super) fn build_payload(input: &str) -> String {
     // `/dm <user> <message>` — preserve spaces in the message body.
+    // NOTE: This branch is now only reached when `parse_dm_input` returns
+    // None (e.g. `/dm user` with no message body).
     if let Some(rest) = input.strip_prefix("/dm ") {
         let mut parts = rest.splitn(2, ' ');
         let to = parts.next().unwrap_or("").to_owned();
@@ -831,6 +864,56 @@ mod tests {
         let payload = build_payload("/dm bob hello   world");
         let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
         assert_eq!(v["content"], "hello   world");
+    }
+
+    // ── parse_dm_input tests ────────────────────────────────────────────────
+
+    #[test]
+    fn parse_dm_input_returns_dm_room_action() {
+        let action = parse_dm_input("/dm alice hello there").unwrap();
+        match action {
+            Action::DmRoom {
+                target_user,
+                content,
+            } => {
+                assert_eq!(target_user, "alice");
+                assert_eq!(content, "hello there");
+            }
+            _ => panic!("expected DmRoom action"),
+        }
+    }
+
+    #[test]
+    fn parse_dm_input_preserves_spaces_in_content() {
+        let action = parse_dm_input("/dm bob hello   world").unwrap();
+        match action {
+            Action::DmRoom { content, .. } => {
+                assert_eq!(content, "hello   world");
+            }
+            _ => panic!("expected DmRoom action"),
+        }
+    }
+
+    #[test]
+    fn parse_dm_input_returns_none_for_missing_content() {
+        assert!(parse_dm_input("/dm alice").is_none());
+    }
+
+    #[test]
+    fn parse_dm_input_returns_none_for_missing_user() {
+        assert!(parse_dm_input("/dm ").is_none());
+    }
+
+    #[test]
+    fn parse_dm_input_returns_none_for_non_dm() {
+        assert!(parse_dm_input("/who").is_none());
+        assert!(parse_dm_input("hello world").is_none());
+    }
+
+    #[test]
+    fn parse_dm_input_returns_none_for_user_only_with_trailing_space() {
+        // "/dm alice " has empty content after splitting
+        assert!(parse_dm_input("/dm alice ").is_none());
     }
 
     // ── wrap_input_display ──────────────────────────────────────────────────

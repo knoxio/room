@@ -40,6 +40,7 @@ impl Client {
                 &self.room_id,
                 &self.username,
                 self.history_lines,
+                self.socket_path.clone(),
             )
             .await
         }
