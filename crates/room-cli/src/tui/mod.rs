@@ -211,6 +211,93 @@ async fn open_dm_tab(
     })
 }
 
+/// Switch the active tab and sync scroll state between input and the new tab.
+fn switch_to_tab(
+    tabs: &mut [RoomTab],
+    active_tab: &mut usize,
+    input_state: &mut InputState,
+    idx: usize,
+) {
+    tabs[*active_tab].scroll_offset = input_state.scroll_offset;
+    *active_tab = idx;
+    tabs[*active_tab].unread_count = 0;
+    input_state.scroll_offset = tabs[*active_tab].scroll_offset;
+}
+
+/// Write a newline-terminated payload to a write half.
+async fn write_payload_to_tab(
+    write_half: &mut tokio::net::unix::OwnedWriteHalf,
+    payload: &str,
+) -> anyhow::Result<()> {
+    write_half
+        .write_all(format!("{payload}\n").as_bytes())
+        .await
+        .map_err(Into::into)
+}
+
+/// Parameters for opening a DM room tab. Bundles the session-scoped constants
+/// so `handle_dm_action` stays under the `too-many-arguments` threshold.
+struct DmTabConfig<'a> {
+    socket_path: &'a std::path::Path,
+    username: &'a str,
+    history_lines: usize,
+}
+
+/// Handle `Action::DmRoom` — open or reuse a DM tab and send the first message.
+///
+/// Returns `Ok(())` on success. On `Err`, the caller should set `result` and
+/// `break 'main` to exit the event loop cleanly.
+async fn handle_dm_action(
+    tabs: &mut Vec<RoomTab>,
+    active_tab: &mut usize,
+    input_state: &mut InputState,
+    cfg: &DmTabConfig<'_>,
+    target_user: String,
+    content: String,
+) -> anyhow::Result<()> {
+    let fallback = serde_json::json!({
+        "type": "dm",
+        "to": target_user,
+        "content": content
+    })
+    .to_string();
+
+    let Ok(dm_id) = room_protocol::dm_room_id(cfg.username, &target_user) else {
+        // Same user — send as intra-room DM; the broker will reject it cleanly.
+        return write_payload_to_tab(&mut tabs[*active_tab].write_half, &fallback).await;
+    };
+
+    if let Some(idx) = tabs.iter().position(|t| t.room_id == dm_id) {
+        // Tab already open — switch and send.
+        switch_to_tab(tabs, active_tab, input_state, idx);
+        return write_payload_to_tab(&mut tabs[*active_tab].write_half, &build_payload(&content))
+            .await;
+    }
+
+    // Create the DM room and open a new tab.
+    match open_dm_tab(
+        cfg.socket_path,
+        &dm_id,
+        cfg.username,
+        &target_user,
+        cfg.history_lines,
+    )
+    .await
+    {
+        Ok(new_tab) => {
+            tabs.push(new_tab);
+            tabs[*active_tab].scroll_offset = input_state.scroll_offset;
+            *active_tab = tabs.len() - 1;
+            input_state.scroll_offset = 0;
+            write_payload_to_tab(&mut tabs[*active_tab].write_half, &build_payload(&content)).await
+        }
+        Err(_) => {
+            // DM room creation failed — fall back to intra-room DM.
+            write_payload_to_tab(&mut tabs[*active_tab].write_half, &fallback).await
+        }
+    }
+}
+
 pub async fn run(
     reader: BufReader<tokio::net::unix::OwnedReadHalf>,
     write_half: tokio::net::unix::OwnedWriteHalf,
@@ -709,123 +796,46 @@ pub async fn run(
                         Some(Action::Quit) => break 'main,
                         Some(Action::NextTab) => {
                             if tabs.len() > 1 {
-                                tabs[active_tab].scroll_offset = input_state.scroll_offset;
-                                active_tab = (active_tab + 1) % tabs.len();
-                                tabs[active_tab].unread_count = 0;
-                                input_state.scroll_offset = tabs[active_tab].scroll_offset;
+                                let next = (active_tab + 1) % tabs.len();
+                                switch_to_tab(&mut tabs, &mut active_tab, &mut input_state, next);
                             }
                         }
                         Some(Action::PrevTab) => {
                             if tabs.len() > 1 {
-                                tabs[active_tab].scroll_offset = input_state.scroll_offset;
-                                active_tab = if active_tab == 0 {
+                                let prev = if active_tab == 0 {
                                     tabs.len() - 1
                                 } else {
                                     active_tab - 1
                                 };
-                                tabs[active_tab].unread_count = 0;
-                                input_state.scroll_offset = tabs[active_tab].scroll_offset;
+                                switch_to_tab(&mut tabs, &mut active_tab, &mut input_state, prev);
                             }
                         }
                         Some(Action::SwitchTab(idx)) => {
                             if idx < tabs.len() {
-                                tabs[active_tab].scroll_offset = input_state.scroll_offset;
-                                active_tab = idx;
-                                tabs[active_tab].unread_count = 0;
-                                input_state.scroll_offset = tabs[active_tab].scroll_offset;
+                                switch_to_tab(&mut tabs, &mut active_tab, &mut input_state, idx);
                             }
                         }
                         Some(Action::DmRoom {
                             target_user,
                             content,
                         }) => {
-                            match room_protocol::dm_room_id(username, &target_user) {
-                                Ok(dm_id) => {
-                                    // Check if a tab for this DM room already exists.
-                                    if let Some(idx) = tabs.iter().position(|t| t.room_id == dm_id)
-                                    {
-                                        // Switch to existing DM tab and send the message.
-                                        tabs[active_tab].scroll_offset = input_state.scroll_offset;
-                                        active_tab = idx;
-                                        tabs[active_tab].unread_count = 0;
-                                        input_state.scroll_offset = tabs[active_tab].scroll_offset;
-                                        let payload = build_payload(&content);
-                                        if let Err(e) = tabs[active_tab]
-                                            .write_half
-                                            .write_all(format!("{payload}\n").as_bytes())
-                                            .await
-                                        {
-                                            result = Err(e.into());
-                                            break 'main;
-                                        }
-                                    } else {
-                                        // Create/reuse DM room and open a new tab.
-                                        match open_dm_tab(
-                                            &socket_path,
-                                            &dm_id,
-                                            username,
-                                            &target_user,
-                                            history_lines,
-                                        )
-                                        .await
-                                        {
-                                            Ok(new_tab) => {
-                                                tabs.push(new_tab);
-                                                tabs[active_tab].scroll_offset =
-                                                    input_state.scroll_offset;
-                                                active_tab = tabs.len() - 1;
-                                                input_state.scroll_offset = 0;
-
-                                                // Send the message in the new DM tab.
-                                                let payload = build_payload(&content);
-                                                if let Err(e) = tabs[active_tab]
-                                                    .write_half
-                                                    .write_all(format!("{payload}\n").as_bytes())
-                                                    .await
-                                                {
-                                                    result = Err(e.into());
-                                                    break 'main;
-                                                }
-                                            }
-                                            Err(_) => {
-                                                // DM room creation failed — fall back to
-                                                // intra-room DM in the current tab.
-                                                let fallback = serde_json::json!({
-                                                    "type": "dm",
-                                                    "to": target_user,
-                                                    "content": content
-                                                })
-                                                .to_string();
-                                                if let Err(e) = tabs[active_tab]
-                                                    .write_half
-                                                    .write_all(format!("{fallback}\n").as_bytes())
-                                                    .await
-                                                {
-                                                    result = Err(e.into());
-                                                    break 'main;
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                                Err(_) => {
-                                    // Same user — cannot DM yourself. Send as intra-room DM
-                                    // which the broker will reject with a sensible error.
-                                    let fallback = serde_json::json!({
-                                        "type": "dm",
-                                        "to": target_user,
-                                        "content": content
-                                    })
-                                    .to_string();
-                                    if let Err(e) = tabs[active_tab]
-                                        .write_half
-                                        .write_all(format!("{fallback}\n").as_bytes())
-                                        .await
-                                    {
-                                        result = Err(e.into());
-                                        break 'main;
-                                    }
-                                }
+                            let cfg = DmTabConfig {
+                                socket_path: &socket_path,
+                                username,
+                                history_lines,
+                            };
+                            if let Err(e) = handle_dm_action(
+                                &mut tabs,
+                                &mut active_tab,
+                                &mut input_state,
+                                &cfg,
+                                target_user,
+                                content,
+                            )
+                            .await
+                            {
+                                result = Err(e);
+                                break 'main;
                             }
                         }
                         None => {}

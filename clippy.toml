@@ -1,18 +1,18 @@
 # Clippy configuration for the room workspace.
 #
-# Thresholds are currently set conservatively above the existing maximums
-# in the codebase while the sprint-9 refactor sprint resolves known violations.
-# Tighten these progressively as wave-1 and wave-2 refactor PRs (#351–#363) land:
-#
-#   cognitive-complexity: target ≤ 25 after handle_key (#354) and loop_runner land
-#   too-many-lines:       target ≤ 200 after run() / main() / dispatch() refactors
+# Tighten thresholds progressively as wave-2 refactor PRs (#357–#363) land:
+#   cognitive-complexity: target ≤ 25 once broker/commands.rs (26) and tui/mod.rs (26) are refactored
+#   too-many-lines:       target ≤ 200 once tui/mod.rs::run() and main() are split
 #   too-many-arguments:   keep at 7 (no current violations)
 
 # Flag functions whose cognitive complexity exceeds this threshold.
-# Set to 40 so that tui/input.rs::handle_key (complexity 38, assigned to #354)
-# does not break CI until bumblebee's wave-1 refactor lands.
-# Target: tighten to 25 after #354 and #363 (tui/mod.rs::run at 33) are resolved.
-cognitive-complexity-threshold = 40
+# Tightened from 40 → 30 in this PR after:
+#   - bumblebee's #354 (handle_key decomposition) and saphire's #351 (handshake extraction)
+#   - tui/mod.rs::run() DmRoom handler extracted to handle_dm_action()
+#   - loop_runner.rs::run_loop() extracted to focused helpers
+# Current maximum: broker/commands.rs::route_command (26 — wave-2 #357 target).
+# Next target: 25 after wave-2 refactors resolve broker/commands.rs.
+cognitive-complexity-threshold = 30
 
 # Flag functions with more lines than this threshold.
 # Current maximum: tui/mod.rs::run (559 lines — wave-2 refactor target).
