@@ -2876,7 +2876,7 @@ async fn daemon_token_scoped_to_room() {
 
 #[tokio::test]
 async fn daemon_dm_room_participants_can_join() {
-    let dm_id = dm_room_id("alice", "bob");
+    let dm_id = dm_room_id("alice", "bob").unwrap();
     let config = RoomConfig::dm("alice", "bob");
     let td = TestDaemon::start_with_configs(vec![(&dm_id, Some(config))]).await;
 
@@ -2889,7 +2889,7 @@ async fn daemon_dm_room_participants_can_join() {
 
 #[tokio::test]
 async fn daemon_dm_room_non_participant_rejected() {
-    let dm_id = dm_room_id("alice", "bob");
+    let dm_id = dm_room_id("alice", "bob").unwrap();
     let config = RoomConfig::dm("alice", "bob");
     let td = TestDaemon::start_with_configs(vec![(&dm_id, Some(config))]).await;
 
@@ -2909,7 +2909,7 @@ async fn daemon_dm_room_non_participant_rejected() {
 
 #[tokio::test]
 async fn daemon_dm_room_send_and_receive() {
-    let dm_id = dm_room_id("alice", "bob");
+    let dm_id = dm_room_id("alice", "bob").unwrap();
     let config = RoomConfig::dm("alice", "bob");
     let td = TestDaemon::start_with_configs(vec![(&dm_id, Some(config))]).await;
 
@@ -2966,7 +2966,10 @@ async fn daemon_public_room_allows_anyone() {
 
 #[tokio::test]
 async fn dm_room_id_both_directions_same() {
-    assert_eq!(dm_room_id("alice", "bob"), dm_room_id("bob", "alice"));
+    assert_eq!(
+        dm_room_id("alice", "bob").unwrap(),
+        dm_room_id("bob", "alice").unwrap()
+    );
 }
 
 // ── Scripted multi-agent test sequences (#180) ──────────────────────────────

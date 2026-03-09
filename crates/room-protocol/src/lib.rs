@@ -1,8 +1,28 @@
 use std::collections::HashSet;
+use std::fmt;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+
+/// Error returned when constructing a DM room ID with invalid inputs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DmRoomError {
+    /// Both usernames are the same — a DM requires two distinct users.
+    SameUser(String),
+}
+
+impl fmt::Display for DmRoomError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            DmRoomError::SameUser(user) => {
+                write!(f, "cannot create DM room: both users are '{user}'")
+            }
+        }
+    }
+}
+
+impl std::error::Error for DmRoomError {}
 
 /// Visibility level for a room, controlling who can discover and join it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -63,13 +83,28 @@ impl RoomConfig {
 ///
 /// Sorts usernames alphabetically so `/dm alice` from bob and `/dm bob` from
 /// alice both resolve to the same room.
-pub fn dm_room_id(user_a: &str, user_b: &str) -> String {
+///
+/// # Errors
+///
+/// Returns [`DmRoomError::SameUser`] if both usernames are identical.
+pub fn dm_room_id(user_a: &str, user_b: &str) -> Result<String, DmRoomError> {
+    if user_a == user_b {
+        return Err(DmRoomError::SameUser(user_a.to_owned()));
+    }
     let (first, second) = if user_a < user_b {
         (user_a, user_b)
     } else {
         (user_b, user_a)
     };
-    format!("dm-{first}-{second}")
+    Ok(format!("dm-{first}-{second}"))
+}
+
+/// Check whether a room ID represents a DM room.
+///
+/// DM room IDs follow the pattern `dm-<user_a>-<user_b>` where usernames are
+/// sorted alphabetically.
+pub fn is_dm_room(room_id: &str) -> bool {
+    room_id.starts_with("dm-") && room_id.matches('-').count() >= 2
 }
 
 /// Entry returned by room listing (discovery).
@@ -733,22 +768,84 @@ mod tests {
 
     #[test]
     fn dm_room_id_sorts_alphabetically() {
-        assert_eq!(dm_room_id("alice", "bob"), "dm-alice-bob");
-        assert_eq!(dm_room_id("bob", "alice"), "dm-alice-bob");
+        assert_eq!(dm_room_id("alice", "bob").unwrap(), "dm-alice-bob");
+        assert_eq!(dm_room_id("bob", "alice").unwrap(), "dm-alice-bob");
     }
 
     #[test]
-    fn dm_room_id_same_user() {
-        // Degenerate case — should still produce a valid ID
-        assert_eq!(dm_room_id("alice", "alice"), "dm-alice-alice");
+    fn dm_room_id_same_user_errors() {
+        let err = dm_room_id("alice", "alice").unwrap_err();
+        assert_eq!(err, DmRoomError::SameUser("alice".to_owned()));
+        assert_eq!(
+            err.to_string(),
+            "cannot create DM room: both users are 'alice'"
+        );
     }
 
     #[test]
     fn dm_room_id_is_deterministic() {
-        let id1 = dm_room_id("r2d2", "saphire");
-        let id2 = dm_room_id("saphire", "r2d2");
+        let id1 = dm_room_id("r2d2", "saphire").unwrap();
+        let id2 = dm_room_id("saphire", "r2d2").unwrap();
         assert_eq!(id1, id2);
         assert_eq!(id1, "dm-r2d2-saphire");
+    }
+
+    #[test]
+    fn dm_room_id_case_sensitive() {
+        let id1 = dm_room_id("Alice", "bob").unwrap();
+        let id2 = dm_room_id("alice", "bob").unwrap();
+        // Uppercase sorts before lowercase in ASCII
+        assert_eq!(id1, "dm-Alice-bob");
+        assert_eq!(id2, "dm-alice-bob");
+        assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn dm_room_id_with_hyphens_in_usernames() {
+        let id = dm_room_id("my-agent", "your-bot").unwrap();
+        assert_eq!(id, "dm-my-agent-your-bot");
+    }
+
+    // ── is_dm_room tests ─────────────────────────────────────────────────────
+
+    #[test]
+    fn is_dm_room_identifies_dm_rooms() {
+        assert!(is_dm_room("dm-alice-bob"));
+        assert!(is_dm_room("dm-r2d2-saphire"));
+    }
+
+    #[test]
+    fn is_dm_room_rejects_non_dm_rooms() {
+        assert!(!is_dm_room("agent-room-2"));
+        assert!(!is_dm_room("dev-chat"));
+        assert!(!is_dm_room("dm"));
+        assert!(!is_dm_room("dm-"));
+        assert!(!is_dm_room(""));
+    }
+
+    #[test]
+    fn is_dm_room_handles_edge_cases() {
+        // A room starting with "dm-" but having no second hyphen
+        assert!(!is_dm_room("dm-onlyoneuser"));
+        // Hyphenated usernames create more dashes — still valid
+        assert!(is_dm_room("dm-my-agent-your-bot"));
+    }
+
+    // ── DmRoomError tests ────────────────────────────────────────────────────
+
+    #[test]
+    fn dm_room_error_display() {
+        let err = DmRoomError::SameUser("bb".to_owned());
+        assert_eq!(
+            err.to_string(),
+            "cannot create DM room: both users are 'bb'"
+        );
+    }
+
+    #[test]
+    fn dm_room_error_is_send_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<DmRoomError>();
     }
 
     // ── RoomConfig tests ──────────────────────────────────────────────────────

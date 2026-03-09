@@ -659,7 +659,7 @@ mod tests {
     #[tokio::test]
     async fn dm_room_id_deterministic_and_lookup_works() {
         let daemon = DaemonState::new(DaemonConfig::default());
-        let room_id = room_protocol::dm_room_id("bob", "alice");
+        let room_id = room_protocol::dm_room_id("bob", "alice").unwrap();
         assert_eq!(room_id, "dm-alice-bob");
 
         let config = room_protocol::RoomConfig::dm("bob", "alice");
@@ -669,7 +669,10 @@ mod tests {
             .unwrap();
         assert!(daemon.has_room("dm-alice-bob").await);
         // Reverse order gives the same room_id
-        assert_eq!(room_protocol::dm_room_id("alice", "bob"), "dm-alice-bob");
+        assert_eq!(
+            room_protocol::dm_room_id("alice", "bob").unwrap(),
+            "dm-alice-bob"
+        );
     }
 
     // ── validate_room_id ──────────────────────────────────────────────────
