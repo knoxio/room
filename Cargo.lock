@@ -1961,6 +1961,7 @@ dependencies = [
  "clap",
  "crossterm",
  "futures-util",
+ "libc",
  "ratatui",
  "regex",
  "reqwest",

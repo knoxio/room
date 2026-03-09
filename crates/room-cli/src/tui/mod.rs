@@ -1,6 +1,9 @@
 use std::collections::HashMap;
 use std::io;
 
+#[cfg(unix)]
+use std::os::unix::io::AsRawFd;
+
 use crossterm::{
     event::{self, DisableBracketedPaste, EnableBracketedPaste, Event},
     execute,
@@ -363,6 +366,11 @@ pub async fn run(
         msg_rx,
         write_half,
     };
+
+    // Redirect stderr to ~/.room/room.log so that eprintln! from the broker
+    // (which runs in a background task) does not corrupt the TUI alternate screen.
+    #[cfg(unix)]
+    let saved_stderr_fd = redirect_stderr_to_log();
 
     // Setup terminal
     enable_raw_mode()?;
@@ -876,7 +884,55 @@ pub async fn run(
     )?;
     terminal.show_cursor()?;
 
+    // Restore stderr so post-TUI error messages appear on the terminal.
+    #[cfg(unix)]
+    restore_stderr(saved_stderr_fd);
+
     result
+}
+
+// ── Stderr redirection ───────────────────────────────────────────────────────
+
+/// Redirect stderr (fd 2) to `~/.room/room.log` so that `eprintln!` output
+/// from the broker does not corrupt the TUI alternate screen. Returns the
+/// saved fd so it can be restored after the TUI exits.
+#[cfg(unix)]
+fn redirect_stderr_to_log() -> Option<i32> {
+    let log_path = crate::paths::room_home().join("room.log");
+
+    let file = match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+    {
+        Ok(f) => f,
+        Err(_) => return None,
+    };
+
+    // Save the current stderr fd so we can restore it later.
+    let saved = unsafe { libc::dup(libc::STDERR_FILENO) };
+    if saved < 0 {
+        return None;
+    }
+
+    let log_fd = file.as_raw_fd();
+    if unsafe { libc::dup2(log_fd, libc::STDERR_FILENO) } < 0 {
+        unsafe { libc::close(saved) };
+        return None;
+    }
+
+    Some(saved)
+}
+
+/// Restore stderr to its original fd after leaving the TUI.
+#[cfg(unix)]
+fn restore_stderr(saved: Option<i32>) {
+    if let Some(fd) = saved {
+        unsafe {
+            libc::dup2(fd, libc::STDERR_FILENO);
+            libc::close(fd);
+        }
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
