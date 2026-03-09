@@ -98,6 +98,21 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Send a direct message to a user, creating the DM room if needed.
+    ///
+    /// Computes the canonical DM room ID (`dm-<sorted_a>-<sorted_b>`) and sends
+    /// the message. The caller's username is resolved from the token.
+    /// Prints the broadcast message JSON and exits.
+    Dm {
+        /// Recipient username
+        user: String,
+        /// Session token from `room join` (required)
+        #[arg(short = 't', long)]
+        token: String,
+        /// Message content; all remaining tokens are joined with spaces
+        #[arg(trailing_var_arg = true, num_args = 1..)]
+        message: Vec<String>,
+    },
     /// List active rooms with running brokers.
     ///
     /// Scans `/tmp` for `room-*.sock` files and probes each to verify the broker
@@ -219,6 +234,14 @@ async fn main() -> anyhow::Result<()> {
             json,
         }) => {
             oneshot::cmd_who(&room_id, &token, json).await?;
+        }
+        Some(Cmd::Dm {
+            user,
+            token,
+            message,
+        }) => {
+            let content = message.join(" ");
+            oneshot::cmd_dm(&user, &token, &content).await?;
         }
         Some(Cmd::List) => {
             oneshot::cmd_list().await?;

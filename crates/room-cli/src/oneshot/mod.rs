@@ -9,12 +9,13 @@ pub use poll::{
     cmd_poll, cmd_poll_multi, cmd_pull, cmd_watch, poll_messages, poll_messages_multi,
     pull_messages,
 };
-pub use token::{cmd_join, token_file_path, username_from_token};
+pub use token::{cmd_join, token_file_path, username_from_token, username_from_token_any_room};
 pub use transport::{join_session, send_message, send_message_with_token};
 pub use who::cmd_who;
 
 use std::path::PathBuf;
 
+use room_protocol::dm_room_id;
 use transport::send_message_with_token as transport_send;
 
 /// One-shot send subcommand: connect, send, print echo JSON to stdout, exit.
@@ -43,6 +44,48 @@ pub async fn cmd_send(
         .map_err(|e| {
             if e.to_string().contains("invalid token") {
                 anyhow::anyhow!("invalid token — run: room join {room_id} <username>")
+            } else {
+                e
+            }
+        })?;
+    println!("{}", serde_json::to_string(&msg)?);
+    Ok(())
+}
+
+/// One-shot DM subcommand: compute canonical DM room ID, send message, exit.
+///
+/// Resolves the caller's username from the token file, then computes the
+/// deterministic DM room ID (`dm-<sorted_a>-<sorted_b>`). Sends the message
+/// to that room's broker socket. The DM room must already exist (room creation
+/// will be handled by E1-6 dynamic room creation).
+///
+/// Returns an error if the caller tries to DM themselves or if the DM room
+/// broker is not running.
+pub async fn cmd_dm(recipient: &str, token: &str, content: &str) -> anyhow::Result<()> {
+    // Resolve the caller's username from the token
+    let caller = username_from_token_any_room(token)?;
+
+    // Compute canonical DM room ID
+    let dm_id = dm_room_id(&caller, recipient).map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    // Build the wire payload as a DM message
+    let wire = serde_json::json!({"type": "dm", "to": recipient, "content": content}).to_string();
+
+    // Send via the DM room's socket
+    let socket_path = PathBuf::from(format!("/tmp/room-{dm_id}.sock"));
+    let msg = transport_send(&socket_path, token, &wire)
+        .await
+        .map_err(|e| {
+            if e.to_string().contains("No such file")
+                || e.to_string().contains("Connection refused")
+            {
+                anyhow::anyhow!(
+                    "DM room '{dm_id}' is not running — start it or use a daemon with the room pre-created"
+                )
+            } else if e.to_string().contains("invalid token") {
+                anyhow::anyhow!(
+                    "invalid token for DM room '{dm_id}' — you may need to join it first"
+                )
             } else {
                 e
             }

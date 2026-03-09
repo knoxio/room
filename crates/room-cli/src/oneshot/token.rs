@@ -61,6 +61,42 @@ pub fn username_from_token(room_id: &str, token: &str) -> anyhow::Result<String>
     anyhow::bail!("token not recognised — run: room join {room_id} <username> to get a fresh token")
 }
 
+/// Look up the username associated with `token` by scanning ALL token files in `/tmp`.
+///
+/// Unlike [`username_from_token`], this does not require a room_id. It scans every
+/// `room-*-*.token` file and returns the username from the first match. Used by
+/// `room dm` where the caller's room_id is unknown (the DM room_id depends on the
+/// caller's username, creating a chicken-and-egg problem).
+pub fn username_from_token_any_room(token: &str) -> anyhow::Result<String> {
+    let prefix = "room-";
+    let suffix = ".token";
+    let files: Vec<PathBuf> = std::fs::read_dir("/tmp")
+        .map_err(|e| anyhow::anyhow!("cannot read /tmp: {e}"))?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.starts_with(prefix) && n.ends_with(suffix))
+                .unwrap_or(false)
+        })
+        .collect();
+
+    for path in files {
+        if let Ok(data) = std::fs::read_to_string(&path) {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(data.trim()) {
+                if v["token"].as_str() == Some(token) {
+                    if let Some(u) = v["username"].as_str() {
+                        return Ok(u.to_owned());
+                    }
+                }
+            }
+        }
+    }
+
+    anyhow::bail!("token not recognised — run: room join <room-id> <username> to get a fresh token")
+}
+
 /// Read the cursor position from disk, returning `None` if the file is absent or empty.
 pub fn read_cursor(cursor_path: &Path) -> Option<String> {
     std::fs::read_to_string(cursor_path)
@@ -178,6 +214,96 @@ mod tests {
         assert_eq!(
             username_from_token_in(dir.path(), "r4", "tok-bob").unwrap(),
             "bob"
+        );
+    }
+
+    /// A version of username_from_token_any_room that scans a custom directory.
+    fn username_from_token_any_room_in(
+        dir: &std::path::Path,
+        token: &str,
+    ) -> anyhow::Result<String> {
+        let prefix = "room-";
+        let suffix = ".token";
+        let files: Vec<PathBuf> = fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|n| n.starts_with(prefix) && n.ends_with(suffix))
+                    .unwrap_or(false)
+            })
+            .collect();
+
+        for path in files {
+            if let Ok(data) = fs::read_to_string(&path) {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(data.trim()) {
+                    if v["token"].as_str() == Some(token) {
+                        if let Some(u) = v["username"].as_str() {
+                            return Ok(u.to_owned());
+                        }
+                    }
+                }
+            }
+        }
+        anyhow::bail!("token not recognised")
+    }
+
+    #[test]
+    fn any_room_finds_token_across_rooms() {
+        let dir = TempDir::new().unwrap();
+        write_token_file(dir.path(), "lobby", "alice", "tok-alice");
+        write_token_file(dir.path(), "dev", "alice", "tok-alice-dev");
+
+        assert_eq!(
+            username_from_token_any_room_in(dir.path(), "tok-alice").unwrap(),
+            "alice"
+        );
+        assert_eq!(
+            username_from_token_any_room_in(dir.path(), "tok-alice-dev").unwrap(),
+            "alice"
+        );
+    }
+
+    #[test]
+    fn any_room_unknown_token_errors() {
+        let dir = TempDir::new().unwrap();
+        write_token_file(dir.path(), "lobby", "alice", "tok-alice");
+        let err = username_from_token_any_room_in(dir.path(), "bogus").unwrap_err();
+        assert!(
+            err.to_string().contains("token not recognised"),
+            "expected error hint in: {err}"
+        );
+    }
+
+    #[test]
+    fn any_room_ignores_non_token_files() {
+        let dir = TempDir::new().unwrap();
+        // Write a non-token file that matches partially
+        fs::write(dir.path().join("room-lobby.sock"), "not a token").unwrap();
+        write_token_file(dir.path(), "lobby", "bob", "tok-bob");
+
+        assert_eq!(
+            username_from_token_any_room_in(dir.path(), "tok-bob").unwrap(),
+            "bob"
+        );
+    }
+
+    #[test]
+    fn any_room_same_user_different_tokens_per_room() {
+        let dir = TempDir::new().unwrap();
+        write_token_file(dir.path(), "r1", "carol", "tok-r1");
+        write_token_file(dir.path(), "r2", "carol", "tok-r2");
+
+        // Both tokens resolve to carol
+        assert_eq!(
+            username_from_token_any_room_in(dir.path(), "tok-r1").unwrap(),
+            "carol"
+        );
+        assert_eq!(
+            username_from_token_any_room_in(dir.path(), "tok-r2").unwrap(),
+            "carol"
         );
     }
 
