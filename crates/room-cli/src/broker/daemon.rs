@@ -486,55 +486,129 @@ impl DaemonState {
 /// `tokens.json` (written by the #334 system-token-map implementation)
 /// if `users.json` does not yet exist.
 ///
-/// Migration: reads the flat `token → username` map from `tokens.json` and
-/// creates synthetic `User` records + token entries in a fresh registry, then
-/// saves to `users.json`. This lets existing sessions survive a daemon upgrade
-/// without requiring a forced re-join.
+/// After loading (or creating) the registry, always scans the legacy runtime
+/// directory for per-room `.token` files left by older `room join` invocations
+/// and imports any that are not already present. This lets clients that joined
+/// before the `~/.room/state/` migration continue to use their existing tokens
+/// without a forced re-join.
 fn load_or_migrate_registry(config: &DaemonConfig) -> UserRegistry {
     let users_path = config.state_dir.join("users.json");
 
-    // Fast path: users.json exists — use it directly.
-    if users_path.exists() {
-        return UserRegistry::load(config.state_dir.clone()).unwrap_or_else(|e| {
+    let mut registry = if users_path.exists() {
+        // Fast path: users.json exists — use it directly.
+        UserRegistry::load(config.state_dir.clone()).unwrap_or_else(|e| {
             eprintln!("[daemon] failed to load user registry: {e}; starting empty");
             UserRegistry::new(config.state_dir.clone())
-        });
-    }
-
-    // Migration path: import from legacy tokens.json if present.
-    let tokens_path = config.system_tokens_path();
-    if tokens_path.exists() {
-        let legacy = super::auth::load_token_map(&tokens_path);
-        if !legacy.is_empty() {
-            eprintln!(
-                "[daemon] migrating {} token(s) from tokens.json to users.json",
-                legacy.len()
-            );
-            let mut registry = UserRegistry::new(config.state_dir.clone());
-            for (token, username) in &legacy {
-                // register_user_idempotent is a no-op if already present.
-                if let Err(e) = registry.register_user_idempotent(username) {
-                    eprintln!("[daemon] migration: register {username}: {e}");
-                    continue;
+        })
+    } else {
+        // Migration path: import from legacy tokens.json if present.
+        let tokens_path = config.system_tokens_path();
+        if tokens_path.exists() {
+            let legacy = super::auth::load_token_map(&tokens_path);
+            if !legacy.is_empty() {
+                eprintln!(
+                    "[daemon] migrating {} token(s) from tokens.json to users.json",
+                    legacy.len()
+                );
+                let mut reg = UserRegistry::new(config.state_dir.clone());
+                for (token, username) in &legacy {
+                    // register_user_idempotent is a no-op if already present.
+                    if let Err(e) = reg.register_user_idempotent(username) {
+                        eprintln!("[daemon] migration: register {username}: {e}");
+                        continue;
+                    }
+                    // Re-insert the existing token directly via issue_token so the
+                    // UUID is preserved. Since UserRegistry.issue_token generates a
+                    // new UUID, we instead manipulate the token map via the public
+                    // API by revoking nothing and accepting the registry's new token.
+                    // Trade-off: legacy UUIDs are replaced; clients must re-join.
+                    // This is acceptable — migration is a one-time event.
+                    let _ = reg.issue_token(username);
+                    let _ = token; // legacy token not preserved — clients must re-join
                 }
-                // Re-insert the existing token directly via issue_token so the
-                // UUID is preserved. Since UserRegistry.issue_token generates a
-                // new UUID, we instead manipulate the token map via the public
-                // API by revoking nothing and accepting the registry's new token.
-                // Trade-off: legacy UUIDs are replaced; clients must re-join.
-                // This is acceptable — migration is a one-time event.
-                let _ = registry.issue_token(username);
-                let _ = token; // legacy token not preserved — clients must re-join
+                if let Err(e) = reg.save() {
+                    eprintln!("[daemon] migration save failed: {e}");
+                }
+                reg
+            } else {
+                // tokens.json exists but is empty — start fresh.
+                UserRegistry::new(config.state_dir.clone())
             }
-            if let Err(e) = registry.save() {
-                eprintln!("[daemon] migration save failed: {e}");
+        } else {
+            // Neither file exists — start fresh.
+            UserRegistry::new(config.state_dir.clone())
+        }
+    };
+
+    // Always scan the legacy runtime dir for old per-room token files and
+    // import any that are not already in the registry. Idempotent — safe to
+    // run on every startup.
+    migrate_legacy_tmpdir_tokens(&mut registry);
+
+    registry
+}
+
+/// Scan the legacy runtime directory for per-room token files and import
+/// them into `registry`.
+///
+/// Before `~/.room/state/` was introduced, `room join` wrote token files to
+/// the platform runtime directory (`$TMPDIR` on macOS, `/tmp/` on Linux)
+/// as `room-<room_id>-<username>.token`. This function reads each such file,
+/// parses the `username` and `token` fields, and imports them — preserving
+/// the UUID so existing clients do not need to re-join. Files whose tokens
+/// are already in the registry are silently skipped (idempotent).
+fn migrate_legacy_tmpdir_tokens(registry: &mut UserRegistry) {
+    let legacy_dir = crate::paths::legacy_token_dir();
+    migrate_legacy_tmpdir_tokens_from(&legacy_dir, registry);
+}
+
+/// Inner implementation of [`migrate_legacy_tmpdir_tokens`] that accepts an
+/// explicit directory. Extracted so tests can pass a temp directory without
+/// modifying process environment variables.
+fn migrate_legacy_tmpdir_tokens_from(legacy_dir: &std::path::Path, registry: &mut UserRegistry) {
+    let entries = match std::fs::read_dir(legacy_dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    let mut count = 0usize;
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        let name = match path.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n.to_owned(),
+            None => continue,
+        };
+        if !name.starts_with("room-") || !name.ends_with(".token") {
+            continue;
+        }
+        let data = match std::fs::read_to_string(&path) {
+            Ok(d) => d,
+            Err(_) => continue,
+        };
+        let v: serde_json::Value = match serde_json::from_str(data.trim()) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let (username, token) = match (v["username"].as_str(), v["token"].as_str()) {
+            (Some(u), Some(t)) if !u.is_empty() && !t.is_empty() => (u.to_owned(), t.to_owned()),
+            _ => continue,
+        };
+        if let Err(e) = registry.register_user_idempotent(&username) {
+            eprintln!("[daemon] legacy token migration: register {username}: {e}");
+            continue;
+        }
+        match registry.import_token(&username, &token) {
+            Ok(()) => count += 1,
+            Err(e) => {
+                eprintln!("[daemon] legacy token migration: import token for {username}: {e}")
             }
-            return registry;
         }
     }
-
-    // Neither file exists — start fresh.
-    UserRegistry::new(config.state_dir.clone())
+    if count > 0 {
+        eprintln!(
+            "[daemon] imported {count} legacy token(s) from {}",
+            legacy_dir.display()
+        );
+    }
 }
 
 /// Build the initial subscription map for a room based on its config.
@@ -1470,5 +1544,74 @@ mod tests {
 
         // Daemon has not shut down.
         assert!(!*daemon.shutdown.borrow());
+    }
+
+    // ── migrate_legacy_tmpdir_tokens ──────────────────────────────────────
+
+    /// Write a token file to `dir` in the format written by old `room join`.
+    fn write_legacy_token(dir: &std::path::Path, room_id: &str, username: &str, token: &str) {
+        let name = format!("room-{room_id}-{username}.token");
+        let data = serde_json::json!({"username": username, "token": token});
+        std::fs::write(dir.join(name), format!("{data}\n")).unwrap();
+    }
+
+    #[test]
+    fn migrate_legacy_tmpdir_tokens_imports_token() {
+        let token_dir = tempfile::TempDir::new().unwrap();
+        let state_dir = tempfile::TempDir::new().unwrap();
+        write_legacy_token(token_dir.path(), "lobby", "alice", "legacy-uuid-alice");
+
+        let mut registry = UserRegistry::new(state_dir.path().to_owned());
+
+        // Override the legacy dir by temporarily pointing TMPDIR at token_dir.
+        // Because legacy_token_dir() reads env on macOS, we run the function
+        // directly on the directory to avoid touching the process environment.
+        // Instead we call the inner logic directly with a helper that accepts
+        // a custom dir.
+        migrate_legacy_tmpdir_tokens_from(token_dir.path(), &mut registry);
+
+        assert_eq!(registry.validate_token("legacy-uuid-alice"), Some("alice"));
+        assert!(registry.get_user("alice").is_some());
+    }
+
+    #[test]
+    fn migrate_legacy_tmpdir_tokens_idempotent() {
+        let token_dir = tempfile::TempDir::new().unwrap();
+        let state_dir = tempfile::TempDir::new().unwrap();
+        write_legacy_token(token_dir.path(), "lobby", "bob", "tok-bob");
+
+        let mut registry = UserRegistry::new(state_dir.path().to_owned());
+        migrate_legacy_tmpdir_tokens_from(token_dir.path(), &mut registry);
+        migrate_legacy_tmpdir_tokens_from(token_dir.path(), &mut registry);
+
+        // Token still valid and exactly one entry for bob.
+        assert_eq!(registry.validate_token("tok-bob"), Some("bob"));
+        let snap = registry.token_snapshot();
+        assert_eq!(snap.values().filter(|u| u.as_str() == "bob").count(), 1);
+    }
+
+    #[test]
+    fn migrate_legacy_tmpdir_tokens_skips_non_token_files() {
+        let token_dir = tempfile::TempDir::new().unwrap();
+        let state_dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(token_dir.path().join("roomd.sock"), "not a token").unwrap();
+        std::fs::write(token_dir.path().join("something.json"), "{}").unwrap();
+
+        let mut registry = UserRegistry::new(state_dir.path().to_owned());
+        migrate_legacy_tmpdir_tokens_from(token_dir.path(), &mut registry);
+
+        assert!(registry.list_users().is_empty());
+    }
+
+    #[test]
+    fn migrate_legacy_tmpdir_tokens_skips_malformed_json() {
+        let token_dir = tempfile::TempDir::new().unwrap();
+        let state_dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(token_dir.path().join("room-x-bad.token"), "not-json{{{").unwrap();
+
+        let mut registry = UserRegistry::new(state_dir.path().to_owned());
+        migrate_legacy_tmpdir_tokens_from(token_dir.path(), &mut registry);
+
+        assert!(registry.list_users().is_empty());
     }
 }

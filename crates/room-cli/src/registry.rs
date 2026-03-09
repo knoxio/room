@@ -238,6 +238,28 @@ impl UserRegistry {
     pub fn token_snapshot(&self) -> std::collections::HashMap<String, String> {
         self.data.tokens.clone()
     }
+
+    /// Insert a pre-existing token UUID for a registered user.
+    ///
+    /// Unlike [`issue_token`], which generates a fresh UUID, this method
+    /// preserves the caller-supplied `token` string. It is intended for
+    /// migration paths that read legacy token files (e.g. `/tmp/room-*-*.token`)
+    /// and want existing clients to remain valid without a forced re-join.
+    ///
+    /// Returns `Ok(())` immediately if the token is already present in the
+    /// registry (idempotent). Returns an error if `username` is not registered.
+    pub fn import_token(&mut self, username: &str, token: &str) -> Result<(), String> {
+        if !self.data.users.contains_key(username) {
+            return Err(format!("user not registered: {username}"));
+        }
+        if self.data.tokens.contains_key(token) {
+            return Ok(());
+        }
+        self.data
+            .tokens
+            .insert(token.to_owned(), username.to_owned());
+        self.save()
+    }
 }
 
 #[cfg(test)]
@@ -504,6 +526,33 @@ mod tests {
         let snap = reg.token_snapshot();
         assert_eq!(snap.get(&t1).map(String::as_str), Some("alice"));
         assert_eq!(snap.get(&t2).map(String::as_str), Some("bob"));
+    }
+
+    // ── import_token ───────────────────────────────────────────────
+
+    #[test]
+    fn import_token_preserves_uuid() {
+        let (mut reg, _dir) = tmp_registry();
+        reg.register_user("alice").unwrap();
+        reg.import_token("alice", "legacy-uuid-1234").unwrap();
+        assert_eq!(reg.validate_token("legacy-uuid-1234"), Some("alice"));
+    }
+
+    #[test]
+    fn import_token_noop_if_already_present() {
+        let (mut reg, _dir) = tmp_registry();
+        reg.register_user("alice").unwrap();
+        reg.import_token("alice", "tok-abc").unwrap();
+        // Second call must not error and must not change anything.
+        reg.import_token("alice", "tok-abc").unwrap();
+        assert_eq!(reg.validate_token("tok-abc"), Some("alice"));
+    }
+
+    #[test]
+    fn import_token_fails_for_unregistered_user() {
+        let (mut reg, _dir) = tmp_registry();
+        let err = reg.import_token("ghost", "tok-xyz").unwrap_err();
+        assert!(err.contains("not registered"));
     }
 
     #[test]

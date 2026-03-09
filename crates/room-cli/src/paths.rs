@@ -91,6 +91,17 @@ pub fn system_tokens_path() -> PathBuf {
     room_state_dir().join("tokens.json")
 }
 
+/// Directory that contained per-room token files in older daemon versions.
+///
+/// Before `~/.room/state/` was introduced, `room join` wrote token files to
+/// the platform-native runtime directory (`$TMPDIR` on macOS,
+/// `$XDG_RUNTIME_DIR/room/` or `/tmp/` on Linux). The daemon scans this
+/// directory on every startup to import any tokens that pre-date the
+/// `~/.room/state/` migration, so existing clients do not need to re-join.
+pub fn legacy_token_dir() -> PathBuf {
+    runtime_dir()
+}
+
 /// Broker subscription-map file path: `<state_dir>/<room_id>.subscriptions`.
 ///
 /// The broker persists per-user subscription tiers here on every mutation
@@ -235,6 +246,13 @@ mod tests {
             "expected 0700, got {:o}",
             perms.mode() & 0o777
         );
+    }
+
+    #[test]
+    fn legacy_token_dir_returns_valid_path() {
+        let p = legacy_token_dir();
+        // Must be absolute and non-empty.
+        assert!(p.is_absolute(), "expected absolute path, got: {p:?}");
     }
 
     #[test]
