@@ -21,6 +21,7 @@ use tokio::{
 
 mod input;
 mod render;
+mod render_bots;
 mod widgets;
 
 use crate::message::Message;
