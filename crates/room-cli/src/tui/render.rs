@@ -60,43 +60,144 @@ pub(super) fn assign_color(username: &str, color_map: &mut ColorMap) -> Color {
 const DM_ARROW: &str = "\u{2192}";
 
 /// Split a message content string into styled spans, rendering `@username`
-/// tokens in the mentioned user's colour.
+/// mentions and inline markdown (`**bold**`, `*italic*`, `` `code` ``).
+///
+/// Single-pass parser: no nested formatting. Whichever delimiter is matched
+/// first consumes its span — inner delimiters are rendered as literal text.
 pub(super) fn render_content_with_mentions(
     content: &str,
     color_map: &ColorMap,
 ) -> Vec<Span<'static>> {
     let mut spans: Vec<Span<'static>> = Vec::new();
-    let mut remaining = content;
-    while let Some(at_pos) = remaining.find('@') {
-        if at_pos > 0 {
-            spans.push(Span::raw(remaining[..at_pos].to_string()));
+    let bytes = content.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+    let mut plain_start = 0;
+
+    while i < len {
+        // `**bold**`
+        if i + 1 < len && bytes[i] == b'*' && bytes[i + 1] == b'*' {
+            if let Some(close) = find_closing_double_star(bytes, i + 2) {
+                if close > i + 2 {
+                    flush_plain(content, plain_start, i, &mut spans);
+                    spans.push(Span::styled(
+                        content[i + 2..close].to_string(),
+                        Style::default().add_modifier(Modifier::BOLD),
+                    ));
+                    i = close + 2;
+                    plain_start = i;
+                    continue;
+                }
+            }
         }
-        let after_at = &remaining[at_pos + 1..];
-        let username_end = after_at
-            .find(|c: char| !c.is_alphanumeric() && c != '_' && c != '-')
-            .unwrap_or(after_at.len());
-        if username_end == 0 {
-            // Bare '@' with no username — treat as literal text.
-            spans.push(Span::raw("@".to_string()));
-            remaining = after_at;
-        } else {
-            let username = &after_at[..username_end];
-            spans.push(Span::styled(
-                format!("@{username}"),
-                Style::default()
-                    .fg(user_color(username, color_map))
-                    .add_modifier(Modifier::BOLD),
-            ));
-            remaining = &after_at[username_end..];
+
+        // `*italic*` — only when not part of `**`
+        if bytes[i] == b'*' && !(i + 1 < len && bytes[i + 1] == b'*') {
+            if let Some(close) = find_closing_single_star(bytes, i + 1) {
+                if close > i + 1 {
+                    flush_plain(content, plain_start, i, &mut spans);
+                    spans.push(Span::styled(
+                        content[i + 1..close].to_string(),
+                        Style::default().add_modifier(Modifier::ITALIC),
+                    ));
+                    i = close + 1;
+                    plain_start = i;
+                    continue;
+                }
+            }
         }
+
+        // `` `code` ``
+        if bytes[i] == b'`' {
+            if let Some(close) = find_closing_backtick(bytes, i + 1) {
+                if close > i + 1 {
+                    flush_plain(content, plain_start, i, &mut spans);
+                    spans.push(Span::styled(
+                        content[i + 1..close].to_string(),
+                        Style::default().fg(Color::Yellow),
+                    ));
+                    i = close + 1;
+                    plain_start = i;
+                    continue;
+                }
+            }
+        }
+
+        // `@mention`
+        if bytes[i] == b'@' {
+            let after_at = &content[i + 1..];
+            let username_end = after_at
+                .find(|c: char| !c.is_alphanumeric() && c != '_' && c != '-')
+                .unwrap_or(after_at.len());
+            if username_end > 0 {
+                flush_plain(content, plain_start, i, &mut spans);
+                let username = &after_at[..username_end];
+                spans.push(Span::styled(
+                    format!("@{username}"),
+                    Style::default()
+                        .fg(user_color(username, color_map))
+                        .add_modifier(Modifier::BOLD),
+                ));
+                i += 1 + username_end;
+                plain_start = i;
+                continue;
+            }
+        }
+
+        i += 1;
     }
-    if !remaining.is_empty() {
-        spans.push(Span::raw(remaining.to_string()));
-    }
+
+    flush_plain(content, plain_start, len, &mut spans);
     if spans.is_empty() {
         spans.push(Span::raw(String::new()));
     }
     spans
+}
+
+/// Flush accumulated plain text from `content[start..end]` into `spans`.
+fn flush_plain(content: &str, start: usize, end: usize, spans: &mut Vec<Span<'static>>) {
+    if start < end {
+        spans.push(Span::raw(content[start..end].to_string()));
+    }
+}
+
+/// Find the byte position of the closing `**` starting from `start`.
+fn find_closing_double_star(bytes: &[u8], start: usize) -> Option<usize> {
+    let len = bytes.len();
+    let mut j = start;
+    while j + 1 < len {
+        if bytes[j] == b'*' && bytes[j + 1] == b'*' {
+            return Some(j);
+        }
+        j += 1;
+    }
+    None
+}
+
+/// Find the byte position of a closing single `*`, skipping any `**` sequences.
+fn find_closing_single_star(bytes: &[u8], start: usize) -> Option<usize> {
+    let len = bytes.len();
+    let mut j = start;
+    while j < len {
+        if bytes[j] == b'*' {
+            if j + 1 >= len || bytes[j + 1] != b'*' {
+                return Some(j);
+            }
+            // Skip `**`
+            j += 2;
+            continue;
+        }
+        j += 1;
+    }
+    None
+}
+
+/// Find the byte position of the closing backtick starting from `start`.
+fn find_closing_backtick(bytes: &[u8], start: usize) -> Option<usize> {
+    bytes[start..]
+        .iter()
+        .position(|&b| b == b'`')
+        .map(|p| start + p)
 }
 
 /// Word-wrap `text` so that no line exceeds `width` characters.
@@ -500,6 +601,98 @@ mod tests {
         let cm = ColorMap::new();
         let spans = render_content_with_mentions("", &cm);
         assert!(!spans.is_empty());
+    }
+
+    // ── render_content_with_mentions: markdown formatting ───────────────────
+
+    #[test]
+    fn render_bold_text() {
+        let cm = ColorMap::new();
+        let spans = render_content_with_mentions("hello **world**!", &cm);
+        assert_eq!(spans.len(), 3);
+        assert_eq!(spans[0].content, "hello ");
+        assert_eq!(spans[1].content, "world");
+        assert!(spans[1].style.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(spans[2].content, "!");
+    }
+
+    #[test]
+    fn render_italic_text() {
+        let cm = ColorMap::new();
+        let spans = render_content_with_mentions("hello *world*!", &cm);
+        assert_eq!(spans.len(), 3);
+        assert_eq!(spans[0].content, "hello ");
+        assert_eq!(spans[1].content, "world");
+        assert!(spans[1].style.add_modifier.contains(Modifier::ITALIC));
+        assert_eq!(spans[2].content, "!");
+    }
+
+    #[test]
+    fn render_code_text() {
+        let cm = ColorMap::new();
+        let spans = render_content_with_mentions("run `cargo test` now", &cm);
+        assert_eq!(spans.len(), 3);
+        assert_eq!(spans[0].content, "run ");
+        assert_eq!(spans[1].content, "cargo test");
+        assert_eq!(spans[1].style.fg, Some(Color::Yellow));
+        assert_eq!(spans[2].content, " now");
+    }
+
+    #[test]
+    fn render_bold_and_mention_together() {
+        let cm = ColorMap::new();
+        let spans = render_content_with_mentions("**important** @alice check this", &cm);
+        assert_eq!(spans.len(), 4);
+        assert_eq!(spans[0].content, "important");
+        assert!(spans[0].style.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(spans[1].content, " ");
+        assert_eq!(spans[2].content, "@alice");
+        assert_eq!(spans[3].content, " check this");
+    }
+
+    #[test]
+    fn render_unclosed_bold_is_literal() {
+        let cm = ColorMap::new();
+        let spans = render_content_with_mentions("hello **world", &cm);
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].content, "hello **world");
+    }
+
+    #[test]
+    fn render_unclosed_backtick_is_literal() {
+        let cm = ColorMap::new();
+        let spans = render_content_with_mentions("hello `world", &cm);
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].content, "hello `world");
+    }
+
+    #[test]
+    fn render_empty_delimiters_are_literal() {
+        let cm = ColorMap::new();
+        // Empty bold: `****` — no content between delimiters
+        let spans = render_content_with_mentions("a**b", &cm);
+        let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text, "a**b");
+
+        // Empty backticks: `` `` ``
+        let spans = render_content_with_mentions("a``b", &cm);
+        let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text, "a``b");
+    }
+
+    #[test]
+    fn render_multiple_formatted_spans() {
+        let cm = ColorMap::new();
+        let spans = render_content_with_mentions("**bold** and `code` and *italic*", &cm);
+        assert_eq!(spans.len(), 5);
+        assert_eq!(spans[0].content, "bold");
+        assert!(spans[0].style.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(spans[1].content, " and ");
+        assert_eq!(spans[2].content, "code");
+        assert_eq!(spans[2].style.fg, Some(Color::Yellow));
+        assert_eq!(spans[3].content, " and ");
+        assert_eq!(spans[4].content, "italic");
+        assert!(spans[4].style.add_modifier.contains(Modifier::ITALIC));
     }
 
     // ── assign_color ─────────────────────────────────────────────────────────
