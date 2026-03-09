@@ -5,7 +5,7 @@ use tokio::{
     net::UnixStream,
 };
 
-use crate::{message::Message, tui};
+use crate::{message::Message, oneshot::transport::join_session, paths, tui};
 
 pub struct Client {
     pub socket_path: PathBuf,
@@ -17,6 +17,10 @@ pub struct Client {
 
 impl Client {
     pub async fn run(self) -> anyhow::Result<()> {
+        // Ensure a token exists for this room/user so that subsequent oneshot
+        // commands (send, poll, watch) work without a manual `room join`.
+        self.ensure_token().await;
+
         let stream = UnixStream::connect(&self.socket_path).await?;
         let (read_half, mut write_half) = stream.into_split();
 
@@ -39,6 +43,109 @@ impl Client {
             )
             .await
         }
+    }
+
+    /// Ensure a session token file exists for this room/user pair.
+    ///
+    /// If a valid token file already exists at `~/.room/state/room-<room>-<user>.token`,
+    /// this is a no-op. Otherwise, performs a `JOIN:` handshake to acquire a new token
+    /// and writes it to disk. Errors are logged but not propagated — the interactive
+    /// session can proceed even if token acquisition fails (oneshot commands just
+    /// won't work until the user runs `room join` manually).
+    async fn ensure_token(&self) {
+        let token_path = paths::token_path(&self.room_id, &self.username);
+        if has_valid_token_file(&token_path) {
+            return;
+        }
+
+        if let Err(e) = paths::ensure_room_dirs() {
+            eprintln!("[tui] cannot create ~/.room dirs: {e}");
+            return;
+        }
+
+        match join_session(&self.socket_path, &self.username).await {
+            Ok((returned_user, token)) => {
+                let token_data = serde_json::json!({"username": returned_user, "token": token});
+                let path = paths::token_path(&self.room_id, &returned_user);
+                if let Err(e) = std::fs::write(&path, format!("{token_data}\n")) {
+                    eprintln!("[tui] failed to write token file: {e}");
+                }
+            }
+            Err(e) => {
+                eprintln!("[tui] auto-join failed: {e} (run `room join` manually)");
+            }
+        }
+    }
+}
+
+/// Check whether a token file exists and contains valid JSON with a `token` field.
+fn has_valid_token_file(path: &std::path::Path) -> bool {
+    if !path.exists() {
+        return false;
+    }
+    let Ok(data) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(data.trim()) else {
+        return false;
+    };
+    v["token"].as_str().is_some()
+}
+
+/// Resolve the default username from the `$USER` environment variable.
+///
+/// Returns `None` when `$USER` is not set or is empty.
+pub fn default_username() -> Option<String> {
+    std::env::var("USER").ok().filter(|s| !s.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn has_valid_token_file_returns_false_for_missing_file() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("nonexistent.token");
+        assert!(!has_valid_token_file(&path));
+    }
+
+    #[test]
+    fn has_valid_token_file_returns_true_for_valid_file() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.token");
+        let data = serde_json::json!({"username": "alice", "token": "tok-123"});
+        std::fs::write(&path, format!("{data}\n")).unwrap();
+        assert!(has_valid_token_file(&path));
+    }
+
+    #[test]
+    fn has_valid_token_file_returns_false_for_corrupt_json() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("corrupt.token");
+        std::fs::write(&path, "not valid json").unwrap();
+        assert!(!has_valid_token_file(&path));
+    }
+
+    #[test]
+    fn has_valid_token_file_returns_false_for_missing_token_field() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("no-token.token");
+        let data = serde_json::json!({"username": "alice"});
+        std::fs::write(&path, format!("{data}\n")).unwrap();
+        assert!(!has_valid_token_file(&path));
+    }
+
+    #[test]
+    fn default_username_returns_user_env_var() {
+        // $USER should be set on macOS/Linux test environments.
+        let result = default_username();
+        assert!(
+            result.is_some(),
+            "$USER should be set in the test environment"
+        );
+        assert!(!result.unwrap().is_empty(), "$USER should not be empty");
     }
 }
 

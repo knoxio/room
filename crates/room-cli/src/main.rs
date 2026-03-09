@@ -242,7 +242,7 @@ struct Args {
     /// Room identifier (required when no subcommand is given)
     room_id: Option<String>,
 
-    /// Your username (required when no subcommand is given)
+    /// Your username (defaults to $USER when no subcommand is given)
     username: Option<String>,
 
     /// Number of history messages to replay on join
@@ -514,10 +514,13 @@ async fn main() -> anyhow::Result<()> {
                 eprintln!("error: room_id is required when no subcommand is given");
                 std::process::exit(1);
             });
-            let username = args.username.unwrap_or_else(|| {
-                eprintln!("error: username is required when no subcommand is given");
-                std::process::exit(1);
-            });
+            let username = args
+                .username
+                .or_else(room_cli::client::default_username)
+                .unwrap_or_else(|| {
+                    eprintln!("error: username is required — set $USER or pass it as an argument");
+                    std::process::exit(1);
+                });
             run_join(
                 room_id,
                 username,
