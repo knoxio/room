@@ -226,8 +226,14 @@ enum Cmd {
         rooms: Vec<String>,
         /// Seconds to wait after the last connection closes before shutting down.
         /// Set to 0 for immediate shutdown. Default: 30.
+        /// Ignored when --persistent is set.
         #[arg(long, default_value_t = 30)]
         grace_period: u64,
+        /// Keep the daemon running indefinitely after the last connection closes.
+        /// Equivalent to --grace-period with the maximum possible value.
+        /// Mutually exclusive with --grace-period.
+        #[arg(long, conflicts_with = "grace_period")]
+        persistent: bool,
     },
 }
 
@@ -520,14 +526,16 @@ async fn main() -> anyhow::Result<()> {
             ws_port,
             rooms,
             grace_period,
+            persistent,
         }) => {
+            let effective_grace = if persistent { u64::MAX } else { grace_period };
             run_daemon(
                 socket.unwrap_or_else(paths::room_socket_path),
                 data_dir.unwrap_or_else(paths::room_data_dir),
                 state_dir.unwrap_or_else(paths::room_state_dir),
                 ws_port,
                 rooms,
-                grace_period,
+                effective_grace,
             )
             .await?;
         }

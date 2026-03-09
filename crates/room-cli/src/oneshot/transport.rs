@@ -360,8 +360,17 @@ mod tests {
         bin
     }
 
+    /// Global lock that serialises subprocess-spawning tests so they don't
+    /// compete with each other (and with integration tests) for OS process
+    /// start-up resources when the full suite runs in parallel.
+    fn subprocess_lock() -> &'static std::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(std::sync::Mutex::default)
+    }
+
     #[tokio::test]
     async fn ensure_daemon_noop_when_socket_connectable() {
+        let _guard = subprocess_lock().lock().unwrap();
         // Start a real daemon at a temp socket, verify ensure_daemon_running_at
         // returns Ok without spawning a second process.
         let dir = tempfile::TempDir::new().unwrap();
@@ -397,6 +406,7 @@ mod tests {
 
     #[tokio::test]
     async fn ensure_daemon_starts_daemon_and_writes_pid() {
+        let _guard = subprocess_lock().lock().unwrap();
         let dir = tempfile::TempDir::new().unwrap();
         let socket = dir.path().join("autostart.sock");
         let exe = room_bin();
