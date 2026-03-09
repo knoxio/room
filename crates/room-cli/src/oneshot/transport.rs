@@ -68,13 +68,32 @@ pub fn resolve_socket_target(room_id: &str, explicit: Option<&Path>) -> SocketTa
         };
     }
 
-    // Auto-discovery: prefer daemon if it is running.
-    if daemon.exists() {
+    // Auto-discovery: prefer the per-room socket when it exists.
+    //
+    // A standalone broker creates a socket at `room_single_socket_path(room_id)`.
+    // A daemon-managed room never creates an independent per-room socket — all
+    // connections go through `roomd.sock`. Therefore, if the per-room socket
+    // exists, the broker is standalone and must be addressed directly; if it does
+    // not exist, fall back to the daemon socket so daemon-managed rooms still
+    // work.
+    //
+    // The previous order (daemon first) caused a regression when a daemon and a
+    // standalone broker coexist: `room send` connected to the daemon, which
+    // returned `room_not_found` because the standalone room was not registered
+    // in its registry.
+    if per_room.exists() {
+        SocketTarget {
+            path: per_room,
+            daemon_room: None,
+        }
+    } else if daemon.exists() {
         SocketTarget {
             path: daemon,
             daemon_room: Some(room_id.to_owned()),
         }
     } else {
+        // Neither socket exists — default to per-room; caller gets a descriptive
+        // "no such file" connection error rather than a silent fallback.
         SocketTarget {
             path: per_room,
             daemon_room: None,
@@ -518,15 +537,83 @@ mod tests {
 
     #[test]
     fn resolve_auto_no_daemon_falls_back_to_per_room() {
-        // When no daemon socket exists (we check the real daemon path, which
-        // is unlikely to exist during CI), auto-discovery should fall back.
-        // We can only test this if the daemon socket is NOT running.
+        // When neither daemon nor per-room socket exist, auto-discovery returns
+        // the per-room socket path (caller gets a clear connection error).
+        // This test is meaningful on CI where no room daemons are running.
+        let per_room_path = crate::paths::room_single_socket_path("myroom-nonexistent-test");
         let daemon_path = crate::paths::room_socket_path();
-        if !daemon_path.exists() {
-            let target = resolve_socket_target("myroom", None);
-            assert_eq!(target.path, crate::paths::room_single_socket_path("myroom"));
+        if !per_room_path.exists() && !daemon_path.exists() {
+            let target = resolve_socket_target("myroom-nonexistent-test", None);
+            assert_eq!(target.path, per_room_path);
             assert!(target.daemon_room.is_none());
         }
-        // If daemon IS running, skip (we can't test both branches in one call).
+    }
+
+    #[test]
+    fn resolve_auto_prefers_per_room_over_daemon() {
+        // When both daemon and per-room sockets exist, the per-room socket takes
+        // priority. This is the regression test for the bug where a coexisting
+        // daemon intercepted connects intended for a standalone broker.
+        //
+        // We create the per-room socket at its canonical runtime path, then set
+        // ROOM_SOCKET to point at a fake daemon socket in the same dir.
+        let per_room_path = crate::paths::room_single_socket_path("myroom-regression-test");
+
+        // Create the per-room socket file so .exists() returns true.
+        if let Some(parent) = per_room_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        std::fs::write(&per_room_path, "").unwrap();
+
+        // Create a fake daemon socket and override ROOM_SOCKET.
+        let dir = tempfile::TempDir::new().unwrap();
+        let daemon_sock = dir.path().join("roomd.sock");
+        std::fs::write(&daemon_sock, "").unwrap();
+
+        let key = "ROOM_SOCKET";
+        let prev = std::env::var(key).ok();
+        std::env::set_var(key, daemon_sock.to_str().unwrap());
+
+        let target = resolve_socket_target("myroom-regression-test", None);
+
+        match prev {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+        // Clean up the socket file.
+        let _ = std::fs::remove_file(&per_room_path);
+
+        // Per-room socket must win — no ROOM: daemon routing prefix.
+        assert_eq!(target.path, per_room_path);
+        assert!(
+            target.daemon_room.is_none(),
+            "per-room socket must not trigger ROOM: prefix when it exists alongside a daemon"
+        );
+    }
+
+    #[test]
+    fn resolve_auto_uses_daemon_when_no_per_room_socket() {
+        // When the per-room socket does not exist but the daemon does, use daemon.
+        let dir = tempfile::TempDir::new().unwrap();
+        let daemon_sock = dir.path().join("roomd.sock");
+        std::fs::write(&daemon_sock, "").unwrap();
+
+        // Set ROOM_SOCKET to the temp daemon so effective_socket_path picks it up.
+        let key = "ROOM_SOCKET";
+        let prev = std::env::var(key).ok();
+        std::env::set_var(key, daemon_sock.to_str().unwrap());
+
+        // Use a room id that will never have a matching socket in the temp dir,
+        // so per_room.exists() is false.
+        let target = resolve_socket_target("no-such-room-xyz", None);
+
+        match prev {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+
+        // Should have fallen back to the daemon socket.
+        assert_eq!(target.path, daemon_sock);
+        assert_eq!(target.daemon_room.as_deref(), Some("no-such-room-xyz"));
     }
 }
