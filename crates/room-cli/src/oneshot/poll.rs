@@ -1,8 +1,43 @@
 use std::path::{Path, PathBuf};
 
-use crate::{history, message::Message, paths, query::QueryFilter};
+use room_protocol::SubscriptionTier;
+
+use crate::{
+    broker::commands::load_subscription_map, history, message::Message, paths, query::QueryFilter,
+};
 
 use super::token::{read_cursor, username_from_token, write_cursor};
+
+// ── Subscription tier lookup ──────────────────────────────────────────────────
+
+/// Look up a user's subscription tier for a room from the persisted
+/// subscription map on disk.
+///
+/// Returns `Full` when the subscription file is missing, corrupt, or the user
+/// has no entry — unsubscribed users must have been explicitly recorded.
+fn load_user_tier(room_id: &str, username: &str) -> SubscriptionTier {
+    let state_dir = paths::room_state_dir();
+    let sub_path = paths::broker_subscriptions_path(&state_dir, room_id);
+    let map = load_subscription_map(&sub_path);
+    map.get(username).copied().unwrap_or(SubscriptionTier::Full)
+}
+
+/// Apply subscription-tier filtering to a message list in place.
+///
+/// - `Full` — no filtering (all messages pass).
+/// - `MentionsOnly` — keep only messages that @mention `username`.
+/// - `Unsubscribed` — remove all messages.
+fn apply_tier_filter(messages: &mut Vec<Message>, tier: SubscriptionTier, username: &str) {
+    match tier {
+        SubscriptionTier::Full => {}
+        SubscriptionTier::MentionsOnly => {
+            messages.retain(|m| m.mentions().iter().any(|mention| mention == username));
+        }
+        SubscriptionTier::Unsubscribed => {
+            messages.clear();
+        }
+    }
+}
 
 // ── Query engine types ─────────────────────────────────────────────────────────
 
@@ -105,7 +140,9 @@ pub async fn cmd_pull(room_id: &str, token: &str, n: usize) -> anyhow::Result<()
     let meta_path = paths::room_meta_path(room_id);
     let chat_path = chat_path_from_meta(room_id, &meta_path);
 
-    let messages = pull_messages(&chat_path, n, Some(&username)).await?;
+    let mut messages = pull_messages(&chat_path, n, Some(&username)).await?;
+    let tier = load_user_tier(room_id, &username);
+    apply_tier_filter(&mut messages, tier, &username);
     for msg in &messages {
         println!("{}", serde_json::to_string(msg)?);
     }
@@ -252,6 +289,20 @@ pub async fn cmd_query(
     }
 
     let username = resolve_username_from_rooms(room_ids, token)?;
+
+    // Apply subscription-tier filtering unless -p/--public bypasses it.
+    if !filter.public_only {
+        let tier = load_user_tier(&room_ids[0], &username);
+        match tier {
+            SubscriptionTier::Unsubscribed => return Ok(()),
+            SubscriptionTier::MentionsOnly => {
+                if filter.mention_user.is_none() {
+                    filter.mention_user = Some(username.clone());
+                }
+            }
+            SubscriptionTier::Full => {}
+        }
+    }
 
     // Resolve mention_user from caller if mentions_only is requested.
     if opts.mentions_only {
@@ -1080,6 +1131,205 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("token not recognised"));
+    }
+
+    // ── subscription tier filtering tests ──────────────────────────────────
+
+    /// load_user_tier returns Full when no subscription file exists.
+    #[test]
+    fn load_user_tier_missing_file_returns_full() {
+        // Use a room ID that will never have a subscription file on disk.
+        let tier = load_user_tier("nonexistent-room-tier-test", "alice");
+        assert_eq!(tier, SubscriptionTier::Full);
+    }
+
+    /// load_user_tier returns the persisted tier when the file exists.
+    #[test]
+    fn load_user_tier_returns_persisted_tier() {
+        let state_dir = crate::paths::room_state_dir();
+        let _ = std::fs::create_dir_all(&state_dir);
+        let room_id = format!("test-tier-load-{}", std::process::id());
+        let sub_path = crate::paths::broker_subscriptions_path(&state_dir, &room_id);
+
+        let mut map = std::collections::HashMap::new();
+        map.insert("alice".to_string(), SubscriptionTier::MentionsOnly);
+        map.insert("bob".to_string(), SubscriptionTier::Unsubscribed);
+        let json = serde_json::to_string_pretty(&map).unwrap();
+        std::fs::write(&sub_path, json).unwrap();
+
+        assert_eq!(
+            load_user_tier(&room_id, "alice"),
+            SubscriptionTier::MentionsOnly
+        );
+        assert_eq!(
+            load_user_tier(&room_id, "bob"),
+            SubscriptionTier::Unsubscribed
+        );
+        // Unknown user defaults to Full.
+        assert_eq!(load_user_tier(&room_id, "carol"), SubscriptionTier::Full);
+
+        let _ = std::fs::remove_file(&sub_path);
+    }
+
+    /// apply_tier_filter with Full keeps all messages.
+    #[test]
+    fn apply_tier_filter_full_keeps_all() {
+        let mut msgs = vec![
+            make_message("r", "alice", "hello"),
+            make_message("r", "bob", "world"),
+        ];
+        apply_tier_filter(&mut msgs, SubscriptionTier::Full, "carol");
+        assert_eq!(msgs.len(), 2);
+    }
+
+    /// apply_tier_filter with MentionsOnly keeps only @mentions.
+    #[test]
+    fn apply_tier_filter_mentions_only_filters() {
+        let mut msgs = vec![
+            make_message("r", "alice", "hey @carol check this"),
+            make_message("r", "bob", "unrelated message"),
+            make_message("r", "dave", "also @carol"),
+        ];
+        apply_tier_filter(&mut msgs, SubscriptionTier::MentionsOnly, "carol");
+        assert_eq!(msgs.len(), 2);
+        assert!(msgs[0].content().unwrap().contains("@carol"));
+        assert!(msgs[1].content().unwrap().contains("@carol"));
+    }
+
+    /// apply_tier_filter with Unsubscribed clears all messages.
+    #[test]
+    fn apply_tier_filter_unsubscribed_clears_all() {
+        let mut msgs = vec![
+            make_message("r", "alice", "hey @carol"),
+            make_message("r", "bob", "world"),
+        ];
+        apply_tier_filter(&mut msgs, SubscriptionTier::Unsubscribed, "carol");
+        assert!(msgs.is_empty());
+    }
+
+    /// apply_tier_filter with MentionsOnly and no mentions returns empty.
+    #[test]
+    fn apply_tier_filter_mentions_only_no_mentions_returns_empty() {
+        let mut msgs = vec![
+            make_message("r", "alice", "hello"),
+            make_message("r", "bob", "world"),
+        ];
+        apply_tier_filter(&mut msgs, SubscriptionTier::MentionsOnly, "carol");
+        assert!(msgs.is_empty());
+    }
+
+    /// cmd_query with Unsubscribed tier and public_only=true still returns messages.
+    #[tokio::test]
+    async fn cmd_query_public_bypasses_tier() {
+        let chat = NamedTempFile::new().unwrap();
+        let token_dir = TempDir::new().unwrap();
+        let cursor_dir = TempDir::new().unwrap();
+
+        let room_id = format!("test-pub-tier-{}", std::process::id());
+        write_token_file(&token_dir, &room_id, "alice", "tok-pub-tier");
+        write_meta_file(&room_id, chat.path());
+
+        // Write subscription map marking alice as Unsubscribed.
+        let state_dir = crate::paths::room_state_dir();
+        let _ = std::fs::create_dir_all(&state_dir);
+        let sub_path = crate::paths::broker_subscriptions_path(&state_dir, &room_id);
+        let mut map = std::collections::HashMap::new();
+        map.insert("alice".to_string(), SubscriptionTier::Unsubscribed);
+        std::fs::write(&sub_path, serde_json::to_string(&map).unwrap()).unwrap();
+
+        // Add a message.
+        crate::history::append(chat.path(), &make_message(&room_id, "bob", "visible"))
+            .await
+            .unwrap();
+
+        // Query with public_only=true should bypass tier and return the message.
+        let filter = QueryFilter {
+            rooms: vec![room_id.clone()],
+            public_only: true,
+            ascending: true,
+            ..Default::default()
+        };
+        let opts = QueryOptions {
+            new_only: false,
+            wait: false,
+            interval_secs: 5,
+            mentions_only: false,
+            since_uuid: None,
+        };
+
+        let result = oneshot_cmd_query_to_vec(
+            &[room_id.clone()],
+            "tok-pub-tier",
+            filter,
+            opts,
+            &cursor_dir,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            result.len(),
+            1,
+            "public flag should bypass Unsubscribed tier"
+        );
+
+        let _ = std::fs::remove_file(&sub_path);
+        let _ = std::fs::remove_file(crate::paths::room_meta_path(&room_id));
+        let _ = std::fs::remove_file(&token_path(&room_id, "alice"));
+    }
+
+    /// MentionsOnly tier sets mention_user filter, narrowing results to @mentions.
+    #[test]
+    fn mentions_only_tier_sets_mention_user_on_filter() {
+        // Verify the tier logic: when tier is MentionsOnly and mention_user is
+        // not already set, it should be set to the username.
+        let mut filter = QueryFilter::default();
+        let tier = SubscriptionTier::MentionsOnly;
+
+        // Simulate what cmd_query does.
+        match tier {
+            SubscriptionTier::MentionsOnly => {
+                if filter.mention_user.is_none() {
+                    filter.mention_user = Some("alice".to_string());
+                }
+            }
+            _ => {}
+        }
+
+        assert_eq!(filter.mention_user, Some("alice".to_string()));
+
+        // Now verify with apply_tier_filter that messages are correctly narrowed.
+        let mut msgs = vec![
+            make_message("r", "bob", "hey @alice look"),
+            make_message("r", "bob", "unrelated chatter"),
+        ];
+        apply_tier_filter(&mut msgs, SubscriptionTier::MentionsOnly, "alice");
+        assert_eq!(msgs.len(), 1);
+        assert!(msgs[0].content().unwrap().contains("@alice"));
+    }
+
+    /// MentionsOnly tier does not override an existing mention_user filter.
+    #[test]
+    fn mentions_only_tier_preserves_existing_mention_user() {
+        let mut filter = QueryFilter {
+            mention_user: Some("bob".to_string()),
+            ..Default::default()
+        };
+
+        // MentionsOnly should not overwrite the existing filter.
+        match SubscriptionTier::MentionsOnly {
+            SubscriptionTier::MentionsOnly => {
+                if filter.mention_user.is_none() {
+                    filter.mention_user = Some("alice".to_string());
+                }
+            }
+            _ => {}
+        }
+
+        assert_eq!(
+            filter.mention_user,
+            Some("bob".to_string()),
+            "existing mention_user filter should be preserved"
+        );
     }
 
     /// pull_messages returns the last n entries without moving the cursor.
