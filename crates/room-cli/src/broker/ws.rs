@@ -23,7 +23,7 @@ use crate::{
 };
 
 use super::{
-    auth::{check_join_permission, issue_token, validate_token},
+    auth::{check_join_permission, check_send_permission, issue_token, validate_token},
     commands::{route_command, CommandResult},
     fanout::{broadcast_and_persist, dm_and_persist},
     state::RoomState,
@@ -258,6 +258,22 @@ async fn run_ws_session(
                             }
                             Ok(CommandResult::Shutdown) => break,
                             Ok(CommandResult::Passthrough(msg)) => {
+                                // DM privacy: reject sends from non-participants.
+                                if let Err(reason) =
+                                    check_send_permission(&username_in, state_in.config.as_ref())
+                                {
+                                    let err = serde_json::json!({
+                                        "type": "error",
+                                        "code": "send_denied",
+                                        "message": reason
+                                    });
+                                    let _ = ws_tx_in
+                                        .lock()
+                                        .await
+                                        .send(WsMessage::Text(err.to_string().into()))
+                                        .await;
+                                    continue;
+                                }
                                 let result = match &msg {
                                     Message::DirectMessage { to, .. } => {
                                         dm_and_persist(
@@ -377,6 +393,16 @@ async fn ws_oneshot_send(
             let _ = ws_tx.send(WsMessage::Text(json.into())).await;
         }
         CommandResult::Passthrough(msg) => {
+            // DM privacy: reject sends from non-participants.
+            if let Err(reason) = check_send_permission(&username, state.config.as_ref()) {
+                let err = serde_json::json!({
+                    "type": "error",
+                    "code": "send_denied",
+                    "message": reason
+                });
+                let _ = ws_tx.send(WsMessage::Text(err.to_string().into())).await;
+                return Ok(());
+            }
             let seq_msg = match &msg {
                 Message::DirectMessage { to, .. } => {
                     dm_and_persist(
@@ -526,6 +552,16 @@ async fn api_send(
             (StatusCode::OK, Json(serde_json::json!({"type":"shutdown"}))).into_response()
         }
         Ok(CommandResult::Passthrough(msg)) => {
+            // DM privacy: reject sends from non-participants.
+            if let Err(reason) = check_send_permission(&username, rs.config.as_ref()) {
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(
+                        serde_json::json!({"type":"error","code":"send_denied","message": reason}),
+                    ),
+                )
+                    .into_response();
+            }
             let result = match &msg {
                 Message::DirectMessage { to, .. } => {
                     dm_and_persist(
@@ -796,6 +832,16 @@ async fn daemon_api_send(
             (StatusCode::OK, Json(serde_json::json!({"type":"shutdown"}))).into_response()
         }
         Ok(CommandResult::Passthrough(msg)) => {
+            // DM privacy: reject sends from non-participants.
+            if let Err(reason) = check_send_permission(&username, room.config.as_ref()) {
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(
+                        serde_json::json!({"type":"error","code":"send_denied","message": reason}),
+                    ),
+                )
+                    .into_response();
+            }
             let result = match &msg {
                 Message::DirectMessage { to, .. } => {
                     dm_and_persist(

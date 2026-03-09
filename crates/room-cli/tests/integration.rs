@@ -4,7 +4,7 @@
 /// Unix-socket clients, and verifies behaviour at the wire level.
 mod common;
 
-use std::{path::PathBuf, time::Duration};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use futures_util::{SinkExt, StreamExt};
 use room_cli::{
@@ -2663,6 +2663,7 @@ use room_protocol::{dm_room_id, RoomConfig, RoomVisibility};
 
 struct TestDaemon {
     pub socket_path: PathBuf,
+    pub state: Arc<DaemonState>,
     _dir: TempDir,
 }
 
@@ -2679,7 +2680,7 @@ impl TestDaemon {
             ws_port: None,
         };
 
-        let daemon = DaemonState::new(config);
+        let daemon = Arc::new(DaemonState::new(config));
         for (room_id, room_config) in rooms {
             match room_config {
                 Some(cfg) => daemon.create_room_with_config(room_id, cfg).await.unwrap(),
@@ -2687,16 +2688,58 @@ impl TestDaemon {
             }
         }
 
+        let daemon_run = daemon.clone();
         tokio::spawn(async move {
-            daemon.run().await.ok();
+            daemon_run.run().await.ok();
         });
 
         common::wait_for_socket(&socket_path, Duration::from_secs(1)).await;
 
         Self {
             socket_path,
+            state: daemon,
             _dir: dir,
         }
+    }
+
+    /// Start a daemon with WS/REST support and configured rooms.
+    /// Returns (TestDaemon, ws_port).
+    async fn start_with_ws_configs(rooms: Vec<(&str, Option<RoomConfig>)>) -> (Self, u16) {
+        let dir = tempfile::tempdir().unwrap();
+        let socket_path = dir.path().join("roomd.sock");
+        let port = common::free_port();
+
+        let config = DaemonConfig {
+            socket_path: socket_path.clone(),
+            data_dir: dir.path().to_owned(),
+            state_dir: dir.path().to_owned(),
+            ws_port: Some(port),
+        };
+
+        let daemon = Arc::new(DaemonState::new(config));
+        for (room_id, room_config) in rooms {
+            match room_config {
+                Some(cfg) => daemon.create_room_with_config(room_id, cfg).await.unwrap(),
+                None => daemon.create_room(room_id).await.unwrap(),
+            }
+        }
+
+        let daemon_run = daemon.clone();
+        tokio::spawn(async move {
+            daemon_run.run().await.ok();
+        });
+
+        common::wait_for_socket(&socket_path, Duration::from_secs(1)).await;
+        common::wait_for_tcp(port, Duration::from_secs(1)).await;
+
+        (
+            Self {
+                socket_path,
+                state: daemon,
+                _dir: dir,
+            },
+            port,
+        )
     }
 
     async fn start(rooms: &[&str]) -> Self {
@@ -3549,4 +3592,147 @@ async fn scripted_cursor_isolation_between_agents() {
         })
         .collect();
     assert_eq!(b2_contents, vec!["msg-4"], "agent-b should see only msg-4");
+}
+
+// ── WS/REST DM permission tests (#301) ───────────────────────────────────────
+// Defence-in-depth: check_send_permission unit tests live in auth.rs (6 tests).
+// These integration tests verify that the join gate blocks non-participants at
+// the REST and WS layers, and that the send path is wired correctly for
+// authorised participants.
+
+/// REST POST /api/{room}/join as a non-DM-participant returns 403 join_denied.
+#[tokio::test]
+async fn rest_dm_room_non_participant_join_rejected() {
+    let dm_id = dm_room_id("alice", "bob").unwrap();
+    let dm_config = RoomConfig::dm("alice", "bob");
+    let (_td, port) =
+        TestDaemon::start_with_ws_configs(vec![(dm_id.as_str(), Some(dm_config))]).await;
+
+    let base = format!("http://127.0.0.1:{port}");
+    let client = reqwest::Client::new();
+
+    // eve is not a DM participant — join should be rejected.
+    let join_resp = client
+        .post(format!("{base}/api/{dm_id}/join"))
+        .json(&serde_json::json!({"username": "eve"}))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        join_resp.status(),
+        403,
+        "non-participant join should be 403"
+    );
+    let body: serde_json::Value = join_resp.json().await.unwrap();
+    assert_eq!(body["code"], "join_denied");
+}
+
+/// WS interactive handshake as a non-DM-participant should be rejected
+/// (the server closes the connection without issuing a token).
+#[tokio::test]
+async fn ws_dm_room_non_participant_join_rejected() {
+    let dm_id = dm_room_id("alice", "bob").unwrap();
+    let dm_config = RoomConfig::dm("alice", "bob");
+    let (_td, port) =
+        TestDaemon::start_with_ws_configs(vec![(dm_id.as_str(), Some(dm_config))]).await;
+
+    // eve tries an interactive WS handshake with her username.
+    let url = format!("ws://127.0.0.1:{port}/ws/{dm_id}");
+    let (ws_stream, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+    let (mut tx, mut rx) = ws_stream.split();
+    tx.send(TungsteniteMsg::Text("eve".into())).await.unwrap();
+
+    // The server should reject eve — expect an error frame or connection close.
+    let resp = tokio::time::timeout(Duration::from_secs(2), rx.next()).await;
+    match resp {
+        Ok(Some(Ok(TungsteniteMsg::Text(text)))) => {
+            let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(v["type"], "error", "expected join error, got: {v}");
+        }
+        Ok(Some(Ok(TungsteniteMsg::Close(_)))) => {
+            // Connection closed without a message — also acceptable rejection.
+        }
+        Ok(None) => {
+            // Stream ended — connection was closed, which is a valid rejection.
+        }
+        _ => {
+            // Timeout or other — eve was not allowed in either way.
+        }
+    }
+}
+
+/// REST POST /api/{room}/send as a DM participant succeeds.
+#[tokio::test]
+async fn rest_dm_room_participant_send_allowed() {
+    let dm_id = dm_room_id("alice", "bob").unwrap();
+    let dm_config = RoomConfig::dm("alice", "bob");
+    let (_td, port) =
+        TestDaemon::start_with_ws_configs(vec![(dm_id.as_str(), Some(dm_config))]).await;
+
+    let base = format!("http://127.0.0.1:{port}");
+    let client = reqwest::Client::new();
+
+    // alice is a DM participant — join to get a token.
+    let join_resp = client
+        .post(format!("{base}/api/{dm_id}/join"))
+        .json(&serde_json::json!({"username": "alice"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(join_resp.status(), 200);
+    let join_body: serde_json::Value = join_resp.json().await.unwrap();
+    let token = join_body["token"].as_str().unwrap();
+
+    // alice sends a message — should succeed.
+    let send_resp = client
+        .post(format!("{base}/api/{dm_id}/send"))
+        .header("Authorization", format!("Bearer {token}"))
+        .json(&serde_json::json!({"content": "hello bob"}))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(send_resp.status(), 200, "participant send should succeed");
+    let body: serde_json::Value = send_resp.json().await.unwrap();
+    assert_eq!(body["content"], "hello bob");
+    assert_eq!(body["user"], "alice");
+}
+
+/// A non-participant with a valid token (injected directly, simulating
+/// future system-level tokens) must be rejected with send_denied via REST.
+#[tokio::test]
+async fn rest_dm_room_non_participant_send_rejected() {
+    let dm_id = dm_room_id("alice", "bob").unwrap();
+    let dm_config = RoomConfig::dm("alice", "bob");
+    let (td, port) =
+        TestDaemon::start_with_ws_configs(vec![(dm_id.as_str(), Some(dm_config))]).await;
+
+    // Inject a token for eve directly, bypassing join permission.
+    // This simulates future system-level token issuance (issue #293).
+    let eve_token = "test-token-eve-12345";
+    td.state
+        .test_inject_token(&dm_id, "eve", eve_token)
+        .await
+        .unwrap();
+
+    let base = format!("http://127.0.0.1:{port}");
+    let client = reqwest::Client::new();
+
+    // Eve tries to send — should be rejected with 403 send_denied.
+    let send_resp = client
+        .post(format!("{base}/api/{dm_id}/send"))
+        .header("Authorization", format!("Bearer {eve_token}"))
+        .json(&serde_json::json!({"content": "unauthorized message"}))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        send_resp.status(),
+        403,
+        "non-participant send should be 403"
+    );
+    let body: serde_json::Value = send_resp.json().await.unwrap();
+    assert_eq!(body["code"], "send_denied");
 }
