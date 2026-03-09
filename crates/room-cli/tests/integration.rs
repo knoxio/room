@@ -4083,9 +4083,7 @@ async fn rest_query_public_with_narrowing_param_allowed() {
     rest_send(&client, &base, "ws_query_pub_ok", &token, "hello").await;
 
     let resp = client
-        .get(format!(
-            "{base}/api/ws_query_pub_ok/query?public=true&n=10"
-        ))
+        .get(format!("{base}/api/ws_query_pub_ok/query?public=true&n=10"))
         .header("Authorization", format!("Bearer {token}"))
         .send()
         .await
