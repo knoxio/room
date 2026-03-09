@@ -90,7 +90,7 @@ fn launch_tmux(cli: &Cli) -> Result<(), String> {
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    let cli = Cli::from_arg_matches(
+    let mut cli = Cli::from_arg_matches(
         &Cli::command()
             .disable_version_flag(true)
             .arg(
@@ -173,13 +173,24 @@ async fn main() -> ExitCode {
 
     let socket_str = cli.socket.as_ref().map(|p| p.display().to_string());
     let socket_ref = socket_str.as_deref();
-    let token = match room::join_room(&cli.room_id, &cli.username, socket_ref) {
-        Ok(t) => t,
+    let join_result = match room::join_room(&cli.room_id, &cli.username, socket_ref) {
+        Ok(r) => r,
         Err(e) => {
             tracing::error!("failed to join room: {}", e);
             return ExitCode::FAILURE;
         }
     };
+    let token = join_result.token;
+
+    // Update username if we joined with a suffixed variant
+    if join_result.username != cli.username {
+        tracing::info!(
+            "using username '{}' (requested '{}')",
+            join_result.username,
+            cli.username
+        );
+        cli.username = join_result.username;
+    }
 
     let announce = format!(
         "online (room-ralph, model={}, iter limit={})",

@@ -13,12 +13,88 @@ pub fn token_file_path(room_id: &str, username: &str) -> PathBuf {
     PathBuf::from(format!("/tmp/room-{room_id}-{username}.token"))
 }
 
-/// Join a room and return the token UUID.
+/// Result of a successful room join: token UUID and the actual username used.
+///
+/// The actual username may differ from the requested one if the original was
+/// already taken and a numeric suffix was appended (e.g. `c3po` → `c3po-2`).
+pub struct JoinResult {
+    pub token: String,
+    pub username: String,
+}
+
+/// Maximum number of suffixed username attempts before giving up.
+const MAX_USERNAME_RETRIES: u32 = 5;
+
+/// Join a room and return the token UUID and actual username.
 ///
 /// Runs `room join <room_id> <username>` and parses the token from JSON output.
-/// Falls back to cached token file if join fails.
+/// If the username is already taken, retries with numeric suffixes (e.g. `user-2`,
+/// `user-3`, up to 5 attempts). Falls back to cached token file as a last resort.
 /// If `socket` is provided, passes `--socket <path>` to the `room` command.
-pub fn join_room(room_id: &str, username: &str, socket: Option<&str>) -> Result<String, String> {
+pub fn join_room(
+    room_id: &str,
+    username: &str,
+    socket: Option<&str>,
+) -> Result<JoinResult, String> {
+    // Try the original username first
+    match try_join(room_id, username, socket) {
+        Ok(token) => {
+            return Ok(JoinResult {
+                token,
+                username: username.to_owned(),
+            });
+        }
+        Err(e) if is_username_taken(&e) => {
+            tracing::warn!(
+                "username '{}' already in use, trying suffixed variants",
+                username
+            );
+        }
+        Err(_) => {
+            // Non-username error — fall through to cached token
+        }
+    }
+
+    // Retry with numeric suffixes
+    for i in 2..=MAX_USERNAME_RETRIES + 1 {
+        let suffixed = format!("{username}-{i}");
+        match try_join(room_id, &suffixed, socket) {
+            Ok(token) => {
+                tracing::info!(
+                    "joined as '{}' (original '{}' was taken)",
+                    suffixed,
+                    username
+                );
+                return Ok(JoinResult {
+                    token,
+                    username: suffixed,
+                });
+            }
+            Err(e) if is_username_taken(&e) => {
+                tracing::warn!("username '{}' also taken, trying next suffix", suffixed);
+                continue;
+            }
+            Err(e) => {
+                return Err(e);
+            }
+        }
+    }
+
+    // All suffixed attempts exhausted — fall back to cached token
+    let token_file = token_file_path(room_id, username);
+    tracing::warn!(
+        "all username variants taken, trying cached token at {}",
+        token_file.display()
+    );
+    let token = read_cached_token(&token_file)?;
+    Ok(JoinResult {
+        token,
+        username: username.to_owned(),
+    })
+}
+
+/// Attempt a single `room join` and return the token or an error string.
+fn try_join(room_id: &str, username: &str, socket: Option<&str>) -> Result<String, String> {
     let mut cmd = Command::new("room");
     cmd.args(["join", room_id, username]);
     if let Some(s) = socket {
@@ -32,14 +108,16 @@ pub fn join_room(room_id: &str, username: &str, socket: Option<&str>) -> Result<
         let stdout = String::from_utf8_lossy(&output.stdout);
         extract_token(&stdout)
     } else {
-        // Fall back to cached token file
-        let token_file = token_file_path(room_id, username);
-        tracing::warn!(
-            "room join failed, trying cached token at {}",
-            token_file.display()
-        );
-        read_cached_token(&token_file)
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        Err(stderr.to_string())
     }
+}
+
+/// Check if a join error indicates the username is already taken.
+fn is_username_taken(error: &str) -> bool {
+    let lower = error.to_lowercase();
+    lower.contains("username")
+        && (lower.contains("already in use") || lower.contains("already taken"))
 }
 
 /// Send a message to the room.
@@ -229,5 +307,33 @@ mod tests {
             token_file_path("myroom", "agent1"),
             PathBuf::from("/tmp/room-myroom-agent1.token")
         );
+    }
+
+    #[test]
+    fn is_username_taken_detects_already_in_use() {
+        assert!(is_username_taken(
+            "Error: username 'c3po' is already in use in this room"
+        ));
+        assert!(is_username_taken(
+            "error: username 'agent' is already in use"
+        ));
+        assert!(is_username_taken("USERNAME ALREADY IN USE"));
+    }
+
+    #[test]
+    fn is_username_taken_detects_already_taken() {
+        assert!(is_username_taken("username already taken"));
+        assert!(is_username_taken("Username is already taken in this room"));
+    }
+
+    #[test]
+    fn is_username_taken_rejects_unrelated_errors() {
+        assert!(!is_username_taken("connection refused"));
+        assert!(!is_username_taken("room not found"));
+        assert!(!is_username_taken("invalid token"));
+        assert!(!is_username_taken("timeout"));
+        // Partial matches should not trigger
+        assert!(!is_username_taken("already connected"));
+        assert!(!is_username_taken("username invalid"));
     }
 }

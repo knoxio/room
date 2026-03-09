@@ -384,13 +384,18 @@ async fn live_broker_join_and_announce() {
     let room_id = "ralph-live-test";
 
     match room::join_room(room_id, "ralph-integ-agent", None) {
-        Ok(token) => {
-            assert!(!token.is_empty(), "token should be non-empty");
-            let result =
-                room::send_message(room_id, &token, "integration test: hello from ralph", None);
-            assert!(result.is_ok(), "send should succeed: {result:?}");
+        Ok(result) => {
+            assert!(!result.token.is_empty(), "token should be non-empty");
+            assert!(!result.username.is_empty(), "username should be non-empty");
+            let send_result = room::send_message(
+                room_id,
+                &result.token,
+                "integration test: hello from ralph",
+                None,
+            );
+            assert!(send_result.is_ok(), "send should succeed: {send_result:?}");
 
-            let messages = room::poll_messages(room_id, &token, None).unwrap();
+            let messages = room::poll_messages(room_id, &result.token, None).unwrap();
             // At minimum, we should see our own announce message
             assert!(
                 !messages.is_empty(),

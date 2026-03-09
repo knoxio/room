@@ -94,9 +94,9 @@ fn rejoin_and_poll(
     socket_ref: Option<&str>,
 ) -> Vec<room_protocol::Message> {
     match room::join_room(&cli.room_id, &cli.username, socket_ref) {
-        Ok(new_token) => {
-            tracing::info!("re-joined with new token");
-            *token = new_token;
+        Ok(result) => {
+            tracing::info!("re-joined as '{}' with new token", result.username);
+            *token = result.token;
             room::poll_messages(&cli.room_id, token, socket_ref).unwrap_or_default()
         }
         Err(join_err) => {
