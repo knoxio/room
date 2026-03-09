@@ -107,6 +107,45 @@ pub fn is_dm_room(room_id: &str) -> bool {
     room_id.starts_with("dm-") && room_id.matches('-').count() >= 2
 }
 
+/// Subscription tier for a user's relationship with a room.
+///
+/// Controls what messages appear in the user's default stream:
+/// - `Full` — all messages from the room
+/// - `MentionsOnly` — only messages that @mention the user
+/// - `Unsubscribed` — excluded from the default stream (still queryable with `--public`)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubscriptionTier {
+    Full,
+    MentionsOnly,
+    Unsubscribed,
+}
+
+impl std::fmt::Display for SubscriptionTier {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Full => write!(f, "full"),
+            Self::MentionsOnly => write!(f, "mentions_only"),
+            Self::Unsubscribed => write!(f, "unsubscribed"),
+        }
+    }
+}
+
+impl std::str::FromStr for SubscriptionTier {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "full" => Ok(Self::Full),
+            "mentions_only" | "mentions-only" | "mentions" => Ok(Self::MentionsOnly),
+            "unsubscribed" | "none" => Ok(Self::Unsubscribed),
+            other => Err(format!(
+                "unknown subscription tier '{other}'; expected full, mentions_only, or unsubscribed"
+            )),
+        }
+    }
+}
+
 /// Entry returned by room listing (discovery).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RoomListEntry {
@@ -1093,5 +1132,102 @@ mod tests {
         let (room, seq) = parse_message_id(":5").unwrap();
         assert_eq!(room, "");
         assert_eq!(seq, 5);
+    }
+
+    // ── SubscriptionTier tests ───────────────────────────────────────────────
+
+    #[test]
+    fn subscription_tier_serde_round_trip() {
+        for tier in [
+            SubscriptionTier::Full,
+            SubscriptionTier::MentionsOnly,
+            SubscriptionTier::Unsubscribed,
+        ] {
+            let json = serde_json::to_string(&tier).unwrap();
+            let back: SubscriptionTier = serde_json::from_str(&json).unwrap();
+            assert_eq!(tier, back);
+        }
+    }
+
+    #[test]
+    fn subscription_tier_serde_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&SubscriptionTier::Full).unwrap(),
+            r#""full""#
+        );
+        assert_eq!(
+            serde_json::to_string(&SubscriptionTier::MentionsOnly).unwrap(),
+            r#""mentions_only""#
+        );
+        assert_eq!(
+            serde_json::to_string(&SubscriptionTier::Unsubscribed).unwrap(),
+            r#""unsubscribed""#
+        );
+    }
+
+    #[test]
+    fn subscription_tier_display() {
+        assert_eq!(SubscriptionTier::Full.to_string(), "full");
+        assert_eq!(SubscriptionTier::MentionsOnly.to_string(), "mentions_only");
+        assert_eq!(SubscriptionTier::Unsubscribed.to_string(), "unsubscribed");
+    }
+
+    #[test]
+    fn subscription_tier_from_str_canonical() {
+        assert_eq!(
+            "full".parse::<SubscriptionTier>().unwrap(),
+            SubscriptionTier::Full
+        );
+        assert_eq!(
+            "mentions_only".parse::<SubscriptionTier>().unwrap(),
+            SubscriptionTier::MentionsOnly
+        );
+        assert_eq!(
+            "unsubscribed".parse::<SubscriptionTier>().unwrap(),
+            SubscriptionTier::Unsubscribed
+        );
+    }
+
+    #[test]
+    fn subscription_tier_from_str_aliases() {
+        assert_eq!(
+            "mentions-only".parse::<SubscriptionTier>().unwrap(),
+            SubscriptionTier::MentionsOnly
+        );
+        assert_eq!(
+            "mentions".parse::<SubscriptionTier>().unwrap(),
+            SubscriptionTier::MentionsOnly
+        );
+        assert_eq!(
+            "none".parse::<SubscriptionTier>().unwrap(),
+            SubscriptionTier::Unsubscribed
+        );
+    }
+
+    #[test]
+    fn subscription_tier_from_str_invalid() {
+        let err = "banana".parse::<SubscriptionTier>().unwrap_err();
+        assert!(err.contains("unknown subscription tier"));
+        assert!(err.contains("banana"));
+    }
+
+    #[test]
+    fn subscription_tier_display_round_trips_through_from_str() {
+        for tier in [
+            SubscriptionTier::Full,
+            SubscriptionTier::MentionsOnly,
+            SubscriptionTier::Unsubscribed,
+        ] {
+            let s = tier.to_string();
+            let back: SubscriptionTier = s.parse().unwrap();
+            assert_eq!(tier, back);
+        }
+    }
+
+    #[test]
+    fn subscription_tier_is_copy() {
+        let tier = SubscriptionTier::Full;
+        let copy = tier;
+        assert_eq!(tier, copy); // both valid — proves Copy
     }
 }
