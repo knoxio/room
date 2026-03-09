@@ -160,7 +160,13 @@ fn bot_from_seed(seed: u64) -> BotParts {
         1 => WinkStyle::Right,
         _ => WinkStyle::Blink,
     };
-    BotParts { seed, border, eyes, mouth, wink_style }
+    BotParts {
+        seed,
+        border,
+        eyes,
+        mouth,
+        wink_style,
+    }
 }
 
 /// Hash a (bot_seed, slot) pair to get a random value for that time slot.
@@ -256,7 +262,7 @@ fn mouth_talk_str(mouth: BotMouth) -> &'static str {
 ///   row 5 — bottom + neck   "╰───┬───╯"
 /// ```
 fn bot_row(parts: &BotParts, row: usize, frame: usize) -> (String, Style) {
-    let antenna_on = (frame / BLINK_INTERVAL) % 2 == 0;
+    let antenna_on = (frame / BLINK_INTERVAL).is_multiple_of(2);
     let slot = frame / SLOT_FRAMES;
     let frame_in_slot = frame % SLOT_FRAMES;
     let h = slot_hash(parts.seed, slot);
@@ -276,7 +282,7 @@ fn bot_row(parts: &BotParts, row: usize, frame: usize) -> (String, Style) {
             let eye = eye_char(parts.eyes);
             let (le, re) = if wink {
                 match parts.wink_style {
-                    WinkStyle::Left  => ("─", eye),
+                    WinkStyle::Left => ("─", eye),
                     WinkStyle::Right => (eye, "─"),
                     WinkStyle::Blink => ("─", "─"),
                 }
@@ -287,7 +293,7 @@ fn bot_row(parts: &BotParts, row: usize, frame: usize) -> (String, Style) {
         }
         4 => {
             let m = if talking {
-                if (frame_in_slot / TALK_INTERVAL) % 2 == 0 {
+                if (frame_in_slot / TALK_INTERVAL).is_multiple_of(2) {
                     mouth_str(parts.mouth)
                 } else {
                     mouth_talk_str(parts.mouth)
@@ -365,7 +371,7 @@ pub(super) fn welcome_splash(frame: usize, width: usize, seed: u64) -> Text<'sta
     }
 
     // "r o o m" label pulses in sync with the antenna.
-    let label_style = if (frame / BLINK_INTERVAL) % 2 == 0 {
+    let label_style = if (frame / BLINK_INTERVAL).is_multiple_of(2) {
         Style::default()
             .fg(Color::Cyan)
             .add_modifier(Modifier::BOLD)
@@ -1036,7 +1042,10 @@ mod tests {
             .lines
             .iter()
             .any(|line| line.spans.iter().any(|s| s.content.as_ref() == "   "));
-        assert!(!has_gap_span, "single bot should have no inter-bot gap spans");
+        assert!(
+            !has_gap_span,
+            "single bot should have no inter-bot gap spans"
+        );
     }
 
     #[test]
@@ -1062,7 +1071,10 @@ mod tests {
             .flat_map(|line| line.spans.iter().map(|s| s.content.to_string()))
             .collect::<Vec<_>>()
             .join("");
-        assert_ne!(a, b, "different seeds should (almost always) produce different bots");
+        assert_ne!(
+            a, b,
+            "different seeds should (almost always) produce different bots"
+        );
     }
 
     // ── render_tab_bar tests ──────────────────────────────────────────────
