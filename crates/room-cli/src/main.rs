@@ -197,6 +197,24 @@ enum Cmd {
         #[arg(trailing_var_arg = true, num_args = 1..)]
         message: Vec<String>,
     },
+    /// Create a room in a running daemon.
+    ///
+    /// Connects to the daemon socket and requests room creation. The room is
+    /// immediately available for `join`, `send`, and `poll`.
+    Create {
+        /// Room ID to create
+        room_id: String,
+        /// Override the daemon socket path (default: auto-discover)
+        #[arg(long)]
+        socket: Option<PathBuf>,
+        /// Room visibility: public, private, or dm (default: public)
+        #[arg(long, default_value = "public")]
+        visibility: String,
+        /// Invite list — usernames allowed to join (comma-separated or repeated).
+        /// Required for dm visibility (exactly 2 users).
+        #[arg(long, value_delimiter = ',')]
+        invite: Vec<String>,
+    },
     /// List active rooms with running brokers.
     ///
     /// Scans `/tmp` for `room-*.sock` files and probes each to verify the broker
@@ -509,6 +527,14 @@ async fn main() -> anyhow::Result<()> {
             }
             let content = message.join(" ");
             oneshot::cmd_dm(&user, &token, &content, socket.as_deref()).await?;
+        }
+        Some(Cmd::Create {
+            room_id,
+            socket,
+            visibility,
+            invite,
+        }) => {
+            oneshot::cmd_create(&room_id, socket.as_deref(), &visibility, &invite).await?;
         }
         Some(Cmd::List) => {
             oneshot::cmd_list().await?;

@@ -7,10 +7,16 @@
 //!
 //! ## Handshake protocol
 //!
-//! The first line of a UDS connection to the daemon can optionally carry a
-//! `ROOM:<room_id>:` prefix. If present, the rest of the line is interpreted
-//! as the standard per-room handshake (`SEND:`, `TOKEN:`, `JOIN:`, or plain
-//! username). If absent, the connection is rejected with an error envelope.
+//! The first line of a UDS connection to the daemon can carry one of two
+//! prefixes:
+//!
+//! - `ROOM:<room_id>:<rest>` — route to an existing room. The rest of the
+//!   line is the standard per-room handshake (`SEND:`, `TOKEN:`, `JOIN:`,
+//!   or plain username).
+//! - `CREATE:<room_id>` — create a new room. A second line carries the
+//!   room configuration as JSON (`{"visibility":"public","invite":[]}`).
+//!
+//! If neither prefix is present, the connection is rejected with an error.
 //!
 //! Examples:
 //! ```text
@@ -18,6 +24,7 @@
 //! ROOM:myroom:TOKEN:<uuid>     → authenticated send to "myroom"
 //! ROOM:myroom:SEND:bob         → legacy unauthenticated send to "myroom"
 //! ROOM:myroom:alice            → interactive join to "myroom" as "alice"
+//! CREATE:newroom               → create room "newroom" (config on next line)
 //! ```
 
 use std::{
@@ -425,11 +432,12 @@ impl DaemonState {
                     count.fetch_add(1, Ordering::SeqCst);
                     let rooms = self.rooms.clone();
                     let next_id = self.next_client_id.clone();
+                    let cfg = self.config.clone();
                     let registry = self.user_registry.clone();
                     let tx = close_tx.clone();
 
                     tokio::spawn(async move {
-                        if let Err(e) = dispatch_connection(stream, &rooms, &next_id, &registry).await {
+                        if let Err(e) = dispatch_connection(stream, &rooms, &next_id, &cfg, &registry).await {
                             eprintln!("[daemon] connection error: {e:#}");
                         }
                         count.fetch_sub(1, Ordering::SeqCst);
@@ -558,11 +566,183 @@ pub(crate) fn parse_room_prefix(line: &str) -> Option<(&str, &str)> {
     Some((room_id, rest))
 }
 
+/// Handle a `CREATE:<room_id>` request: validate, read config, create the room.
+///
+/// Protocol:
+/// 1. Client sends `CREATE:<room_id>\n`
+/// 2. Client sends config JSON on the next line: `{"visibility":"public","invite":[]}\n`
+/// 3. Daemon responds with `{"type":"room_created","room":"<id>"}\n` or an error envelope.
+async fn handle_create(
+    room_id: &str,
+    reader: &mut tokio::io::BufReader<tokio::net::unix::OwnedReadHalf>,
+    write_half: &mut tokio::net::unix::OwnedWriteHalf,
+    rooms: &RoomMap,
+    daemon_config: &DaemonConfig,
+) -> anyhow::Result<()> {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+
+    // Validate room ID.
+    if let Err(e) = validate_room_id(room_id) {
+        let err = serde_json::json!({
+            "type": "error",
+            "code": "invalid_room_id",
+            "message": e
+        });
+        write_half.write_all(format!("{err}\n").as_bytes()).await?;
+        return Ok(());
+    }
+
+    // Check for duplicate before reading config (fast-fail).
+    {
+        let map = rooms.lock().await;
+        if map.contains_key(room_id) {
+            let err = serde_json::json!({
+                "type": "error",
+                "code": "room_exists",
+                "message": format!("room already exists: {room_id}")
+            });
+            write_half.write_all(format!("{err}\n").as_bytes()).await?;
+            return Ok(());
+        }
+    }
+
+    // Read config JSON from second line.
+    let mut config_line = String::new();
+    reader.read_line(&mut config_line).await?;
+    let config_str = config_line.trim();
+
+    let (visibility_str, invite): (String, Vec<String>) = if config_str.is_empty() {
+        ("public".into(), vec![])
+    } else {
+        let v: serde_json::Value = match serde_json::from_str(config_str) {
+            Ok(v) => v,
+            Err(e) => {
+                let err = serde_json::json!({
+                    "type": "error",
+                    "code": "invalid_config",
+                    "message": format!("invalid config JSON: {e}")
+                });
+                write_half.write_all(format!("{err}\n").as_bytes()).await?;
+                return Ok(());
+            }
+        };
+        let vis = v["visibility"].as_str().unwrap_or("public").to_owned();
+        let inv = v["invite"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_owned()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        (vis, inv)
+    };
+
+    // Build RoomConfig from the parsed visibility + invite list.
+    let room_config = match visibility_str.as_str() {
+        "public" => room_protocol::RoomConfig {
+            visibility: room_protocol::RoomVisibility::Public,
+            max_members: None,
+            invite_list: invite.into_iter().collect(),
+            created_by: "system".to_owned(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+        },
+        "private" => room_protocol::RoomConfig {
+            visibility: room_protocol::RoomVisibility::Private,
+            max_members: None,
+            invite_list: invite.into_iter().collect(),
+            created_by: "system".to_owned(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+        },
+        "dm" => {
+            if invite.len() != 2 {
+                let err = serde_json::json!({
+                    "type": "error",
+                    "code": "invalid_config",
+                    "message": "dm visibility requires exactly 2 users in invite list"
+                });
+                write_half.write_all(format!("{err}\n").as_bytes()).await?;
+                return Ok(());
+            }
+            room_protocol::RoomConfig::dm(&invite[0], &invite[1])
+        }
+        other => {
+            let err = serde_json::json!({
+                "type": "error",
+                "code": "invalid_config",
+                "message": format!("unknown visibility: {other}")
+            });
+            write_half.write_all(format!("{err}\n").as_bytes()).await?;
+            return Ok(());
+        }
+    };
+
+    // Build RoomState (mirrors DaemonState::create_room_with_config).
+    let chat_path = daemon_config.chat_path(room_id);
+    let token_map_path = daemon_config.token_map_path(room_id);
+    let subscription_map_path = daemon_config.subscription_map_path(room_id);
+    let (shutdown_tx, _) = watch::channel(false);
+
+    let mut registry = PluginRegistry::new();
+    if let Err(e) = registry.register(Box::new(plugin::help::HelpPlugin)) {
+        let err = serde_json::json!({
+            "type": "error",
+            "code": "internal",
+            "message": format!("plugin error: {e}")
+        });
+        write_half.write_all(format!("{err}\n").as_bytes()).await?;
+        return Ok(());
+    }
+    if let Err(e) = registry.register(Box::new(plugin::stats::StatsPlugin)) {
+        let err = serde_json::json!({
+            "type": "error",
+            "code": "internal",
+            "message": format!("plugin error: {e}")
+        });
+        write_half.write_all(format!("{err}\n").as_bytes()).await?;
+        return Ok(());
+    }
+
+    let initial_subs = build_initial_subscriptions(&room_config);
+    let persisted_tokens = super::auth::load_token_map(&token_map_path);
+
+    let state = Arc::new(RoomState {
+        clients: Arc::new(Mutex::new(HashMap::new())),
+        status_map: Arc::new(Mutex::new(HashMap::new())),
+        host_user: Arc::new(Mutex::new(None)),
+        token_map: Arc::new(Mutex::new(persisted_tokens)),
+        claim_map: Arc::new(Mutex::new(HashMap::new())),
+        subscription_map: Arc::new(Mutex::new(initial_subs)),
+        chat_path: Arc::new(chat_path),
+        token_map_path: Arc::new(token_map_path),
+        subscription_map_path: Arc::new(subscription_map_path),
+        room_id: Arc::new(room_id.to_owned()),
+        shutdown: Arc::new(shutdown_tx),
+        seq_counter: Arc::new(AtomicU64::new(0)),
+        plugin_registry: Arc::new(registry),
+        config: Some(room_config),
+    });
+
+    rooms.lock().await.insert(room_id.to_owned(), state);
+
+    let ok = serde_json::json!({
+        "type": "room_created",
+        "room": room_id
+    });
+    write_half.write_all(format!("{ok}\n").as_bytes()).await?;
+    Ok(())
+}
+
 /// Dispatch a raw UDS connection to the correct room based on the handshake.
+///
+/// Handles two top-level protocols:
+/// - `CREATE:<room_id>` — create a new room (reads config JSON from second line)
+/// - `ROOM:<room_id>:<rest>` — route to an existing room
 async fn dispatch_connection(
     stream: tokio::net::UnixStream,
     rooms: &RoomMap,
     next_client_id: &Arc<AtomicU64>,
+    daemon_config: &DaemonConfig,
     user_registry: &Arc<tokio::sync::Mutex<UserRegistry>>,
 ) -> anyhow::Result<()> {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -578,6 +758,11 @@ async fn dispatch_connection(
         return Ok(());
     }
 
+    // Handle CREATE:<room_id> — daemon-level room creation.
+    if let Some(room_id) = first_line.strip_prefix("CREATE:") {
+        return handle_create(room_id, &mut reader, &mut write_half, rooms, daemon_config).await;
+    }
+
     // Parse ROOM:<room_id>:<rest>
     let (room_id, rest) = match parse_room_prefix(first_line) {
         Some(pair) => pair,
@@ -585,7 +770,7 @@ async fn dispatch_connection(
             let err = serde_json::json!({
                 "type": "error",
                 "code": "missing_room_prefix",
-                "message": "daemon mode requires ROOM:<room_id>: prefix in handshake"
+                "message": "daemon mode requires ROOM:<room_id>: or CREATE:<room_id> prefix"
             });
             write_half.write_all(format!("{err}\n").as_bytes()).await?;
             return Ok(());

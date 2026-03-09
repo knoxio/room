@@ -10,6 +10,7 @@ pub use poll::{
     pull_messages, QueryOptions,
 };
 pub use token::{cmd_join, token_file_path, username_from_token, username_from_token_any_room};
+pub use transport::create_room;
 pub use transport::{
     ensure_daemon_running, join_session, join_session_target, resolve_socket_target, send_message,
     send_message_with_token, send_message_with_token_target, SocketTarget,
@@ -102,6 +103,40 @@ pub async fn cmd_dm(
             }
         })?;
     println!("{}", serde_json::to_string(&msg)?);
+    Ok(())
+}
+
+/// One-shot create subcommand: connect to daemon, create a room, print result.
+///
+/// Sends a `CREATE:<room_id>` request to the daemon socket with the given
+/// visibility and invite list. The daemon creates the room immediately and
+/// returns a `room_created` envelope.
+///
+/// `socket` overrides the default daemon socket path (auto-discovered if `None`).
+pub async fn cmd_create(
+    room_id: &str,
+    socket: Option<&std::path::Path>,
+    visibility: &str,
+    invite: &[String],
+) -> anyhow::Result<()> {
+    let daemon_socket = socket
+        .map(|p| p.to_owned())
+        .unwrap_or_else(crate::paths::room_socket_path);
+
+    if !daemon_socket.exists() {
+        anyhow::bail!(
+            "daemon socket not found at {} — is the daemon running?",
+            daemon_socket.display()
+        );
+    }
+
+    let config = serde_json::json!({
+        "visibility": visibility,
+        "invite": invite,
+    });
+
+    let result = transport::create_room(&daemon_socket, room_id, &config.to_string()).await?;
+    println!("{}", serde_json::to_string(&result)?);
     Ok(())
 }
 
