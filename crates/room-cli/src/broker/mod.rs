@@ -360,6 +360,23 @@ pub(crate) async fn run_interactive_session(
                             }
                             Ok(CommandResult::Shutdown) => break,
                             Ok(CommandResult::Passthrough(msg)) => {
+                                // DM privacy: reject sends from non-participants
+                                if let Err(reason) = auth::check_send_permission(
+                                    &username_in,
+                                    state_in.config.as_ref(),
+                                ) {
+                                    let err = serde_json::json!({
+                                        "type": "error",
+                                        "code": "send_denied",
+                                        "message": reason
+                                    });
+                                    let _ = write_half_in
+                                        .lock()
+                                        .await
+                                        .write_all(format!("{err}\n").as_bytes())
+                                        .await;
+                                    continue;
+                                }
                                 let result = match &msg {
                                     Message::DirectMessage { to, .. } => {
                                         dm_and_persist(
@@ -441,6 +458,16 @@ pub(crate) async fn handle_oneshot_send(
             write_half.write_all(format!("{json}\n").as_bytes()).await?;
         }
         CommandResult::Passthrough(msg) => {
+            // DM privacy: reject sends from non-participants
+            if let Err(reason) = auth::check_send_permission(&username, state.config.as_ref()) {
+                let err = serde_json::json!({
+                    "type": "error",
+                    "code": "send_denied",
+                    "message": reason
+                });
+                write_half.write_all(format!("{err}\n").as_bytes()).await?;
+                return Ok(());
+            }
             let seq_msg = match &msg {
                 Message::DirectMessage { to, .. } => {
                     dm_and_persist(

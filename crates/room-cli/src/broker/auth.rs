@@ -67,6 +67,32 @@ pub(crate) fn check_join_permission(
     }
 }
 
+/// Check whether `username` is allowed to send a message in a room.
+///
+/// For DM rooms, only the two participants may send. The host may join
+/// read-only (for administrative oversight) but cannot send messages.
+/// All other room types allow any joined user to send.
+///
+/// Returns `Ok(())` if allowed, or `Err(reason)` if denied.
+/// Rooms without config (legacy single-room mode) are always allowed.
+pub(crate) fn check_send_permission(
+    username: &str,
+    config: Option<&RoomConfig>,
+) -> Result<(), String> {
+    let config = match config {
+        Some(c) => c,
+        None => return Ok(()), // Legacy rooms — always allow.
+    };
+
+    if config.visibility == RoomVisibility::Dm && !config.invite_list.contains(username) {
+        return Err(
+            "permission denied: only DM participants can send messages in this room".to_owned(),
+        );
+    }
+
+    Ok(())
+}
+
 /// Issue a session token for `username` if the name is not already taken.
 ///
 /// Returns the new token string on success, or an error message on collision.
@@ -316,6 +342,54 @@ mod tests {
     #[test]
     fn join_no_config_always_allowed() {
         assert!(check_join_permission("anyone", None).is_ok());
+    }
+
+    // ── check_send_permission ─────────────────────────────────────────────
+
+    #[test]
+    fn send_public_room_always_allowed() {
+        let config = RoomConfig::public("owner");
+        assert!(check_send_permission("anyone", Some(&config)).is_ok());
+    }
+
+    #[test]
+    fn send_dm_room_participants_allowed() {
+        let config = RoomConfig::dm("alice", "bob");
+        assert!(check_send_permission("alice", Some(&config)).is_ok());
+        assert!(check_send_permission("bob", Some(&config)).is_ok());
+    }
+
+    #[test]
+    fn send_dm_room_non_participant_denied() {
+        let config = RoomConfig::dm("alice", "bob");
+        let result = check_send_permission("eve", Some(&config));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("permission denied"));
+    }
+
+    #[test]
+    fn send_dm_room_host_denied() {
+        // Host can join read-only but must not be able to send
+        let config = RoomConfig::dm("alice", "bob");
+        assert!(check_send_permission("host-user", Some(&config)).is_err());
+    }
+
+    #[test]
+    fn send_private_room_any_member_allowed() {
+        let config = RoomConfig {
+            visibility: RoomVisibility::Private,
+            max_members: None,
+            invite_list: ["alice".to_owned()].into(),
+            created_by: "owner".to_owned(),
+            created_at: "2026-01-01T00:00:00Z".to_owned(),
+        };
+        // Private rooms don't restrict sends — only joins
+        assert!(check_send_permission("anyone", Some(&config)).is_ok());
+    }
+
+    #[test]
+    fn send_no_config_always_allowed() {
+        assert!(check_send_permission("anyone", None).is_ok());
     }
 
     // ── Token persistence ─────────────────────────────────────────────────
