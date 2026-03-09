@@ -27,10 +27,13 @@ mod render;
 mod render_bots;
 mod widgets;
 
+use room_protocol::SubscriptionTier;
+
 use crate::message::Message;
 use input::{
     build_payload, cursor_display_pos, handle_key, parse_kick_broadcast, parse_status_broadcast,
-    seed_online_users_from_who, wrap_input_display, Action, InputState,
+    parse_subscription_broadcast, seed_online_users_from_who, wrap_input_display, Action,
+    InputState,
 };
 use render::{
     assign_color, find_view_start, format_message, render_tab_bar, user_color, welcome_splash,
@@ -47,6 +50,7 @@ struct RoomTab {
     messages: Vec<Message>,
     online_users: Vec<String>,
     user_statuses: HashMap<String, String>,
+    subscription_tiers: HashMap<String, SubscriptionTier>,
     unread_count: usize,
     scroll_offset: usize,
     msg_rx: mpsc::UnboundedReceiver<Message>,
@@ -74,6 +78,7 @@ impl RoomTab {
             Message::Leave { user, .. } => {
                 self.online_users.retain(|u| u != user);
                 self.user_statuses.remove(user);
+                self.subscription_tiers.remove(user);
             }
             Message::Message { user, .. } if !self.online_users.contains(user) => {
                 assign_color(user, color_map);
@@ -94,6 +99,10 @@ impl RoomTab {
                 if let Some(kicked) = parse_kick_broadcast(content) {
                     self.online_users.retain(|u| u != kicked);
                     self.user_statuses.remove(kicked);
+                    self.subscription_tiers.remove(kicked);
+                }
+                if let Some((name, tier)) = parse_subscription_broadcast(content) {
+                    self.subscription_tiers.insert(name, tier);
                 }
                 for u in &self.online_users {
                     assign_color(u, color_map);
@@ -207,6 +216,7 @@ async fn open_dm_tab(
         messages: Vec::new(),
         online_users: Vec::new(),
         user_statuses: HashMap::new(),
+        subscription_tiers: HashMap::new(),
         unread_count: 0,
         scroll_offset: 0,
         msg_rx: rx,
@@ -361,6 +371,7 @@ pub async fn run(
         messages: Vec::new(),
         online_users: Vec::new(),
         user_statuses: HashMap::new(),
+        subscription_tiers: HashMap::new(),
         unread_count: 0,
         scroll_offset: 0,
         msg_rx,
@@ -494,6 +505,7 @@ pub async fn run(
         let room_id_display = tabs[active_tab].room_id.clone();
         let online_users_ref = &tabs[active_tab].online_users;
         let user_statuses_ref = &tabs[active_tab].user_statuses;
+        let subscription_tiers_ref = &tabs[active_tab].subscription_tiers;
         let messages_ref = &tabs[active_tab].messages;
 
         // Build tab bar info for multi-tab rendering.
@@ -617,12 +629,25 @@ pub async fn run(
                     .iter()
                     .map(|u| {
                         let status = user_statuses_ref.get(u).map(|s| s.as_str()).unwrap_or("");
+                        let tier = subscription_tiers_ref.get(u).copied();
                         let mut spans = vec![Span::styled(
                             format!(" {u}"),
                             Style::default()
                                 .fg(user_color(u, &color_map))
                                 .add_modifier(Modifier::BOLD),
                         )];
+                        match tier {
+                            Some(SubscriptionTier::MentionsOnly) => {
+                                spans.push(Span::styled(" @", Style::default().fg(Color::Yellow)));
+                            }
+                            Some(SubscriptionTier::Unsubscribed) => {
+                                spans.push(Span::styled(
+                                    " \u{2717}",
+                                    Style::default().fg(Color::Red),
+                                ));
+                            }
+                            _ => {}
+                        }
                         if !status.is_empty() {
                             spans.push(Span::styled(
                                 format!("  {status}"),
@@ -643,7 +668,13 @@ pub async fn run(
                         } else {
                             status.len() + 2 // "  " + status
                         };
-                        u.len() + 1 + status_len + 1 // " " + name + status_part + " "
+                        let tier = subscription_tiers_ref.get(u).copied();
+                        let tier_len = match tier {
+                            Some(SubscriptionTier::MentionsOnly)
+                            | Some(SubscriptionTier::Unsubscribed) => 2, // " @" or " ✗"
+                            _ => 0,
+                        };
+                        u.len() + 1 + tier_len + status_len + 1 // " " + name + tier + status + " "
                     })
                     .max()
                     .unwrap_or(10);
@@ -995,6 +1026,7 @@ mod tests {
             messages: Vec::new(),
             online_users: Vec::new(),
             user_statuses: HashMap::new(),
+            subscription_tiers: HashMap::new(),
             unread_count: 0,
             scroll_offset: 0,
             msg_rx: rx,
@@ -1016,6 +1048,7 @@ mod tests {
             messages: Vec::new(),
             online_users: vec!["alice".into()],
             user_statuses: HashMap::new(),
+            subscription_tiers: HashMap::new(),
             unread_count: 0,
             scroll_offset: 0,
             msg_rx: rx,
@@ -1036,6 +1069,7 @@ mod tests {
             messages: Vec::new(),
             online_users: Vec::new(),
             user_statuses: HashMap::new(),
+            subscription_tiers: HashMap::new(),
             unread_count: 0,
             scroll_offset: 0,
             msg_rx: rx,
@@ -1059,6 +1093,7 @@ mod tests {
             messages: Vec::new(),
             online_users: Vec::new(),
             user_statuses: HashMap::new(),
+            subscription_tiers: HashMap::new(),
             unread_count: 0,
             scroll_offset: 0,
             msg_rx: rx,
@@ -1079,6 +1114,7 @@ mod tests {
             messages: Vec::new(),
             online_users: Vec::new(),
             user_statuses: HashMap::new(),
+            subscription_tiers: HashMap::new(),
             unread_count: 0,
             scroll_offset: 0,
             msg_rx: rx,
@@ -1100,6 +1136,7 @@ mod tests {
             messages: Vec::new(),
             online_users: vec!["alice".into()],
             user_statuses: HashMap::new(),
+            subscription_tiers: HashMap::new(),
             unread_count: 0,
             scroll_offset: 0,
             msg_rx: rx,
@@ -1122,6 +1159,7 @@ mod tests {
             messages: Vec::new(),
             online_users: Vec::new(),
             user_statuses: HashMap::new(),
+            subscription_tiers: HashMap::new(),
             unread_count: 0,
             scroll_offset: 0,
             msg_rx: rx,
@@ -1146,6 +1184,7 @@ mod tests {
             messages: Vec::new(),
             online_users: Vec::new(),
             user_statuses: HashMap::new(),
+            subscription_tiers: HashMap::new(),
             unread_count: 0,
             scroll_offset: 0,
             msg_rx: rx,
@@ -1167,6 +1206,7 @@ mod tests {
             messages: Vec::new(),
             online_users: Vec::new(),
             user_statuses: HashMap::new(),
+            subscription_tiers: HashMap::new(),
             unread_count: 0,
             scroll_offset: 0,
             msg_rx: rx,
@@ -1188,6 +1228,7 @@ mod tests {
             messages: Vec::new(),
             online_users: vec!["alice".into()],
             user_statuses: HashMap::new(),
+            subscription_tiers: HashMap::new(),
             unread_count: 0,
             scroll_offset: 0,
             msg_rx: rx,
@@ -1197,5 +1238,68 @@ mod tests {
 
         tab.process_message(make_system("alice set status: coding"), &mut cm, true);
         assert_eq!(tab.user_statuses.get("alice").unwrap(), "coding");
+    }
+
+    #[tokio::test]
+    async fn process_subscription_broadcast_sets_tier() {
+        let (_, rx) = mpsc::unbounded_channel();
+        let (_, wh) = tokio::net::UnixStream::pair().unwrap().1.into_split();
+        let mut tab = RoomTab {
+            room_id: "test".into(),
+            messages: Vec::new(),
+            online_users: vec!["alice".into()],
+            user_statuses: HashMap::new(),
+            subscription_tiers: HashMap::new(),
+            unread_count: 0,
+            scroll_offset: 0,
+            msg_rx: rx,
+            write_half: wh,
+        };
+        let mut cm = ColorMap::new();
+
+        tab.process_message(
+            make_system("alice subscribed to test (tier: mentions_only)"),
+            &mut cm,
+            true,
+        );
+        assert_eq!(
+            tab.subscription_tiers.get("alice").copied(),
+            Some(SubscriptionTier::MentionsOnly),
+        );
+
+        // Upgrading to Full clears non-Full indicator.
+        tab.process_message(
+            make_system("alice subscribed to test (tier: full)"),
+            &mut cm,
+            true,
+        );
+        assert_eq!(
+            tab.subscription_tiers.get("alice").copied(),
+            Some(SubscriptionTier::Full),
+        );
+    }
+
+    #[tokio::test]
+    async fn process_leave_clears_subscription_tier() {
+        let (_, rx) = mpsc::unbounded_channel();
+        let (_, wh) = tokio::net::UnixStream::pair().unwrap().1.into_split();
+        let mut tab = RoomTab {
+            room_id: "test".into(),
+            messages: Vec::new(),
+            online_users: vec!["alice".into()],
+            user_statuses: HashMap::new(),
+            subscription_tiers: HashMap::from([(
+                "alice".to_owned(),
+                SubscriptionTier::MentionsOnly,
+            )]),
+            unread_count: 0,
+            scroll_offset: 0,
+            msg_rx: rx,
+            write_half: wh,
+        };
+        let mut cm = ColorMap::new();
+
+        tab.process_message(make_leave("alice"), &mut cm, true);
+        assert!(tab.subscription_tiers.get("alice").is_none());
     }
 }

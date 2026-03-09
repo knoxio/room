@@ -2,6 +2,8 @@ use std::collections::HashMap;
 
 use unicode_width::UnicodeWidthChar;
 
+use room_protocol::SubscriptionTier;
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use super::widgets::{CommandPalette, MentionPicker};
@@ -667,6 +669,24 @@ pub(super) fn parse_kick_broadcast(content: &str) -> Option<&str> {
     Some(target)
 }
 
+/// Parse a `/subscribe` system broadcast into `(username, SubscriptionTier)`.
+///
+/// The broker broadcasts `"alice subscribed to room-dev (tier: full)"`.
+/// Returns `Some(("alice", SubscriptionTier::Full))`.
+pub(super) fn parse_subscription_broadcast(content: &str) -> Option<(String, SubscriptionTier)> {
+    // Strip trailing ")"
+    let rest = content.strip_suffix(')')?;
+    // Split on " (tier: "
+    let (name_room, tier_str) = rest.split_once(" (tier: ")?;
+    // Split on " subscribed to "
+    let (name, _room) = name_room.split_once(" subscribed to ")?;
+    if name.is_empty() {
+        return None;
+    }
+    let tier = tier_str.parse().ok()?;
+    Some((name.to_owned(), tier))
+}
+
 /// Move the cursor to the start of the previous word.
 ///
 /// "Word" is a maximal run of non-whitespace characters. Starting from
@@ -849,6 +869,49 @@ mod tests {
     #[test]
     fn parse_kick_missing_target() {
         assert!(parse_kick_broadcast("alice kicked  (token invalidated)").is_none());
+    }
+
+    // ── parse_subscription_broadcast tests ────────────────────────────────────
+
+    #[test]
+    fn parse_subscription_full() {
+        let result = parse_subscription_broadcast("alice subscribed to room-dev (tier: full)");
+        assert_eq!(result, Some(("alice".to_owned(), SubscriptionTier::Full)));
+    }
+
+    #[test]
+    fn parse_subscription_mentions_only() {
+        let result =
+            parse_subscription_broadcast("bob subscribed to my-room (tier: mentions_only)");
+        assert_eq!(
+            result,
+            Some(("bob".to_owned(), SubscriptionTier::MentionsOnly))
+        );
+    }
+
+    #[test]
+    fn parse_subscription_unsubscribed() {
+        let result = parse_subscription_broadcast("carol subscribed to test (tier: unsubscribed)");
+        assert_eq!(
+            result,
+            Some(("carol".to_owned(), SubscriptionTier::Unsubscribed))
+        );
+    }
+
+    #[test]
+    fn parse_subscription_unrelated_message() {
+        assert!(parse_subscription_broadcast("alice set status: busy").is_none());
+        assert!(parse_subscription_broadcast("hello world").is_none());
+        assert!(parse_subscription_broadcast("alice kicked bob (token invalidated)").is_none());
+    }
+
+    #[test]
+    fn parse_subscription_hyphenated_username() {
+        let result = parse_subscription_broadcast("my-agent subscribed to agent-room (tier: full)");
+        assert_eq!(
+            result,
+            Some(("my-agent".to_owned(), SubscriptionTier::Full))
+        );
     }
 
     // ── build_payload tests ───────────────────────────────────────────────────
