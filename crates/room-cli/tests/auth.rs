@@ -12,7 +12,7 @@ use room_cli::{
     message::{self, Message},
     oneshot,
 };
-use tokio::io::AsyncBufReadExt;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 
 // ── Token auth tests ──────────────────────────────────────────────────────────
@@ -539,6 +539,137 @@ async fn non_host_admin_cmd_is_rejected() {
         got_kick.is_err(),
         "kick must not execute; alice should not see a kick system message"
     );
+}
+
+// ── Duplicate username tests (P0 gap) ───────────────────────────────────────
+
+/// After a second join attempt is rejected, the first session's token still works.
+#[tokio::test]
+async fn duplicate_join_preserves_original_token() {
+    let broker = TestBroker::start("t_dup_preserves").await;
+    let (_, token) = room_cli::oneshot::join_session(&broker.socket_path, "agent")
+        .await
+        .expect("first join failed");
+
+    // Second join is rejected
+    let err = room_cli::oneshot::join_session(&broker.socket_path, "agent")
+        .await
+        .expect_err("duplicate join should fail");
+    assert!(
+        err.to_string().contains("already in use"),
+        "error should mention 'already in use': {err}"
+    );
+
+    // Original token remains valid — can still send
+    let wire = serde_json::json!({"type": "message", "content": "still alive"}).to_string();
+    let msg = room_cli::oneshot::send_message_with_token(&broker.socket_path, &token, &wire)
+        .await
+        .expect("send with original token should succeed after rejected duplicate");
+    assert!(
+        matches!(&msg, Message::Message { content, .. } if content == "still alive"),
+        "unexpected message: {msg:?}"
+    );
+}
+
+/// Interactive clients allow duplicate usernames (no token-based uniqueness
+/// check). The second "alice" connects successfully and both coexist.
+///
+/// NOTE: This documents current behavior — interactive sessions do not go
+/// through `issue_token()`, so the username_taken guard does not apply.
+/// Only one-shot `JOIN:` (token-issuing) sessions enforce uniqueness.
+#[tokio::test]
+async fn duplicate_interactive_username_coexists() {
+    let broker = TestBroker::start("t_dup_interactive").await;
+
+    let mut alice1 = TestClient::connect(&broker.socket_path, "alice").await;
+    alice1
+        .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "alice"))
+        .await;
+
+    // Second interactive client with the same username succeeds
+    let mut alice2 = TestClient::connect(&broker.socket_path, "alice").await;
+    alice2
+        .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "alice"))
+        .await;
+
+    // Both can send messages
+    alice1.send_text("from alice1").await;
+    alice2.send_text("from alice2").await;
+
+    // alice1 receives alice2's message (and vice versa)
+    let msg = alice1
+        .recv_until(|m| matches!(m, Message::Message { content, .. } if content == "from alice2"))
+        .await;
+    assert!(
+        matches!(&msg, Message::Message { user, content, .. }
+            if user == "alice" && content == "from alice2"),
+        "alice1 should receive alice2's message: {msg:?}"
+    );
+}
+
+/// In daemon mode, a duplicate username join across the SAME room is rejected
+/// and the original token remains valid.
+#[tokio::test]
+async fn daemon_duplicate_join_same_room_rejected() {
+    let td = common::TestDaemon::start(&["dup-room"]).await;
+
+    let token = common::daemon_join(&td.socket_path, "dup-room", "agent").await;
+
+    // Second join for same username in same room should fail
+    let stream = tokio::net::UnixStream::connect(&td.socket_path)
+        .await
+        .unwrap();
+    let (r, mut w) = stream.into_split();
+    w.write_all(b"ROOM:dup-room:JOIN:agent\n").await.unwrap();
+
+    let mut reader = tokio::io::BufReader::new(r);
+    let mut line = String::new();
+    reader.read_line(&mut line).await.unwrap();
+    let v: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+    assert_eq!(
+        v["type"], "error",
+        "duplicate daemon join should return error, got: {v}"
+    );
+    assert_eq!(v["code"], "username_taken");
+
+    // Original token still works
+    let resp = common::daemon_send(
+        &td.socket_path,
+        "dup-room",
+        &token,
+        r#"{"type":"message","content":"still here"}"#,
+    )
+    .await;
+    assert_eq!(resp["type"], "message");
+    assert_eq!(resp["content"], "still here");
+}
+
+/// In daemon mode, a username taken in one room blocks joining ANY room
+/// (tokens are daemon-scoped, not room-scoped).
+#[tokio::test]
+async fn daemon_duplicate_username_cross_room_rejected() {
+    let td = common::TestDaemon::start(&["room-a", "room-b"]).await;
+
+    // Join room-a as "agent"
+    common::daemon_join(&td.socket_path, "room-a", "agent").await;
+
+    // Try joining room-b with the same username — should be rejected
+    // because daemon tokens are system-wide
+    let stream = tokio::net::UnixStream::connect(&td.socket_path)
+        .await
+        .unwrap();
+    let (r, mut w) = stream.into_split();
+    w.write_all(b"ROOM:room-b:JOIN:agent\n").await.unwrap();
+
+    let mut reader = tokio::io::BufReader::new(r);
+    let mut line = String::new();
+    reader.read_line(&mut line).await.unwrap();
+    let v: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+    assert_eq!(
+        v["type"], "error",
+        "cross-room duplicate should return error, got: {v}"
+    );
+    assert_eq!(v["code"], "username_taken");
 }
 
 /// The room host (first interactive user) can execute admin commands.
