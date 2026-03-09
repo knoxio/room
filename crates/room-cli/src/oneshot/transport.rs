@@ -405,6 +405,10 @@ mod tests {
     }
 
     // ── ensure_daemon_running_at ──────────────────────────────────────────────
+    //
+    // WARNING: these two tests spawn real `room` daemon processes.
+    // They are marked #[ignore] so they don't run in normal `cargo test`.
+    // Run explicitly with: `cargo test -p room-cli -- --ignored ensure_daemon`
 
     /// Resolve the `room` binary from the test binary's location.
     /// In cargo test layout: `target/debug/deps/../room` → `target/debug/room`.
@@ -420,17 +424,11 @@ mod tests {
         bin
     }
 
-    /// Global lock that serialises subprocess-spawning tests so they don't
-    /// compete with each other (and with integration tests) for OS process
-    /// start-up resources when the full suite runs in parallel.
-    fn subprocess_lock() -> &'static std::sync::Mutex<()> {
-        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-        LOCK.get_or_init(std::sync::Mutex::default)
-    }
-
+    /// Verify that `ensure_daemon_running_at` is a no-op when a live socket already exists.
+    /// Ignored by default — spawns a real daemon process. Run with `cargo test -- --ignored`.
     #[tokio::test]
+    #[ignore = "spawns a real daemon process; run explicitly with `cargo test -- --ignored`"]
     async fn ensure_daemon_noop_when_socket_connectable() {
-        let _guard = subprocess_lock().lock().unwrap();
         // Start a real daemon at a temp socket, verify ensure_daemon_running_at
         // returns Ok without spawning a second process.
         let dir = tempfile::TempDir::new().unwrap();
@@ -464,9 +462,11 @@ mod tests {
         child.kill().await.ok();
     }
 
+    /// Verify that `ensure_daemon_running_at` auto-starts a daemon when none is running.
+    /// Ignored by default — spawns a real daemon process. Run with `cargo test -- --ignored`.
     #[tokio::test]
+    #[ignore = "spawns a real daemon process; run explicitly with `cargo test -- --ignored`"]
     async fn ensure_daemon_starts_daemon_and_writes_pid() {
-        let _guard = subprocess_lock().lock().unwrap();
         let dir = tempfile::TempDir::new().unwrap();
         let socket = dir.path().join("autostart.sock");
         let exe = room_bin();

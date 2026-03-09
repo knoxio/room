@@ -188,8 +188,6 @@ async fn poll_returns_messages_since_id() {
         .recv_until(|m| matches!(m, Message::Message { content, .. } if content == "msg3"))
         .await;
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
-
     let dir = tempfile::tempdir().unwrap();
     let cursor_path = dir.path().join("test.cursor");
 
@@ -229,7 +227,6 @@ async fn poll_updates_cursor_file() {
     alice
         .recv_until(|m| matches!(m, Message::Message { content, .. } if content == "cursor test"))
         .await;
-    tokio::time::sleep(Duration::from_millis(50)).await;
 
     let dir = tempfile::tempdir().unwrap();
     let cursor_path = dir.path().join("alice.cursor");
@@ -528,9 +525,6 @@ async fn pull_messages_returns_last_n() {
             .await;
     }
 
-    // Give broker time to flush writes
-    tokio::time::sleep(Duration::from_millis(50)).await;
-
     let msgs = room_cli::oneshot::pull_messages(&broker.chat_path, 3, None)
         .await
         .unwrap();
@@ -562,7 +556,6 @@ async fn pull_messages_returns_all_when_fewer_than_n() {
         .recv_until(|m| matches!(m, Message::Message { content, .. } if content == "only message"))
         .await;
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
 
     let msgs = room_cli::oneshot::pull_messages(&broker.chat_path, 100, None)
         .await
@@ -619,7 +612,6 @@ async fn pull_messages_does_not_update_cursor() {
     )
     .await
     .unwrap();
-    tokio::time::sleep(Duration::from_millis(50)).await;
 
     // cmd_poll advances the canonical cursor.
     room_cli::oneshot::cmd_poll(room_id, &token, None, false)
@@ -637,7 +629,6 @@ async fn pull_messages_does_not_update_cursor() {
     )
     .await
     .unwrap();
-    tokio::time::sleep(Duration::from_millis(50)).await;
 
     // cmd_pull must not move the cursor.
     room_cli::oneshot::cmd_pull(room_id, &token, 5)
@@ -704,7 +695,6 @@ async fn pull_messages_filters_dms_for_viewer() {
     bob.recv_until(|m| matches!(m, Message::DirectMessage { content, .. } if content == "secret"))
         .await;
 
-    tokio::time::sleep(Duration::from_millis(50)).await;
 
     // carol (a third party) pulls history — should not see the DM
     let carol_msgs = room_cli::oneshot::pull_messages(&broker.chat_path, 50, Some("carol"))

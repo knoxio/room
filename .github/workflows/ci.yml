@@ -21,6 +21,12 @@ jobs:
         run: cargo clippy -- -D warnings
       - name: Tests
         run: cargo test
+      - name: Smoke tests (ignored)
+        # Runs tests marked #[ignore]: ws_smoke (subprocess + WS/REST) and
+        # ensure_daemon (subprocess auto-start). These spawn real `room` processes
+        # and are fast on Linux CI (~100ms each) but excluded from the normal
+        # `cargo test` run to keep local dev fast.
+        run: cargo test -p room-cli -- --ignored
 
   scripts:
     name: Shell Scripts

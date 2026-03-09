@@ -4,6 +4,18 @@
 /// and connect via WebSocket and REST from outside the process. This validates
 /// the full CLI → broker → transport path that users will exercise.
 ///
+/// # WARNING — do not run in normal `cargo test`
+///
+/// These tests are marked `#[ignore]` because they:
+/// - Spawn real OS processes (slow, flaky under parallel load on encrypted FS)
+/// - Poll for TCP readiness with multi-second timeouts (non-deterministic on CI)
+/// - Leave stale sockets in `$TMPDIR` if killed mid-run
+///
+/// Run them explicitly only when verifying the real binary end-to-end:
+/// ```
+/// cargo test -p room-cli -- --ignored smoke_
+/// ```
+///
 /// Tests are serialized via `SMOKE_LOCK` because spawning 5 broker processes
 /// simultaneously causes disk I/O contention on encrypted volumes, preventing
 /// any of them from starting within a reasonable timeout.
@@ -94,7 +106,10 @@ async fn spawn_broker(room_id: &str) -> (tokio::process::Child, u16) {
 
 // ── REST smoke tests ────────────────────────────────────────────────────────
 
+/// Verify the health endpoint of a real broker process.
+/// Ignored by default — spawns a real OS process. Run with `cargo test -- --ignored`.
 #[tokio::test]
+#[ignore = "spawns real OS processes; run explicitly with `cargo test -- --ignored`"]
 async fn smoke_rest_health() {
     let _guard = SMOKE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let (mut child, port) = spawn_broker("smoke_health").await;
@@ -110,7 +125,10 @@ async fn smoke_rest_health() {
     child.kill().await.ok();
 }
 
+/// Verify REST join → send → poll round-trip against a real broker.
+/// Ignored by default — spawns a real OS process. Run with `cargo test -- --ignored`.
 #[tokio::test]
+#[ignore = "spawns real OS processes; run explicitly with `cargo test -- --ignored`"]
 async fn smoke_rest_join_send_poll() {
     let _guard = SMOKE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let (mut child, port) = spawn_broker("smoke_rsp").await;
@@ -179,7 +197,10 @@ async fn smoke_rest_join_send_poll() {
 
 // ── WebSocket smoke tests ───────────────────────────────────────────────────
 
+/// Verify a real WS interactive session against a live broker process.
+/// Ignored by default — spawns a real OS process. Run with `cargo test -- --ignored`.
 #[tokio::test]
+#[ignore = "spawns real OS processes; run explicitly with `cargo test -- --ignored`"]
 async fn smoke_ws_interactive_session() {
     let _guard = SMOKE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let (mut child, port) = spawn_broker("smoke_wsi").await;
@@ -211,7 +232,10 @@ async fn smoke_ws_interactive_session() {
     child.kill().await.ok();
 }
 
+/// Verify WS one-shot JOIN + TOKEN send against a live broker process.
+/// Ignored by default — spawns a real OS process. Run with `cargo test -- --ignored`.
 #[tokio::test]
+#[ignore = "spawns real OS processes; run explicitly with `cargo test -- --ignored`"]
 async fn smoke_ws_oneshot_join_and_token_send() {
     let _guard = SMOKE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let (mut child, port) = spawn_broker("smoke_wsos").await;
@@ -247,7 +271,10 @@ async fn smoke_ws_oneshot_join_and_token_send() {
     child.kill().await.ok();
 }
 
+/// Verify that a message sent over REST appears on a WS subscriber.
+/// Ignored by default — spawns a real OS process. Run with `cargo test -- --ignored`.
 #[tokio::test]
+#[ignore = "spawns real OS processes; run explicitly with `cargo test -- --ignored`"]
 async fn smoke_ws_and_rest_cross_path() {
     let _guard = SMOKE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let (mut child, port) = spawn_broker("smoke_cross").await;
