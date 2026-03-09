@@ -1,3 +1,8 @@
 [workspace]
 members = ["crates/*"]
 resolver = "2"
+
+[workspace.lints.clippy]
+cognitive_complexity = "warn"
+too_many_lines = "warn"
+too_many_arguments = "warn"
