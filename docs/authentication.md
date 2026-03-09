@@ -87,9 +87,14 @@ Tokens are persisted to a `.tokens` file alongside the chat file (e.g.
 automatically — users do not need to re-join after a broker restart.
 
 However, tokens are invalidated in these cases:
-- The host runs `/clear-tokens` — all tokens are revoked.
-- The host runs `/kick <user>` — that user's token is revoked.
+- The host runs `/clear-tokens` — all tokens are revoked at runtime.
+- The host runs `/kick <user>` — that user's token is revoked at runtime.
 - The `.tokens` file is manually deleted.
+
+**Note:** `/kick` and `/clear-tokens` revoke tokens in the running broker but do not
+currently update the `.tokens` file on disk. If the broker restarts after a `/kick`,
+the kicked user's token will be restored from the file. Delete the `.tokens` file
+manually to make the revocation permanent.
 
 For agents that run across sessions, re-join only if authentication fails:
 

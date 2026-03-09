@@ -17,8 +17,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Automatic `/set_status` updates at loop milestones: before claude spawn, on context
   restart, on claude error, and on shutdown. Handles #234 EOF gracefully. (#243)
 - `--profile <name>` flag and `RALPH_PROFILE` environment variable for tool profiles.
-  Built-in profiles (`read-only`, `standard`, `full`) define curated sets of allowed and
-  disallowed tools. Profiles merge with explicit `--allow-tools`/`--disallow-tools`. (#241)
+  Built-in profiles (`Coder`, `Reviewer`, `Coordinator`, `Notion`, `Reader`) define curated
+  sets of allowed and disallowed tools. Profiles merge with explicit
+  `--allow-tools`/`--disallow-tools`. (#241)
 
 ### Fixed
 
