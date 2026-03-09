@@ -35,6 +35,15 @@ pub fn room_data_dir() -> PathBuf {
     room_home().join("data")
 }
 
+/// Platform-native runtime directory for ephemeral room files (sockets,
+/// PID, meta).
+///
+/// - macOS: `$TMPDIR` (per-user, e.g. `/var/folders/...`)
+/// - Linux: `$XDG_RUNTIME_DIR/room/` or `/tmp/` fallback
+pub fn room_runtime_dir() -> PathBuf {
+    runtime_dir()
+}
+
 /// Platform-native socket path for the multi-room daemon.
 ///
 /// - macOS: `$TMPDIR/roomd.sock`
@@ -304,6 +313,12 @@ mod tests {
             let result = effective_socket_path(None);
             assert_eq!(result, room_socket_path());
         }
+    }
+
+    #[test]
+    fn room_runtime_dir_returns_absolute_path() {
+        let p = room_runtime_dir();
+        assert!(p.is_absolute(), "expected absolute path, got: {p:?}");
     }
 
     #[test]

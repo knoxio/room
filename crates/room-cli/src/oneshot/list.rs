@@ -12,10 +12,11 @@ struct RoomInfo {
     chat_path: Option<String>,
 }
 
-/// Scan `/tmp` for `room-*.sock` files, verify each broker is alive via a
-/// short connect attempt, and print one NDJSON line per active room.
+/// Scan the platform runtime directory for `room-*.sock` files, verify each
+/// broker is alive via a short connect attempt, and print one NDJSON line per
+/// active room.
 pub async fn cmd_list() -> anyhow::Result<()> {
-    let rooms = discover_rooms(Path::new("/tmp")).await?;
+    let rooms = discover_rooms(&crate::paths::room_runtime_dir()).await?;
 
     for info in &rooms {
         println!("{}", serde_json::to_string(info)?);
