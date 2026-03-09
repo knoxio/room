@@ -208,6 +208,36 @@ impl UserRegistry {
     pub fn data_path(&self) -> PathBuf {
         self.data_dir.join(REGISTRY_FILE)
     }
+
+    /// Return `true` if any token is currently associated with `username`.
+    ///
+    /// Used by daemon auth to detect username collisions without scanning the
+    /// entire token map externally.
+    pub fn has_token_for_user(&self, username: &str) -> bool {
+        self.data.tokens.values().any(|u| u == username)
+    }
+
+    /// Register a user if not already registered; no-op if already present.
+    ///
+    /// Unlike [`register_user`], this is idempotent — calling it for an
+    /// existing user does not return an error. Used by daemon auth so that
+    /// users from a previous session (loaded from `users.json`) can rejoin
+    /// without triggering a registration error.
+    pub fn register_user_idempotent(&mut self, username: &str) -> Result<(), String> {
+        if self.data.users.contains_key(username) {
+            return Ok(());
+        }
+        self.register_user(username)?;
+        Ok(())
+    }
+
+    /// Return a snapshot of all current token → username mappings.
+    ///
+    /// Used at daemon startup to seed the in-memory `TokenMap` from persisted
+    /// registry data so existing tokens remain valid without a fresh join.
+    pub fn token_snapshot(&self) -> std::collections::HashMap<String, String> {
+        self.data.tokens.clone()
+    }
 }
 
 #[cfg(test)]
@@ -430,6 +460,50 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let reg = UserRegistry::load(dir.path().to_owned()).unwrap();
         assert!(reg.list_users().is_empty());
+    }
+
+    #[test]
+    fn has_token_for_user_true_when_token_exists() {
+        let (mut reg, _dir) = tmp_registry();
+        reg.register_user("alice").unwrap();
+        reg.issue_token("alice").unwrap();
+        assert!(reg.has_token_for_user("alice"));
+    }
+
+    #[test]
+    fn has_token_for_user_false_when_no_token() {
+        let (mut reg, _dir) = tmp_registry();
+        reg.register_user("alice").unwrap();
+        assert!(!reg.has_token_for_user("alice"));
+    }
+
+    #[test]
+    fn register_user_idempotent_noop_for_existing() {
+        let (mut reg, _dir) = tmp_registry();
+        reg.register_user("alice").unwrap();
+        let token = reg.issue_token("alice").unwrap();
+        // Should not error and should not disturb existing data
+        reg.register_user_idempotent("alice").unwrap();
+        assert_eq!(reg.validate_token(&token), Some("alice"));
+    }
+
+    #[test]
+    fn register_user_idempotent_creates_new_user() {
+        let (mut reg, _dir) = tmp_registry();
+        reg.register_user_idempotent("bob").unwrap();
+        assert!(reg.get_user("bob").is_some());
+    }
+
+    #[test]
+    fn token_snapshot_returns_all_tokens() {
+        let (mut reg, _dir) = tmp_registry();
+        reg.register_user("alice").unwrap();
+        reg.register_user("bob").unwrap();
+        let t1 = reg.issue_token("alice").unwrap();
+        let t2 = reg.issue_token("bob").unwrap();
+        let snap = reg.token_snapshot();
+        assert_eq!(snap.get(&t1).map(String::as_str), Some("alice"));
+        assert_eq!(snap.get(&t2).map(String::as_str), Some("bob"));
     }
 
     #[test]

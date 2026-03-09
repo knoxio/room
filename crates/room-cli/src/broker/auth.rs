@@ -1,9 +1,12 @@
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
 
 use room_protocol::{RoomConfig, RoomVisibility};
-use tokio::{io::AsyncWriteExt, net::unix::OwnedWriteHalf};
+use tokio::{io::AsyncWriteExt, net::unix::OwnedWriteHalf, sync::Mutex};
 use uuid::Uuid;
+
+use crate::registry::UserRegistry;
 
 use super::state::TokenMap;
 
@@ -151,6 +154,84 @@ pub(crate) async fn handle_oneshot_join(
     }
 
     match issue_token(&username, token_map, token_map_path).await {
+        Ok(token) => {
+            let resp = serde_json::json!({"type":"token","token": token,"username": username});
+            write_half.write_all(format!("{resp}\n").as_bytes()).await?;
+        }
+        Err(_) => {
+            let err = serde_json::json!({
+                "type": "error",
+                "code": "username_taken",
+                "username": username
+            });
+            write_half.write_all(format!("{err}\n").as_bytes()).await?;
+        }
+    }
+    Ok(())
+}
+
+// ── Registry-aware auth (daemon mode) ────────────────────────────────────────
+
+/// Issue a token via [`UserRegistry`] for daemon-mode join.
+///
+/// Registers the user idempotently (no-op if they already exist from a previous
+/// session), checks for an active token collision (username already connected),
+/// issues a new token via the registry (persisted to `users.json`), and syncs
+/// the token into the shared in-memory `token_map` so existing per-room
+/// validation code continues to work without changes.
+///
+/// Returns `Err("username_taken:<username>")` if the username already has an
+/// active token, consistent with the error format of [`issue_token`].
+pub(crate) async fn issue_token_via_registry(
+    username: &str,
+    registry: &Arc<Mutex<UserRegistry>>,
+    token_map: &TokenMap,
+) -> Result<String, String> {
+    let mut reg = registry.lock().await;
+
+    // Reject if username already has an active token (concurrent session).
+    if reg.has_token_for_user(username) {
+        return Err(format!("username_taken:{username}"));
+    }
+
+    // Register the user if this is their first session.
+    reg.register_user_idempotent(username)?;
+
+    // Issue token via registry (auto-saves to users.json).
+    let token = reg.issue_token(username)?;
+
+    // Sync into the shared in-memory TokenMap so room-level validate_token works.
+    token_map
+        .lock()
+        .await
+        .insert(token.clone(), username.to_owned());
+
+    Ok(token)
+}
+
+/// Handle a one-shot JOIN request using [`UserRegistry`] for token issuance.
+///
+/// Checks join permission, calls [`issue_token_via_registry`], and writes the
+/// response JSON. Keeps `token_map` in sync for room-level validation.
+pub(crate) async fn handle_oneshot_join_with_registry(
+    username: String,
+    mut write_half: OwnedWriteHalf,
+    registry: &Arc<Mutex<UserRegistry>>,
+    token_map: &TokenMap,
+    config: Option<&RoomConfig>,
+) -> anyhow::Result<()> {
+    if let Err(reason) = check_join_permission(&username, config) {
+        let err = serde_json::json!({
+            "type": "error",
+            "code": "join_denied",
+            "message": reason,
+            "username": username
+        });
+        write_half.write_all(format!("{err}\n").as_bytes()).await?;
+        return Ok(());
+    }
+
+    match issue_token_via_registry(&username, registry, token_map).await {
         Ok(token) => {
             let resp = serde_json::json!({"type":"token","token": token,"username": username});
             write_half.write_all(format!("{resp}\n").as_bytes()).await?;
@@ -478,5 +559,119 @@ mod tests {
         let map2 = Arc::new(Mutex::new(loaded));
         let username = validate_token(&token, &map2).await;
         assert_eq!(username, Some("alice".to_owned()));
+    }
+
+    // ── issue_token_via_registry ──────────────────────────────────────────
+
+    fn make_registry(dir: &std::path::Path) -> Arc<Mutex<UserRegistry>> {
+        Arc::new(Mutex::new(UserRegistry::new(dir.to_owned())))
+    }
+
+    #[tokio::test]
+    async fn registry_issue_token_creates_user_and_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = make_registry(dir.path());
+        let token_map = make_token_map();
+
+        let token = issue_token_via_registry("alice", &registry, &token_map)
+            .await
+            .unwrap();
+        assert!(!token.is_empty());
+
+        // User registered in registry
+        let reg = registry.lock().await;
+        assert!(reg.get_user("alice").is_some());
+        assert_eq!(reg.validate_token(&token), Some("alice"));
+        drop(reg);
+
+        // Token synced into token_map
+        assert_eq!(
+            validate_token(&token, &token_map).await,
+            Some("alice".to_owned())
+        );
+    }
+
+    #[tokio::test]
+    async fn registry_issue_token_username_taken_returns_err() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = make_registry(dir.path());
+        let token_map = make_token_map();
+
+        issue_token_via_registry("alice", &registry, &token_map)
+            .await
+            .unwrap();
+        let second = issue_token_via_registry("alice", &registry, &token_map).await;
+        assert!(second.is_err());
+        assert!(second.unwrap_err().contains("alice"));
+    }
+
+    #[tokio::test]
+    async fn registry_issue_token_persists_to_users_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = make_registry(dir.path());
+        let token_map = make_token_map();
+
+        let token = issue_token_via_registry("alice", &registry, &token_map)
+            .await
+            .unwrap();
+
+        // Load a fresh registry from disk — token should still validate
+        let reloaded = UserRegistry::load(dir.path().to_owned()).unwrap();
+        assert_eq!(reloaded.validate_token(&token), Some("alice"));
+    }
+
+    #[tokio::test]
+    async fn registry_token_seeded_into_token_map_on_startup() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Simulate first session: register user and issue token
+        let token = {
+            let registry = make_registry(dir.path());
+            let token_map = make_token_map();
+            issue_token_via_registry("alice", &registry, &token_map)
+                .await
+                .unwrap()
+        };
+
+        // Simulate restart: load registry, seed token_map from snapshot
+        let reloaded = UserRegistry::load(dir.path().to_owned()).unwrap();
+        let snapshot = reloaded.token_snapshot();
+        let new_token_map: TokenMap = Arc::new(Mutex::new(snapshot));
+
+        // Token from previous session is valid in new token_map
+        assert_eq!(
+            validate_token(&token, &new_token_map).await,
+            Some("alice".to_owned())
+        );
+    }
+
+    #[tokio::test]
+    async fn registry_idempotent_rejoin_after_token_revoke() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = make_registry(dir.path());
+        let token_map = make_token_map();
+
+        // First join
+        let t1 = issue_token_via_registry("alice", &registry, &token_map)
+            .await
+            .unwrap();
+
+        // Simulate reauth: revoke alice's token from registry + token_map
+        {
+            let mut reg = registry.lock().await;
+            reg.revoke_user_tokens("alice").unwrap();
+            drop(reg);
+            token_map.lock().await.retain(|_, u| u != "alice");
+        }
+
+        // Second join — should succeed because token was revoked
+        let t2 = issue_token_via_registry("alice", &registry, &token_map)
+            .await
+            .unwrap();
+        assert_ne!(t1, t2);
+        assert_eq!(
+            validate_token(&t2, &token_map).await,
+            Some("alice".to_owned())
+        );
     }
 }
