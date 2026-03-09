@@ -3,18 +3,13 @@ use std::path::PathBuf;
 use chrono::DateTime;
 use clap::{Parser, Subcommand};
 use room_cli::{
-    broker::{
-        daemon::{is_pid_alive, DaemonConfig, DaemonState},
-        Broker,
-    },
+    broker::daemon::{is_pid_alive, DaemonConfig, DaemonState},
     client::Client,
-    history::default_chat_path,
     message::parse_message_id,
     oneshot::{self, QueryOptions},
     paths,
     query::{has_narrowing_filter, QueryFilter},
 };
-use tokio::net::UnixStream;
 
 #[derive(Subcommand, Debug)]
 enum Cmd {
@@ -612,111 +607,51 @@ async fn run_join(
     room_id: String,
     username: String,
     history_lines: usize,
-    chat_file: Option<PathBuf>,
+    _chat_file: Option<PathBuf>,
     agent: bool,
-    ws_port: Option<u16>,
+    _ws_port: Option<u16>,
 ) -> anyhow::Result<()> {
     paths::ensure_room_dirs().map_err(|e| anyhow::anyhow!("cannot create ~/.room dirs: {e}"))?;
-    let socket_path = paths::room_single_socket_path(&room_id);
-    let meta_path = paths::room_meta_path(&room_id);
 
-    let become_broker = match UnixStream::connect(&socket_path).await {
-        Ok(_) => false,
-        Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => {
-            eprintln!("[room] stale socket detected (ECONNREFUSED), cleaning up");
-            let _ = std::fs::remove_file(&socket_path);
-            true
-        }
+    // All rooms go through the daemon. Auto-start it if not running.
+    room_cli::oneshot::transport::ensure_daemon_running().await?;
+    let daemon_socket = paths::effective_socket_path(None);
+
+    // Create the room on the daemon (ignore "already exists").
+    match room_cli::oneshot::transport::create_room(
+        &daemon_socket,
+        &room_id,
+        r#"{"visibility":"public"}"#,
+    )
+    .await
+    {
+        Ok(_) => eprintln!("[room] created room '{room_id}' on daemon"),
         Err(e) => {
-            eprintln!("[room] no broker found ({e}), becoming broker");
-            true
+            let msg = e.to_string();
+            if msg.contains("already exists") || msg.contains("room_exists") {
+                eprintln!("[room] room '{room_id}' already exists on daemon");
+            } else {
+                return Err(e);
+            }
         }
+    }
+
+    eprintln!("[room] connecting to room '{room_id}' via daemon");
+    let client = Client {
+        socket_path: daemon_socket,
+        room_id,
+        username,
+        agent_mode: agent,
+        history_lines,
+        daemon_mode: true,
     };
+    client.run().await?;
 
-    if become_broker {
-        let resolved_chat_path = resolve_chat_path(&chat_file, &meta_path, &room_id);
-
-        let meta = serde_json::json!({ "chat_path": resolved_chat_path.to_string_lossy() });
-        let _ = std::fs::write(&meta_path, format!("{meta}\n"));
-
-        eprintln!(
-            "[room] starting broker for '{}', chat: {}",
-            room_id,
-            resolved_chat_path.display()
-        );
-
-        let state_dir = paths::room_state_dir();
-        let token_map_path = paths::broker_tokens_path(&state_dir, &room_id);
-        let subscription_map_path = paths::broker_subscriptions_path(&state_dir, &room_id);
-        let broker = Broker::new(
-            &room_id,
-            resolved_chat_path,
-            token_map_path,
-            subscription_map_path,
-            socket_path.clone(),
-            ws_port,
-        );
-
-        tokio::spawn(async move {
-            if let Err(e) = broker.run().await {
-                eprintln!("[broker] fatal: {e:#}");
-            }
-        });
-
-        // Wait until the socket is ready to accept connections
-        for _ in 0..50 {
-            if UnixStream::connect(&socket_path).await.is_ok() {
-                break;
-            }
-            tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
-        }
-
-        let client = Client {
-            socket_path,
-            room_id: room_id.clone(),
-            username,
-            agent_mode: agent,
-            history_lines,
-        };
-        client.run().await?;
-
-        if agent {
-            // In agent mode the broker should keep serving other clients until
-            // a signal arrives.  Without this, the tokio runtime shuts down
-            // immediately and cancels any in-flight spawn_blocking tasks.
-            tokio::signal::ctrl_c().await.ok();
-        }
-        // In TUI mode the user already pressed Ctrl-C to quit — exit
-        // immediately so the shell prompt returns without a second keypress.
-    } else {
-        eprintln!("[room] connecting to existing room '{room_id}'");
-        let client = Client {
-            socket_path,
-            room_id,
-            username,
-            agent_mode: agent,
-            history_lines,
-        };
-        client.run().await?;
+    if agent {
+        tokio::signal::ctrl_c().await.ok();
     }
 
     Ok(())
-}
-
-fn resolve_chat_path(chat_file: &Option<PathBuf>, meta_path: &PathBuf, room_id: &str) -> PathBuf {
-    if let Some(ref p) = chat_file {
-        return p.clone();
-    }
-    if meta_path.exists() {
-        if let Ok(data) = std::fs::read_to_string(meta_path) {
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&data) {
-                if let Some(p) = v["chat_path"].as_str() {
-                    return PathBuf::from(p);
-                }
-            }
-        }
-    }
-    default_chat_path(room_id)
 }
 
 async fn run_daemon(

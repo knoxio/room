@@ -7,7 +7,7 @@ use tokio::{
 
 use crate::{
     message::Message,
-    oneshot::transport::{join_session_target, resolve_socket_target},
+    oneshot::transport::{join_session_target, resolve_socket_target, SocketTarget},
     paths, tui,
 };
 
@@ -17,6 +17,9 @@ pub struct Client {
     pub username: String,
     pub agent_mode: bool,
     pub history_lines: usize,
+    /// When set, the client is connecting through the daemon and must prefix
+    /// the interactive handshake with `ROOM:<room_id>:`.
+    pub daemon_mode: bool,
 }
 
 impl Client {
@@ -28,10 +31,13 @@ impl Client {
         let stream = UnixStream::connect(&self.socket_path).await?;
         let (read_half, mut write_half) = stream.into_split();
 
-        // Handshake: send username
-        write_half
-            .write_all(format!("{}\n", self.username).as_bytes())
-            .await?;
+        // Handshake: send username (with ROOM: prefix for daemon connections).
+        let handshake = if self.daemon_mode {
+            format!("ROOM:{}:{}\n", self.room_id, self.username)
+        } else {
+            format!("{}\n", self.username)
+        };
+        write_half.write_all(handshake.as_bytes()).await?;
 
         let reader = BufReader::new(read_half);
 
@@ -64,9 +70,14 @@ impl Client {
             return;
         }
 
-        // Use resolve_socket_target so that ROOM_SOCKET env and daemon
-        // auto-discovery are consistent with all other oneshot commands.
-        let target = resolve_socket_target(&self.room_id, None);
+        let target = if self.daemon_mode {
+            SocketTarget {
+                path: self.socket_path.clone(),
+                daemon_room: Some(self.room_id.clone()),
+            }
+        } else {
+            resolve_socket_target(&self.room_id, None)
+        };
         match join_session_target(&target, &self.username).await {
             Ok((returned_user, token)) => {
                 let token_data = serde_json::json!({"username": returned_user, "token": token});
