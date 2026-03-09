@@ -4,6 +4,7 @@ pub(crate) mod commands;
 pub mod daemon;
 pub(crate) mod fanout;
 pub(crate) mod handshake;
+pub(crate) mod service;
 pub(crate) mod state;
 pub(crate) mod ws;
 

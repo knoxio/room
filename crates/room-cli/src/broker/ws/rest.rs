@@ -7,15 +7,13 @@ use axum::{
 use serde::Deserialize;
 
 use crate::{
-    history,
     message::{make_dm, make_message, Message},
     query::{has_narrowing_filter, QueryFilter},
 };
 
 use super::super::{
-    auth::{check_join_permission, check_send_permission, issue_token, validate_token},
-    commands::{route_command, CommandResult},
-    fanout::{broadcast_and_persist, dm_and_persist},
+    auth::validate_token,
+    service::{DispatchResult, RoomService},
 };
 use super::{DaemonWsState, WsAppState};
 
@@ -26,6 +24,37 @@ pub(super) fn extract_bearer_token(headers: &HeaderMap) -> Option<&str> {
         .get("authorization")
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.strip_prefix("Bearer "))
+}
+
+/// Convert a `route_and_dispatch` result into an axum HTTP response.
+fn dispatch_to_response(result: anyhow::Result<DispatchResult>) -> axum::response::Response {
+    match result {
+        Ok(DispatchResult::Handled) => {
+            (StatusCode::OK, Json(serde_json::json!({"type":"ok"}))).into_response()
+        }
+        Ok(DispatchResult::Reply(json)) => {
+            let v: serde_json::Value =
+                serde_json::from_str(&json).unwrap_or(serde_json::json!({"reply": json}));
+            (StatusCode::OK, Json(v)).into_response()
+        }
+        Ok(DispatchResult::Shutdown) => {
+            (StatusCode::OK, Json(serde_json::json!({"type":"shutdown"}))).into_response()
+        }
+        Ok(DispatchResult::Sent(seq_msg)) => {
+            let json = serde_json::to_value(&seq_msg).unwrap_or_default();
+            (StatusCode::OK, Json(json)).into_response()
+        }
+        Ok(DispatchResult::SendDenied(reason)) => (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"type":"error","code":"send_denied","message": reason})),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"type":"error","code":"route_error","message": e.to_string()})),
+        )
+            .into_response(),
+    }
 }
 
 // ── Request/query structs ───────────────────────────────────────────────
@@ -148,27 +177,22 @@ pub(super) async fn api_join(
     State(state): State<WsAppState>,
     Json(body): Json<JoinRequest>,
 ) -> impl IntoResponse {
-    if room_id != *state.room_state.room_id {
+    let rs = &*state.room_state;
+    if room_id != rs.room_id() {
         return (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"type":"error","code":"room_not_found"})),
         )
             .into_response();
     }
-    if let Err(reason) = check_join_permission(&body.username, state.room_state.config.as_ref()) {
+    if let Err(reason) = rs.check_join(&body.username) {
         return (
             StatusCode::FORBIDDEN,
             Json(serde_json::json!({"type":"error","code":"join_denied","message": reason})),
         )
             .into_response();
     }
-    match issue_token(
-        &body.username,
-        &state.room_state.token_map,
-        Some(&state.room_state.token_map_path),
-    )
-    .await
-    {
+    match rs.issue_token(&body.username).await {
         Ok(token) => {
             let resp = serde_json::json!({
                 "type":"token","token": token, "username": body.username
@@ -190,7 +214,8 @@ pub(super) async fn api_send(
     headers: HeaderMap,
     Json(body): Json<SendRequest>,
 ) -> impl IntoResponse {
-    if room_id != *state.room_state.room_id {
+    let rs = &*state.room_state;
+    if room_id != rs.room_id() {
         return (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"type":"error","code":"room_not_found"})),
@@ -209,7 +234,7 @@ pub(super) async fn api_send(
         }
     };
 
-    let username = match validate_token(token, &state.room_state.token_map).await {
+    let username = match rs.validate_token(token).await {
         Some(u) => u,
         None => {
             return (
@@ -220,67 +245,13 @@ pub(super) async fn api_send(
         }
     };
 
-    let rs = &state.room_state;
     let msg = if let Some(ref to) = body.to {
-        make_dm(&rs.room_id, &username, to, &body.content)
+        make_dm(rs.room_id(), &username, to, &body.content)
     } else {
-        make_message(&rs.room_id, &username, &body.content)
+        make_message(rs.room_id(), &username, &body.content)
     };
 
-    match route_command(msg, &username, rs).await {
-        Ok(CommandResult::Handled) => {
-            (StatusCode::OK, Json(serde_json::json!({"type":"ok"}))).into_response()
-        }
-        Ok(CommandResult::HandledWithReply(json) | CommandResult::Reply(json)) => {
-            let v: serde_json::Value =
-                serde_json::from_str(&json).unwrap_or(serde_json::json!({"reply": json}));
-            (StatusCode::OK, Json(v)).into_response()
-        }
-        Ok(CommandResult::Shutdown) => {
-            (StatusCode::OK, Json(serde_json::json!({"type":"shutdown"}))).into_response()
-        }
-        Ok(CommandResult::Passthrough(msg)) => {
-            // DM privacy: reject sends from non-participants.
-            if let Err(reason) = check_send_permission(&username, rs.config.as_ref()) {
-                return (
-                    StatusCode::FORBIDDEN,
-                    Json(
-                        serde_json::json!({"type":"error","code":"send_denied","message": reason}),
-                    ),
-                )
-                    .into_response();
-            }
-            let result = match &msg {
-                Message::DirectMessage { .. } => {
-                    dm_and_persist(
-                        &msg,
-                        &rs.host_user,
-                        &rs.clients,
-                        &rs.chat_path,
-                        &rs.seq_counter,
-                    )
-                    .await
-                }
-                _ => broadcast_and_persist(&msg, &rs.clients, &rs.chat_path, &rs.seq_counter).await,
-            };
-            match result {
-                Ok(seq_msg) => {
-                    let json = serde_json::to_value(&seq_msg).unwrap_or_default();
-                    (StatusCode::OK, Json(json)).into_response()
-                }
-                Err(e) => (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({"type":"error","code":"persist_error","message": e.to_string()})),
-                )
-                    .into_response(),
-            }
-        }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"type":"error","code":"route_error","message": e.to_string()})),
-        )
-            .into_response(),
-    }
+    dispatch_to_response(rs.route_and_dispatch(msg, &username).await)
 }
 
 pub(super) async fn api_poll(
@@ -289,7 +260,8 @@ pub(super) async fn api_poll(
     headers: HeaderMap,
     Query(query): Query<PollQuery>,
 ) -> impl IntoResponse {
-    if room_id != *state.room_state.room_id {
+    let rs = &*state.room_state;
+    if room_id != rs.room_id() {
         return (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"type":"error","code":"room_not_found"})),
@@ -308,7 +280,7 @@ pub(super) async fn api_poll(
         }
     };
 
-    let username = match validate_token(token, &state.room_state.token_map).await {
+    let username = match rs.validate_token(token).await {
         Some(u) => u,
         None => {
             return (
@@ -319,9 +291,8 @@ pub(super) async fn api_poll(
         }
     };
 
-    let rs = &state.room_state;
-    let history = history::load(&rs.chat_path).await.unwrap_or_default();
-    let host_name = rs.host_user.lock().await.clone();
+    let history = rs.load_history().await;
+    let host_name = rs.host_name().await;
 
     // Filter messages after the `since` ID (stateless — no server-side cursor).
     let mut found_since = query.since.is_none();
@@ -352,7 +323,8 @@ pub(super) async fn api_query(
     headers: HeaderMap,
     Query(params): Query<QueryParams>,
 ) -> impl IntoResponse {
-    if room_id != *state.room_state.room_id {
+    let rs = &*state.room_state;
+    if room_id != rs.room_id() {
         return (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"type":"error","code":"room_not_found"})),
@@ -371,7 +343,7 @@ pub(super) async fn api_query(
         }
     };
 
-    let username = match validate_token(token, &state.room_state.token_map).await {
+    let username = match rs.validate_token(token).await {
         Some(u) => u,
         None => {
             return (
@@ -397,9 +369,8 @@ pub(super) async fn api_query(
             .into_response();
     }
 
-    let rs = &state.room_state;
-    let history = history::load(&rs.chat_path).await.unwrap_or_default();
-    let host_name = rs.host_user.lock().await.clone();
+    let history = rs.load_history().await;
+    let host_name = rs.host_name().await;
     let messages = apply_query_filter(history, &filter, &room_id, &username, host_name.as_deref());
 
     (
@@ -410,10 +381,11 @@ pub(super) async fn api_query(
 }
 
 pub(super) async fn api_health(State(state): State<WsAppState>) -> impl IntoResponse {
-    let users = state.room_state.status_count().await;
+    let rs = &*state.room_state;
+    let users = RoomService::status_count(rs).await;
     Json(serde_json::json!({
         "status": "ok",
-        "room": *state.room_state.room_id,
+        "room": rs.room_id(),
         "users": users
     }))
 }
@@ -435,14 +407,14 @@ pub(super) async fn daemon_api_join(
                 .into_response();
         }
     };
-    if let Err(reason) = check_join_permission(&body.username, room.config.as_ref()) {
+    if let Err(reason) = room.check_join(&body.username) {
         return (
             StatusCode::FORBIDDEN,
             Json(serde_json::json!({"type":"error","code":"join_denied","message": reason})),
         )
             .into_response();
     }
-    match issue_token(&body.username, &room.token_map, Some(&room.token_map_path)).await {
+    match room.issue_token(&body.username).await {
         Ok(token) => {
             let resp = serde_json::json!({
                 "type":"token","token": token, "username": body.username
@@ -486,7 +458,7 @@ pub(super) async fn daemon_api_send(
         }
     };
 
-    let username = match validate_token(token, &room.token_map).await {
+    let username = match room.validate_token(token).await {
         Some(u) => u,
         None => {
             return (
@@ -498,68 +470,12 @@ pub(super) async fn daemon_api_send(
     };
 
     let msg = if let Some(ref to) = body.to {
-        make_dm(&room.room_id, &username, to, &body.content)
+        make_dm(room.room_id(), &username, to, &body.content)
     } else {
-        make_message(&room.room_id, &username, &body.content)
+        make_message(room.room_id(), &username, &body.content)
     };
 
-    match route_command(msg, &username, &room).await {
-        Ok(CommandResult::Handled) => {
-            (StatusCode::OK, Json(serde_json::json!({"type":"ok"}))).into_response()
-        }
-        Ok(CommandResult::HandledWithReply(json) | CommandResult::Reply(json)) => {
-            let v: serde_json::Value =
-                serde_json::from_str(&json).unwrap_or(serde_json::json!({"reply": json}));
-            (StatusCode::OK, Json(v)).into_response()
-        }
-        Ok(CommandResult::Shutdown) => {
-            (StatusCode::OK, Json(serde_json::json!({"type":"shutdown"}))).into_response()
-        }
-        Ok(CommandResult::Passthrough(msg)) => {
-            // DM privacy: reject sends from non-participants.
-            if let Err(reason) = check_send_permission(&username, room.config.as_ref()) {
-                return (
-                    StatusCode::FORBIDDEN,
-                    Json(
-                        serde_json::json!({"type":"error","code":"send_denied","message": reason}),
-                    ),
-                )
-                    .into_response();
-            }
-            let result = match &msg {
-                Message::DirectMessage { .. } => {
-                    dm_and_persist(
-                        &msg,
-                        &room.host_user,
-                        &room.clients,
-                        &room.chat_path,
-                        &room.seq_counter,
-                    )
-                    .await
-                }
-                _ => {
-                    broadcast_and_persist(&msg, &room.clients, &room.chat_path, &room.seq_counter)
-                        .await
-                }
-            };
-            match result {
-                Ok(seq_msg) => {
-                    let json = serde_json::to_value(&seq_msg).unwrap_or_default();
-                    (StatusCode::OK, Json(json)).into_response()
-                }
-                Err(e) => (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({"type":"error","code":"persist_error","message": e.to_string()})),
-                )
-                    .into_response(),
-            }
-        }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"type":"error","code":"route_error","message": e.to_string()})),
-        )
-            .into_response(),
-    }
+    dispatch_to_response(room.route_and_dispatch(msg, &username).await)
 }
 
 pub(super) async fn daemon_api_poll(
@@ -590,7 +506,7 @@ pub(super) async fn daemon_api_poll(
         }
     };
 
-    let username = match validate_token(token, &room.token_map).await {
+    let username = match room.validate_token(token).await {
         Some(u) => u,
         None => {
             return (
@@ -601,8 +517,8 @@ pub(super) async fn daemon_api_poll(
         }
     };
 
-    let history = history::load(&room.chat_path).await.unwrap_or_default();
-    let host_name = room.host_user.lock().await.clone();
+    let history = room.load_history().await;
+    let host_name = room.host_name().await;
 
     let mut found_since = query.since.is_none();
     let messages: Vec<serde_json::Value> = history
@@ -630,7 +546,7 @@ pub(super) async fn daemon_api_health(State(state): State<DaemonWsState>) -> imp
     let rooms = state.rooms.lock().await;
     let mut room_info = Vec::new();
     for (id, rs) in rooms.iter() {
-        let users = rs.status_count().await;
+        let users = RoomService::status_count(&**rs).await;
         room_info.push(serde_json::json!({
             "room": id,
             "users": users,
@@ -778,7 +694,7 @@ pub(super) async fn daemon_api_query(
         }
     };
 
-    let username = match validate_token(token, &room.token_map).await {
+    let username = match room.validate_token(token).await {
         Some(u) => u,
         None => {
             return (
@@ -804,8 +720,8 @@ pub(super) async fn daemon_api_query(
             .into_response();
     }
 
-    let history = history::load(&room.chat_path).await.unwrap_or_default();
-    let host_name = room.host_user.lock().await.clone();
+    let history = room.load_history().await;
+    let host_name = room.host_name().await;
     let messages = apply_query_filter(history, &filter, &room_id, &username, host_name.as_deref());
 
     (
