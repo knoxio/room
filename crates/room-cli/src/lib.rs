@@ -3,6 +3,7 @@ pub mod client;
 pub mod history;
 pub mod message;
 pub mod oneshot;
+pub mod paths;
 pub mod plugin;
 pub mod query;
 pub mod registry;

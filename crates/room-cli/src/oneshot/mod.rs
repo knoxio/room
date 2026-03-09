@@ -13,8 +13,6 @@ pub use token::{cmd_join, token_file_path, username_from_token, username_from_to
 pub use transport::{join_session, send_message, send_message_with_token};
 pub use who::cmd_who;
 
-use std::path::PathBuf;
-
 use room_protocol::dm_room_id;
 use transport::send_message_with_token as transport_send;
 
@@ -32,7 +30,7 @@ pub async fn cmd_send(
     to: Option<&str>,
     content: &str,
 ) -> anyhow::Result<()> {
-    let socket_path = PathBuf::from(format!("/tmp/room-{room_id}.sock"));
+    let socket_path = crate::paths::room_single_socket_path(room_id);
     let wire = match to {
         Some(recipient) => {
             serde_json::json!({"type": "dm", "to": recipient, "content": content}).to_string()
@@ -72,7 +70,7 @@ pub async fn cmd_dm(recipient: &str, token: &str, content: &str) -> anyhow::Resu
     let wire = serde_json::json!({"type": "dm", "to": recipient, "content": content}).to_string();
 
     // Send via the DM room's socket
-    let socket_path = PathBuf::from(format!("/tmp/room-{dm_id}.sock"));
+    let socket_path = crate::paths::room_single_socket_path(&dm_id);
     let msg = transport_send(&socket_path, token, &wire)
         .await
         .map_err(|e| {

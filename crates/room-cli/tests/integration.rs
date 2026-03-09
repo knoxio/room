@@ -11,6 +11,7 @@ use room_cli::{
     broker::Broker,
     history,
     message::{self, Message},
+    paths,
 };
 use tempfile::TempDir;
 use tokio::{
@@ -49,7 +50,13 @@ impl TestBroker {
         let socket_path = dir.path().join(format!("{room_id}.sock"));
         let chat_path = dir.path().join(format!("{room_id}.chat"));
 
-        let broker = Broker::new(room_id, chat_path.clone(), socket_path.clone(), ws_port);
+        let broker = Broker::new(
+            room_id,
+            chat_path.clone(),
+            chat_path.with_extension("tokens"),
+            socket_path.clone(),
+            ws_port,
+        );
         tokio::spawn(async move {
             broker.run().await.ok();
         });
@@ -451,7 +458,13 @@ async fn pre_existing_history_is_replayed() {
         history::append(&chat_path, m).await.unwrap();
     }
 
-    let broker = Broker::new("pre", chat_path.clone(), socket_path.clone(), None);
+    let broker = Broker::new(
+        "pre",
+        chat_path.clone(),
+        chat_path.with_extension("tokens"),
+        socket_path.clone(),
+        None,
+    );
     tokio::spawn(async move { broker.run().await.ok() });
     for _ in 0..100 {
         if socket_path.exists() {
@@ -492,7 +505,13 @@ async fn stale_socket_is_cleaned_up() {
     assert!(socket_path.exists());
 
     // Broker should remove the stale file and bind
-    let broker = Broker::new("stale", chat_path, socket_path.clone(), None);
+    let broker = Broker::new(
+        "stale",
+        chat_path.clone(),
+        chat_path.with_extension("tokens"),
+        socket_path.clone(),
+        None,
+    );
     tokio::spawn(async move { broker.run().await.ok() });
 
     for _ in 0..100 {
@@ -1151,7 +1170,13 @@ async fn history_replay_filters_dm_for_non_party() {
     let dm = room_cli::message::make_dm("replay_dm", "bob", "carol", "for bob and carol only");
     room_cli::history::append(&chat_path, &dm).await.unwrap();
 
-    let broker = Broker::new("replay_dm", chat_path, socket_path.clone(), None);
+    let broker = Broker::new(
+        "replay_dm",
+        chat_path.clone(),
+        chat_path.with_extension("tokens"),
+        socket_path.clone(),
+        None,
+    );
     tokio::spawn(async move { broker.run().await.ok() });
     for _ in 0..100 {
         if socket_path.exists() {
@@ -1717,7 +1742,8 @@ async fn pull_messages_does_not_update_cursor() {
     let broker = TestBroker::start(room_id).await;
 
     // Write the meta file so cmd_poll / cmd_pull can locate the chat file.
-    let meta_path = PathBuf::from(format!("/tmp/room-{room_id}.meta"));
+    paths::ensure_room_dirs().unwrap();
+    let meta_path = paths::room_meta_path(room_id);
     let meta = serde_json::json!({ "chat_path": broker.chat_path.to_string_lossy() });
     std::fs::write(&meta_path, format!("{meta}\n")).unwrap();
 
@@ -1744,7 +1770,7 @@ async fn pull_messages_does_not_update_cursor() {
         .await
         .unwrap();
 
-    let cursor_path = PathBuf::from(format!("/tmp/room-{room_id}-alice.cursor"));
+    let cursor_path = paths::cursor_path(room_id, "alice");
     let cursor_after_poll = std::fs::read_to_string(&cursor_path).unwrap();
 
     // Send a second message after the cursor.
@@ -1765,7 +1791,7 @@ async fn pull_messages_does_not_update_cursor() {
     let cursor_after_pull = std::fs::read_to_string(&cursor_path).unwrap();
     assert_eq!(
         cursor_after_poll, cursor_after_pull,
-        "cmd_pull must not advance the poll cursor at /tmp/room-{room_id}-alice.cursor"
+        "cmd_pull must not advance the poll cursor"
     );
 
     // Verify poll still returns "second" (cursor was not consumed by pull).
@@ -2649,6 +2675,7 @@ impl TestDaemon {
         let config = DaemonConfig {
             socket_path: socket_path.clone(),
             data_dir: dir.path().to_owned(),
+            state_dir: dir.path().to_owned(),
             ws_port: None,
         };
 

@@ -16,6 +16,7 @@ use std::{
 };
 
 use futures_util::{SinkExt, StreamExt};
+use room_cli::paths;
 use tokio::time::timeout;
 use tokio_tungstenite::{connect_async, tungstenite::Message as TungsteniteMsg};
 
@@ -47,7 +48,10 @@ async fn spawn_broker(room_id: &str) -> (tokio::process::Child, u16) {
     let chat_file = format!("/tmp/ws_smoke_{room_id}.chat");
     let token_file = format!("/tmp/ws_smoke_{room_id}.tokens");
     let socket_path = format!("/tmp/room-{room_id}.sock");
+    // Also clean up the durable broker token map (moved to ~/.room/state/ in #285).
+    let durable_token_map = paths::broker_tokens_path(&paths::room_state_dir(), room_id);
     common::cleanup_stale_files(&[&chat_file, &token_file, &socket_path]);
+    let _ = std::fs::remove_file(&durable_token_map);
 
     let mut child = tokio::process::Command::new(&bin)
         .args([

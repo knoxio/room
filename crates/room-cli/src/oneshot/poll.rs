@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use crate::{history, message::Message, query::QueryFilter};
+use crate::{history, message::Message, paths, query::QueryFilter};
 
 use super::token::{read_cursor, username_from_token, write_cursor};
 
@@ -102,7 +102,7 @@ pub async fn pull_messages(
 /// Does **not** update the poll cursor.
 pub async fn cmd_pull(room_id: &str, token: &str, n: usize) -> anyhow::Result<()> {
     let username = username_from_token(room_id, token)?;
-    let meta_path = PathBuf::from(format!("/tmp/room-{room_id}.meta"));
+    let meta_path = paths::room_meta_path(room_id);
     let chat_path = chat_path_from_meta(room_id, &meta_path);
 
     let messages = pull_messages(&chat_path, n, Some(&username)).await?;
@@ -121,9 +121,9 @@ pub async fn cmd_pull(room_id: &str, token: &str, n: usize) -> anyhow::Result<()
 /// the same message.
 pub async fn cmd_watch(room_id: &str, token: &str, interval_secs: u64) -> anyhow::Result<()> {
     let username = username_from_token(room_id, token)?;
-    let meta_path = PathBuf::from(format!("/tmp/room-{room_id}.meta"));
+    let meta_path = paths::room_meta_path(room_id);
     let chat_path = chat_path_from_meta(room_id, &meta_path);
-    let cursor_path = PathBuf::from(format!("/tmp/room-{room_id}-{username}.cursor"));
+    let cursor_path = paths::cursor_path(room_id, &username);
 
     loop {
         let messages = poll_messages(&chat_path, &cursor_path, Some(&username), None).await?;
@@ -160,9 +160,9 @@ pub async fn cmd_poll(
     mentions_only: bool,
 ) -> anyhow::Result<()> {
     let username = username_from_token(room_id, token)?;
-    let meta_path = PathBuf::from(format!("/tmp/room-{room_id}.meta"));
+    let meta_path = paths::room_meta_path(room_id);
     let chat_path = chat_path_from_meta(room_id, &meta_path);
-    let cursor_path = PathBuf::from(format!("/tmp/room-{room_id}-{username}.cursor"));
+    let cursor_path = paths::cursor_path(room_id, &username);
 
     let messages =
         poll_messages(&chat_path, &cursor_path, Some(&username), since.as_deref()).await?;
@@ -177,7 +177,7 @@ pub async fn cmd_poll(
 
 /// Poll multiple rooms, returning messages merged by timestamp.
 ///
-/// Each room uses its own cursor file (`/tmp/room-{room_id}-{username}.cursor`).
+/// Each room uses its own cursor file under `~/.room/state/`.
 /// Messages are sorted by timestamp across all rooms. Each message already carries
 /// a `room` field, so the caller can distinguish sources.
 pub async fn poll_messages_multi(
@@ -187,7 +187,7 @@ pub async fn poll_messages_multi(
     let mut all_messages: Vec<Message> = Vec::new();
 
     for &(room_id, chat_path) in rooms {
-        let cursor_path = PathBuf::from(format!("/tmp/room-{room_id}-{username}.cursor"));
+        let cursor_path = paths::cursor_path(room_id, username);
         let msgs = poll_messages(chat_path, &cursor_path, Some(username), None).await?;
         all_messages.extend(msgs);
     }
@@ -211,7 +211,7 @@ pub async fn cmd_poll_multi(
     // Resolve chat paths for all rooms
     let mut rooms: Vec<(&str, PathBuf)> = Vec::new();
     for room_id in room_ids {
-        let meta_path = PathBuf::from(format!("/tmp/room-{room_id}.meta"));
+        let meta_path = paths::room_meta_path(room_id);
         let chat_path = chat_path_from_meta(room_id, &meta_path);
         rooms.push((room_id.as_str(), chat_path));
     }
@@ -275,9 +275,9 @@ async fn cmd_query_new(
     loop {
         let messages: Vec<Message> = if room_ids.len() == 1 {
             let room_id = &room_ids[0];
-            let meta_path = PathBuf::from(format!("/tmp/room-{room_id}.meta"));
+            let meta_path = paths::room_meta_path(room_id);
             let chat_path = chat_path_from_meta(room_id, &meta_path);
-            let cursor_path = PathBuf::from(format!("/tmp/room-{room_id}-{username}.cursor"));
+            let cursor_path = paths::cursor_path(room_id, username);
             poll_messages(
                 &chat_path,
                 &cursor_path,
@@ -288,7 +288,7 @@ async fn cmd_query_new(
         } else {
             let mut rooms_info: Vec<(String, PathBuf)> = Vec::new();
             for room_id in room_ids {
-                let meta_path = PathBuf::from(format!("/tmp/room-{room_id}.meta"));
+                let meta_path = paths::room_meta_path(room_id);
                 let chat_path = chat_path_from_meta(room_id, &meta_path);
                 rooms_info.push((room_id.clone(), chat_path));
             }
@@ -344,7 +344,7 @@ async fn cmd_query_history(
     let mut all_messages: Vec<Message> = Vec::new();
 
     for room_id in room_ids {
-        let meta_path = PathBuf::from(format!("/tmp/room-{room_id}.meta"));
+        let meta_path = paths::room_meta_path(room_id);
         let chat_path = chat_path_from_meta(room_id, &meta_path);
         let messages = history::load(&chat_path).await?;
         all_messages.extend(messages);
@@ -603,8 +603,8 @@ mod tests {
         assert_eq!(result[0].room(), &rid_a);
 
         // Clean up cursor files
-        let _ = std::fs::remove_file(format!("/tmp/room-{rid_a}-viewer.cursor"));
-        let _ = std::fs::remove_file(format!("/tmp/room-{rid_b}-viewer.cursor"));
+        let _ = std::fs::remove_file(crate::paths::cursor_path(&rid_a, "viewer"));
+        let _ = std::fs::remove_file(crate::paths::cursor_path(&rid_b, "viewer"));
     }
 
     /// Multi-room poll uses per-room cursors (second call returns nothing).
@@ -639,8 +639,8 @@ mod tests {
         );
 
         // Clean up cursor files
-        let _ = std::fs::remove_file(format!("/tmp/room-{rid_a}-viewer.cursor"));
-        let _ = std::fs::remove_file(format!("/tmp/room-{rid_b}-viewer.cursor"));
+        let _ = std::fs::remove_file(crate::paths::cursor_path(&rid_a, "viewer"));
+        let _ = std::fs::remove_file(crate::paths::cursor_path(&rid_b, "viewer"));
     }
 
     /// Multi-room poll with one empty room still returns messages from the other.
@@ -665,8 +665,8 @@ mod tests {
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].room(), &rid_a);
 
-        let _ = std::fs::remove_file(format!("/tmp/room-{rid_a}-viewer.cursor"));
-        let _ = std::fs::remove_file(format!("/tmp/room-{rid_b}-viewer.cursor"));
+        let _ = std::fs::remove_file(crate::paths::cursor_path(&rid_a, "viewer"));
+        let _ = std::fs::remove_file(crate::paths::cursor_path(&rid_b, "viewer"));
     }
 
     /// Multi-room poll with no rooms returns nothing.
@@ -707,8 +707,8 @@ mod tests {
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].room(), &rid_a);
 
-        let _ = std::fs::remove_file(format!("/tmp/room-{rid_a}-bob.cursor"));
-        let _ = std::fs::remove_file(format!("/tmp/room-{rid_b}-bob.cursor"));
+        let _ = std::fs::remove_file(crate::paths::cursor_path(&rid_a, "bob"));
+        let _ = std::fs::remove_file(crate::paths::cursor_path(&rid_b, "bob"));
     }
 
     // ── cmd_query unit tests ───────────────────────────────────────────────────
@@ -747,7 +747,7 @@ mod tests {
         };
 
         // cursor should NOT advance (historical mode)
-        let cursor_path = PathBuf::from(format!("/tmp/room-{room_id}-alice.cursor"));
+        let cursor_path = crate::paths::cursor_path(&room_id, "alice");
         let _ = std::fs::remove_file(&cursor_path);
 
         // Run cmd_query — captures stdout indirectly by ensuring cursor unchanged.
@@ -761,7 +761,7 @@ mod tests {
             "historical query must not write a cursor file"
         );
 
-        let _ = std::fs::remove_file(format!("/tmp/room-{room_id}.meta"));
+        let _ = std::fs::remove_file(crate::paths::room_meta_path(&room_id));
         let _ = std::fs::remove_file(&token_path(&room_id, "alice"));
     }
 
@@ -814,7 +814,7 @@ mod tests {
             "second query should return nothing (cursor advanced)"
         );
 
-        let _ = std::fs::remove_file(format!("/tmp/room-{room_id}.meta"));
+        let _ = std::fs::remove_file(crate::paths::room_meta_path(&room_id));
         let _ = std::fs::remove_file(&token_path(&room_id, "alice"));
     }
 
@@ -857,7 +857,7 @@ mod tests {
         assert_eq!(result.len(), 1);
         assert!(result[0].content().unwrap().contains("hello"));
 
-        let _ = std::fs::remove_file(format!("/tmp/room-{room_id}.meta"));
+        let _ = std::fs::remove_file(crate::paths::room_meta_path(&room_id));
         let _ = std::fs::remove_file(&token_path(&room_id, "alice"));
     }
 
@@ -900,7 +900,7 @@ mod tests {
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].user(), "bob");
 
-        let _ = std::fs::remove_file(format!("/tmp/room-{room_id}.meta"));
+        let _ = std::fs::remove_file(crate::paths::room_meta_path(&room_id));
         let _ = std::fs::remove_file(&token_path(&room_id, "alice"));
     }
 
@@ -944,14 +944,14 @@ mod tests {
                 .unwrap();
         assert_eq!(result.len(), 2, "limit should restrict to 2 messages");
 
-        let _ = std::fs::remove_file(format!("/tmp/room-{room_id}.meta"));
+        let _ = std::fs::remove_file(crate::paths::room_meta_path(&room_id));
         let _ = std::fs::remove_file(&token_path(&room_id, "alice"));
     }
 
     // ── Test helpers ──────────────────────────────────────────────────────────
 
     fn token_path(room_id: &str, username: &str) -> PathBuf {
-        PathBuf::from(format!("/tmp/room-{room_id}-{username}.token"))
+        crate::paths::token_path(room_id, username)
     }
 
     fn write_token_file(_dir: &TempDir, room_id: &str, username: &str, token: &str) {
@@ -961,7 +961,10 @@ mod tests {
     }
 
     fn write_meta_file(room_id: &str, chat_path: &Path) {
-        let meta_path = PathBuf::from(format!("/tmp/room-{room_id}.meta"));
+        let meta_path = crate::paths::room_meta_path(room_id);
+        if let Some(parent) = meta_path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
         let meta = serde_json::json!({ "chat_path": chat_path.to_string_lossy() });
         std::fs::write(&meta_path, format!("{meta}\n")).unwrap();
     }
@@ -986,7 +989,7 @@ mod tests {
                 super::super::token::username_from_token(id, token)
                     .ok()
                     .map(|u| {
-                        let p = PathBuf::from(format!("/tmp/room-{id}-{u}.cursor"));
+                        let p = crate::paths::cursor_path(id, &u);
                         std::fs::read_to_string(&p).ok()
                     })
                     .flatten()
@@ -1003,7 +1006,7 @@ mod tests {
                 super::super::token::username_from_token(id, token)
                     .ok()
                     .map(|u| {
-                        let p = PathBuf::from(format!("/tmp/room-{id}-{u}.cursor"));
+                        let p = crate::paths::cursor_path(id, &u);
                         std::fs::read_to_string(&p).ok()
                     })
                     .flatten()
@@ -1017,7 +1020,7 @@ mod tests {
             // Historical: reload and reapply filter.
             let mut all: Vec<Message> = Vec::new();
             for room_id in room_ids {
-                let meta_path = PathBuf::from(format!("/tmp/room-{room_id}.meta"));
+                let meta_path = crate::paths::room_meta_path(room_id);
                 let chat_path = chat_path_from_meta(room_id, &meta_path);
                 let msgs = history::load(&chat_path).await?;
                 all.extend(msgs);
@@ -1039,7 +1042,7 @@ mod tests {
             let advanced = cursor_after != cursor_before;
             if advanced {
                 let room_id = &room_ids[0];
-                let meta_path = PathBuf::from(format!("/tmp/room-{room_id}.meta"));
+                let meta_path = crate::paths::room_meta_path(room_id);
                 let chat_path = chat_path_from_meta(room_id, &meta_path);
                 let all = history::load(&chat_path).await?;
                 // Find start from the pre-run cursor UUID.

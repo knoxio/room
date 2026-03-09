@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 use super::transport::send_message_with_token as transport_send;
 use crate::message::Message;
 
@@ -8,7 +6,7 @@ use crate::message::Message;
 /// By default prints just the human-readable content line. With `json = true`,
 /// prints the full JSON response for machine consumption.
 pub async fn cmd_who(room_id: &str, token: &str, json: bool) -> anyhow::Result<()> {
-    let socket_path = PathBuf::from(format!("/tmp/room-{room_id}.sock"));
+    let socket_path = crate::paths::room_single_socket_path(room_id);
     let wire = serde_json::json!({"type": "command", "cmd": "who", "params": []}).to_string();
     let msg = transport_send(&socket_path, token, &wire)
         .await

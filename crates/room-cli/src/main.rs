@@ -11,6 +11,7 @@ use room_cli::{
     history::default_chat_path,
     message::parse_message_id,
     oneshot::{self, QueryOptions},
+    paths,
     query::{has_narrowing_filter, QueryFilter},
 };
 use tokio::net::UnixStream;
@@ -189,16 +190,20 @@ enum Cmd {
     List,
     /// Start a multi-room daemon that manages N rooms in a single process.
     ///
-    /// Listens on a single UDS socket (default: `/tmp/roomd.sock`) and dispatches
-    /// connections to rooms based on the `ROOM:<room_id>:` handshake prefix.
+    /// Listens on a single UDS socket (default: platform-native temp dir) and
+    /// dispatches connections to rooms based on the `ROOM:<room_id>:` handshake prefix.
     /// Rooms can be created dynamically via `room create` or the REST API.
     Daemon {
-        /// Path to the daemon UDS socket
-        #[arg(long, default_value = "/tmp/roomd.sock")]
-        socket: PathBuf,
-        /// Directory for chat files (one per room)
-        #[arg(long, default_value = "/tmp")]
-        data_dir: PathBuf,
+        /// Path to the daemon UDS socket (default: $TMPDIR/roomd.sock on macOS,
+        /// $XDG_RUNTIME_DIR/room/roomd.sock on Linux)
+        #[arg(long)]
+        socket: Option<PathBuf>,
+        /// Directory for chat files (default: ~/.room/data/)
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+        /// Directory for state files — tokens, cursors (default: ~/.room/state/)
+        #[arg(long)]
+        state_dir: Option<PathBuf>,
         /// Enable WebSocket/REST transport on this port
         #[arg(long)]
         ws_port: Option<u16>,
@@ -470,10 +475,18 @@ async fn main() -> anyhow::Result<()> {
         Some(Cmd::Daemon {
             socket,
             data_dir,
+            state_dir,
             ws_port,
             rooms,
         }) => {
-            run_daemon(socket, data_dir, ws_port, rooms).await?;
+            run_daemon(
+                socket.unwrap_or_else(paths::room_socket_path),
+                data_dir.unwrap_or_else(paths::room_data_dir),
+                state_dir.unwrap_or_else(paths::room_state_dir),
+                ws_port,
+                rooms,
+            )
+            .await?;
         }
         None => {
             let room_id = args.room_id.unwrap_or_else(|| {
@@ -507,8 +520,9 @@ async fn run_join(
     agent: bool,
     ws_port: Option<u16>,
 ) -> anyhow::Result<()> {
-    let socket_path = PathBuf::from(format!("/tmp/room-{}.sock", room_id));
-    let meta_path = PathBuf::from(format!("/tmp/room-{}.meta", room_id));
+    paths::ensure_room_dirs().map_err(|e| anyhow::anyhow!("cannot create ~/.room dirs: {e}"))?;
+    let socket_path = paths::room_single_socket_path(&room_id);
+    let meta_path = paths::room_meta_path(&room_id);
 
     let become_broker = match UnixStream::connect(&socket_path).await {
         Ok(_) => false,
@@ -535,7 +549,14 @@ async fn run_join(
             resolved_chat_path.display()
         );
 
-        let broker = Broker::new(&room_id, resolved_chat_path, socket_path.clone(), ws_port);
+        let token_map_path = paths::broker_tokens_path(&paths::room_state_dir(), &room_id);
+        let broker = Broker::new(
+            &room_id,
+            resolved_chat_path,
+            token_map_path,
+            socket_path.clone(),
+            ws_port,
+        );
 
         tokio::spawn(async move {
             if let Err(e) = broker.run().await {
@@ -602,12 +623,15 @@ fn resolve_chat_path(chat_file: &Option<PathBuf>, meta_path: &PathBuf, room_id: 
 async fn run_daemon(
     socket: PathBuf,
     data_dir: PathBuf,
+    state_dir: PathBuf,
     ws_port: Option<u16>,
     rooms: Vec<String>,
 ) -> anyhow::Result<()> {
+    paths::ensure_room_dirs().map_err(|e| anyhow::anyhow!("cannot create ~/.room dirs: {e}"))?;
     let config = DaemonConfig {
         socket_path: socket,
         data_dir,
+        state_dir,
         ws_port,
     };
 

@@ -77,10 +77,14 @@ pub fn validate_room_id(room_id: &str) -> Result<(), String> {
 /// Configuration for the daemon.
 #[derive(Debug, Clone)]
 pub struct DaemonConfig {
-    /// Path to the daemon UDS socket.
+    /// Path to the daemon UDS socket (ephemeral, platform-native temp dir).
     pub socket_path: PathBuf,
     /// Directory for chat files. Each room gets `<data_dir>/<room_id>.chat`.
+    /// Defaults to `~/.room/data/`; overridable with `--data-dir`.
     pub data_dir: PathBuf,
+    /// Directory for state files (token maps, cursors, subscriptions).
+    /// Defaults to `~/.room/state/`.
+    pub state_dir: PathBuf,
     /// Optional WebSocket/REST port.
     pub ws_port: Option<u16>,
 }
@@ -90,13 +94,19 @@ impl DaemonConfig {
     pub fn chat_path(&self, room_id: &str) -> PathBuf {
         self.data_dir.join(format!("{room_id}.chat"))
     }
+
+    /// Resolve the token-map persistence path for a given room.
+    pub fn token_map_path(&self, room_id: &str) -> PathBuf {
+        crate::paths::broker_tokens_path(&self.state_dir, room_id)
+    }
 }
 
 impl Default for DaemonConfig {
     fn default() -> Self {
         Self {
-            socket_path: PathBuf::from("/tmp/roomd.sock"),
-            data_dir: PathBuf::from("/tmp"),
+            socket_path: crate::paths::room_socket_path(),
+            data_dir: crate::paths::room_data_dir(),
+            state_dir: crate::paths::room_state_dir(),
             ws_port: None,
         }
     }
@@ -137,6 +147,7 @@ impl DaemonState {
         }
 
         let chat_path = self.config.chat_path(room_id);
+        let token_map_path = self.config.token_map_path(room_id);
         let (shutdown_tx, _) = watch::channel(false);
 
         let mut registry = PluginRegistry::new();
@@ -147,14 +158,18 @@ impl DaemonState {
             .register(Box::new(plugin::stats::StatsPlugin))
             .map_err(|e| format!("plugin error: {e}"))?;
 
+        // Load persisted tokens from previous session (if any).
+        let persisted_tokens = super::auth::load_token_map(&token_map_path);
+
         let state = Arc::new(RoomState {
             clients: Arc::new(Mutex::new(HashMap::new())),
             status_map: Arc::new(Mutex::new(HashMap::new())),
             host_user: Arc::new(Mutex::new(None)),
-            token_map: Arc::new(Mutex::new(HashMap::new())),
+            token_map: Arc::new(Mutex::new(persisted_tokens)),
             claim_map: Arc::new(Mutex::new(HashMap::new())),
             subscription_map: Arc::new(Mutex::new(HashMap::new())),
             chat_path: Arc::new(chat_path),
+            token_map_path: Arc::new(token_map_path),
             room_id: Arc::new(room_id.to_owned()),
             shutdown: Arc::new(shutdown_tx),
             seq_counter: Arc::new(AtomicU64::new(0)),
@@ -180,6 +195,7 @@ impl DaemonState {
         }
 
         let chat_path = self.config.chat_path(room_id);
+        let token_map_path = self.config.token_map_path(room_id);
         let (shutdown_tx, _) = watch::channel(false);
 
         let mut registry = PluginRegistry::new();
@@ -192,15 +208,17 @@ impl DaemonState {
 
         // Auto-subscribe DM participants at Full tier.
         let initial_subs = build_initial_subscriptions(&config);
+        let persisted_tokens = super::auth::load_token_map(&token_map_path);
 
         let state = Arc::new(RoomState {
             clients: Arc::new(Mutex::new(HashMap::new())),
             status_map: Arc::new(Mutex::new(HashMap::new())),
             host_user: Arc::new(Mutex::new(None)),
-            token_map: Arc::new(Mutex::new(HashMap::new())),
+            token_map: Arc::new(Mutex::new(persisted_tokens)),
             claim_map: Arc::new(Mutex::new(HashMap::new())),
             subscription_map: Arc::new(Mutex::new(initial_subs)),
             chat_path: Arc::new(chat_path),
+            token_map_path: Arc::new(token_map_path),
             room_id: Arc::new(room_id.to_owned()),
             shutdown: Arc::new(shutdown_tx),
             seq_counter: Arc::new(AtomicU64::new(0)),
@@ -414,7 +432,7 @@ async fn dispatch_connection(
             write_half,
             &state.token_map,
             state.config.as_ref(),
-            Some(&state.chat_path),
+            Some(&state.token_map_path),
         )
         .await;
     }
@@ -627,7 +645,7 @@ mod tests {
     #[test]
     fn config_default_socket_path() {
         let config = DaemonConfig::default();
-        assert_eq!(config.socket_path, PathBuf::from("/tmp/roomd.sock"));
+        assert_eq!(config.socket_path, crate::paths::room_socket_path());
     }
 
     // ── create_room_with_config ───────────────────────────────────────────

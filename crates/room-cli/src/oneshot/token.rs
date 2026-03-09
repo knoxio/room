@@ -1,22 +1,26 @@
 use std::path::{Path, PathBuf};
 
 use super::transport::join_session;
+use crate::paths;
 
-/// Returns the canonical token file path: `/tmp/room-<room_id>-<username>.token`.
+/// Returns the canonical token file path for a given room/user pair.
 ///
+/// Resolves to `~/.room/state/room-<room_id>-<username>.token`.
 /// One file per (room, user) pair — multiple agents on the same machine never
 /// overwrite each other's tokens.
 pub fn token_file_path(room_id: &str, username: &str) -> PathBuf {
-    PathBuf::from(format!("/tmp/room-{room_id}-{username}.token"))
+    paths::token_path(room_id, username)
 }
 
 /// One-shot join subcommand: register username, receive token, write token file.
 ///
-/// Writes to `/tmp/room-<room_id>-<username>.token` so agents sharing a machine
-/// do not clobber each other. Subsequent `send`, `poll`, and `watch` calls find
-/// the file automatically (single-agent) or via `--user <username>` (multi-agent).
+/// Writes to `~/.room/state/room-<room_id>-<username>.token` so agents sharing
+/// a machine do not clobber each other. Subsequent `send`, `poll`, and `watch`
+/// calls find the file automatically (single-agent) or via `--user <username>`
+/// (multi-agent).
 pub async fn cmd_join(room_id: &str, username: &str) -> anyhow::Result<()> {
-    let socket_path = PathBuf::from(format!("/tmp/room-{room_id}.sock"));
+    paths::ensure_room_dirs().map_err(|e| anyhow::anyhow!("cannot create ~/.room: {e}"))?;
+    let socket_path = paths::room_single_socket_path(room_id);
     let (returned_user, token) = join_session(&socket_path, username).await?;
     let token_data = serde_json::json!({"username": returned_user, "token": token});
     let token_path = token_file_path(room_id, &returned_user);
@@ -27,15 +31,16 @@ pub async fn cmd_join(room_id: &str, username: &str) -> anyhow::Result<()> {
 
 /// Look up the username associated with `token` by scanning stored token files for `room_id`.
 ///
-/// `room join` writes `/tmp/room-<room_id>-<username>.token` for each session.
+/// `room join` writes `~/.room/state/room-<room_id>-<username>.token` for each session.
 /// This function finds the file whose `token` field matches the given value and
 /// returns the corresponding username. Used by `poll` and `watch` to resolve the
 /// cursor file path without requiring the caller to pass a username explicitly.
 pub fn username_from_token(room_id: &str, token: &str) -> anyhow::Result<String> {
+    let state_dir = paths::room_state_dir();
     let prefix = format!("room-{room_id}-");
     let suffix = ".token";
-    let files: Vec<PathBuf> = std::fs::read_dir("/tmp")
-        .map_err(|e| anyhow::anyhow!("cannot read /tmp: {e}"))?
+    let files: Vec<PathBuf> = std::fs::read_dir(&state_dir)
+        .map_err(|e| anyhow::anyhow!("cannot read {}: {e}", state_dir.display()))?
         .filter_map(|e| e.ok())
         .map(|e| e.path())
         .filter(|p| {
@@ -61,17 +66,18 @@ pub fn username_from_token(room_id: &str, token: &str) -> anyhow::Result<String>
     anyhow::bail!("token not recognised — run: room join {room_id} <username> to get a fresh token")
 }
 
-/// Look up the username associated with `token` by scanning ALL token files in `/tmp`.
+/// Look up the username associated with `token` by scanning ALL token files in the state dir.
 ///
 /// Unlike [`username_from_token`], this does not require a room_id. It scans every
-/// `room-*-*.token` file and returns the username from the first match. Used by
-/// `room dm` where the caller's room_id is unknown (the DM room_id depends on the
+/// `room-*-*.token` file in `~/.room/state/` and returns the username from the first match.
+/// Used by `room dm` where the caller's room_id is unknown (the DM room_id depends on the
 /// caller's username, creating a chicken-and-egg problem).
 pub fn username_from_token_any_room(token: &str) -> anyhow::Result<String> {
+    let state_dir = crate::paths::room_state_dir();
     let prefix = "room-";
     let suffix = ".token";
-    let files: Vec<PathBuf> = std::fs::read_dir("/tmp")
-        .map_err(|e| anyhow::anyhow!("cannot read /tmp: {e}"))?
+    let files: Vec<PathBuf> = std::fs::read_dir(&state_dir)
+        .map_err(|e| anyhow::anyhow!("cannot read {}: {e}", state_dir.display()))?
         .filter_map(|e| e.ok())
         .map(|e| e.path())
         .filter(|p| {
@@ -106,7 +112,12 @@ pub fn read_cursor(cursor_path: &Path) -> Option<String> {
 }
 
 /// Persist the cursor position to disk.
+///
+/// Creates parent directories if they do not exist (e.g. `~/.room/state/` on first run).
 pub fn write_cursor(cursor_path: &Path, id: &str) -> anyhow::Result<()> {
+    if let Some(parent) = cursor_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
     std::fs::write(cursor_path, id)?;
     Ok(())
 }

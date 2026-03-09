@@ -42,6 +42,8 @@ pub(crate) struct RoomState {
     pub(crate) claim_map: ClaimMap,
     pub(crate) subscription_map: SubscriptionMap,
     pub(crate) chat_path: Arc<PathBuf>,
+    /// Path to the persisted token-map file (e.g. `~/.room/state/<room_id>.tokens`).
+    pub(crate) token_map_path: Arc<PathBuf>,
     pub(crate) room_id: Arc<String>,
     /// Set to `true` by the `/exit` admin command to shut down the broker.
     /// Using watch so receivers that check after the fact see `true` immediately

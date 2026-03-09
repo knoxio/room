@@ -557,6 +557,7 @@ mod tests {
 
     fn make_state(chat_path: std::path::PathBuf) -> Arc<RoomState> {
         let (shutdown_tx, _) = watch::channel(false);
+        let token_map_path = chat_path.with_extension("tokens");
         Arc::new(RoomState {
             clients: Arc::new(Mutex::new(HashMap::new())),
             status_map: Arc::new(Mutex::new(HashMap::new())),
@@ -565,6 +566,7 @@ mod tests {
             claim_map: Arc::new(Mutex::new(HashMap::new())),
             subscription_map: Arc::new(Mutex::new(HashMap::new())),
             chat_path: Arc::new(chat_path),
+            token_map_path: Arc::new(token_map_path),
             room_id: Arc::new("test-room".to_owned()),
             shutdown: Arc::new(shutdown_tx),
             seq_counter: Arc::new(AtomicU64::new(0)),
@@ -1131,6 +1133,7 @@ mod tests {
         config: room_protocol::RoomConfig,
     ) -> Arc<RoomState> {
         let (shutdown_tx, _) = watch::channel(false);
+        let token_map_path = chat_path.with_extension("tokens");
         Arc::new(RoomState {
             clients: Arc::new(Mutex::new(HashMap::new())),
             status_map: Arc::new(Mutex::new(HashMap::new())),
@@ -1139,6 +1142,7 @@ mod tests {
             claim_map: Arc::new(Mutex::new(HashMap::new())),
             subscription_map: Arc::new(Mutex::new(HashMap::new())),
             chat_path: Arc::new(chat_path),
+            token_map_path: Arc::new(token_map_path),
             room_id: Arc::new("test-room".to_owned()),
             shutdown: Arc::new(shutdown_tx),
             seq_counter: Arc::new(AtomicU64::new(0)),

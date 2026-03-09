@@ -36,6 +36,8 @@ use tokio::{
 pub struct Broker {
     room_id: String,
     chat_path: PathBuf,
+    /// Path to the persisted token-map file (e.g. `~/.room/state/<room_id>.tokens`).
+    token_map_path: PathBuf,
     socket_path: PathBuf,
     ws_port: Option<u16>,
 }
@@ -44,12 +46,14 @@ impl Broker {
     pub fn new(
         room_id: &str,
         chat_path: PathBuf,
+        token_map_path: PathBuf,
         socket_path: PathBuf,
         ws_port: Option<u16>,
     ) -> Self {
         Self {
             room_id: room_id.to_owned(),
             chat_path,
+            token_map_path,
             socket_path,
             ws_port,
         }
@@ -73,7 +77,7 @@ impl Broker {
         registry.register(Box::new(plugin::stats::StatsPlugin))?;
 
         // Load persisted tokens from a previous broker session (if any).
-        let persisted_tokens = auth::load_token_map(&self.chat_path);
+        let persisted_tokens = auth::load_token_map(&self.token_map_path);
         if !persisted_tokens.is_empty() {
             eprintln!(
                 "[broker] loaded {} persisted token(s)",
@@ -89,6 +93,7 @@ impl Broker {
             claim_map: Arc::new(Mutex::new(HashMap::new())),
             subscription_map: Arc::new(Mutex::new(HashMap::new())),
             chat_path: Arc::new(self.chat_path.clone()),
+            token_map_path: Arc::new(self.token_map_path.clone()),
             room_id: Arc::new(self.room_id.clone()),
             shutdown: Arc::new(shutdown_tx),
             seq_counter: Arc::new(AtomicU64::new(0)),
@@ -187,7 +192,7 @@ async fn handle_client(
             write_half,
             &token_map,
             state.config.as_ref(),
-            Some(&state.chat_path),
+            Some(&state.token_map_path),
         )
         .await;
     }
@@ -572,7 +577,8 @@ mod tests {
             token_map: Arc::new(Mutex::new(HashMap::new())),
             claim_map: Arc::new(Mutex::new(HashMap::new())),
             subscription_map: Arc::new(Mutex::new(HashMap::new())),
-            chat_path: Arc::new(chat_path),
+            chat_path: Arc::new(chat_path.clone()),
+            token_map_path: Arc::new(chat_path.with_extension("tokens")),
             room_id: Arc::new("test-room".to_owned()),
             shutdown: Arc::new(shutdown_tx),
             seq_counter: Arc::new(AtomicU64::new(0)),

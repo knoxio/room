@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use room_protocol::{RoomConfig, RoomVisibility};
 use tokio::{io::AsyncWriteExt, net::unix::OwnedWriteHalf};
@@ -9,13 +9,6 @@ use super::state::TokenMap;
 
 // ── Token persistence ────────────────────────────────────────────────────────
 
-/// Derive the token file path from a chat file path.
-///
-/// Given `/tmp/myroom.chat`, returns `/tmp/myroom.tokens`.
-pub(crate) fn token_file_path(chat_path: &Path) -> PathBuf {
-    chat_path.with_extension("tokens")
-}
-
 /// Write a token map to disk as JSON.
 fn save_token_map(map: &HashMap<String, String>, path: &Path) -> Result<(), String> {
     let json = serde_json::to_string_pretty(&map).map_err(|e| format!("serialize tokens: {e}"))?;
@@ -23,14 +16,18 @@ fn save_token_map(map: &HashMap<String, String>, path: &Path) -> Result<(), Stri
 }
 
 /// Load a token map from disk. Returns an empty map if the file does not exist.
-pub(crate) fn load_token_map(chat_path: &Path) -> HashMap<String, String> {
-    let path = token_file_path(chat_path);
-    let contents = match std::fs::read_to_string(&path) {
+///
+/// `token_map_path` is the `.tokens` file (see [`crate::paths::broker_tokens_path`]).
+pub(crate) fn load_token_map(token_map_path: &Path) -> HashMap<String, String> {
+    let contents = match std::fs::read_to_string(token_map_path) {
         Ok(c) => c,
         Err(_) => return HashMap::new(),
     };
     serde_json::from_str(&contents).unwrap_or_else(|e| {
-        eprintln!("[auth] corrupt token file {}: {e}", path.display());
+        eprintln!(
+            "[auth] corrupt token file {}: {e}",
+            token_map_path.display()
+        );
         HashMap::new()
     })
 }
@@ -96,8 +93,9 @@ pub(crate) fn check_send_permission(
 /// Issue a session token for `username` if the name is not already taken.
 ///
 /// Returns the new token string on success, or an error message on collision.
-/// If `persist_to` is `Some(chat_path)`, the updated token map is saved to
-/// disk alongside the chat file so tokens survive broker restarts.
+/// If `persist_to` is `Some(token_map_path)`, the updated token map is saved to
+/// `token_map_path` so tokens survive broker restarts.
+/// `token_map_path` should be the file returned by [`crate::paths::broker_tokens_path`].
 pub(crate) async fn issue_token(
     username: &str,
     token_map: &TokenMap,
@@ -109,8 +107,8 @@ pub(crate) async fn issue_token(
     }
     let token = Uuid::new_v4().to_string();
     map.insert(token.clone(), username.to_owned());
-    if let Some(chat_path) = persist_to {
-        if let Err(e) = save_token_map(&map, &token_file_path(chat_path)) {
+    if let Some(token_map_path) = persist_to {
+        if let Err(e) = save_token_map(&map, token_map_path) {
             eprintln!("[auth] token persist failed: {e}");
         }
     }
@@ -130,14 +128,15 @@ pub(crate) async fn validate_token(token: &str, token_map: &TokenMap) -> Option<
 ///
 /// Checks join permission against the room config, then calls `issue_token`
 /// and writes the response JSON to the socket. Rejects unauthorized joins
-/// with an error envelope. If `chat_path` is provided, the token map is
+/// with an error envelope. If `token_map_path` is provided, the token map is
 /// persisted to disk after a successful issuance.
+/// `token_map_path` should be the file returned by [`crate::paths::broker_tokens_path`].
 pub(crate) async fn handle_oneshot_join(
     username: String,
     mut write_half: OwnedWriteHalf,
     token_map: &TokenMap,
     config: Option<&RoomConfig>,
-    chat_path: Option<&Path>,
+    token_map_path: Option<&Path>,
 ) -> anyhow::Result<()> {
     // Check visibility/ACL before issuing a token.
     if let Err(reason) = check_join_permission(&username, config) {
@@ -151,7 +150,7 @@ pub(crate) async fn handle_oneshot_join(
         return Ok(());
     }
 
-    match issue_token(&username, token_map, chat_path).await {
+    match issue_token(&username, token_map, token_map_path).await {
         Ok(token) => {
             let resp = serde_json::json!({"type":"token","token": token,"username": username});
             write_half.write_all(format!("{resp}\n").as_bytes()).await?;
@@ -395,80 +394,66 @@ mod tests {
     // ── Token persistence ─────────────────────────────────────────────────
 
     #[test]
-    fn token_file_path_replaces_extension() {
-        let chat = std::path::PathBuf::from("/tmp/myroom.chat");
-        assert_eq!(
-            token_file_path(&chat),
-            std::path::PathBuf::from("/tmp/myroom.tokens")
-        );
-    }
-
-    #[test]
-    fn token_file_path_no_extension() {
-        let chat = std::path::PathBuf::from("/tmp/myroom");
-        assert_eq!(
-            token_file_path(&chat),
-            std::path::PathBuf::from("/tmp/myroom.tokens")
-        );
-    }
-
-    #[test]
     fn load_token_map_missing_file_returns_empty() {
         let dir = tempfile::tempdir().unwrap();
-        let chat = dir.path().join("nonexistent.chat");
-        let map = load_token_map(&chat);
+        let token_map_path = dir.path().join("nonexistent.tokens");
+        let map = load_token_map(&token_map_path);
         assert!(map.is_empty());
     }
 
     #[test]
     fn save_and_load_round_trip() {
         let dir = tempfile::tempdir().unwrap();
-        let chat = dir.path().join("test.chat");
-        let token_path = token_file_path(&chat);
+        let token_map_path = dir.path().join("test.tokens");
 
         let mut original = HashMap::new();
         original.insert("tok-1".to_owned(), "alice".to_owned());
         original.insert("tok-2".to_owned(), "bob".to_owned());
 
-        save_token_map(&original, &token_path).unwrap();
-        let loaded = load_token_map(&chat);
+        save_token_map(&original, &token_map_path).unwrap();
+        let loaded = load_token_map(&token_map_path);
         assert_eq!(loaded, original);
     }
 
     #[test]
     fn load_token_map_corrupt_file_returns_empty() {
         let dir = tempfile::tempdir().unwrap();
-        let chat = dir.path().join("corrupt.chat");
-        let token_path = token_file_path(&chat);
-        std::fs::write(token_path, "not json{{{").unwrap();
+        let token_map_path = dir.path().join("corrupt.tokens");
+        std::fs::write(&token_map_path, "not json{{{").unwrap();
 
-        let map = load_token_map(&chat);
+        let map = load_token_map(&token_map_path);
         assert!(map.is_empty());
     }
 
     #[tokio::test]
     async fn issue_token_persists_to_disk() {
         let dir = tempfile::tempdir().unwrap();
-        let chat = dir.path().join("persist.chat");
+        let token_map_path = dir.path().join("persist.tokens");
 
         let map = make_token_map();
-        let token = issue_token("alice", &map, Some(&chat)).await.unwrap();
+        let token = issue_token("alice", &map, Some(&token_map_path))
+            .await
+            .unwrap();
 
         // Verify the file was written and contains the token
-        let loaded = load_token_map(&chat);
+        let loaded = load_token_map(&token_map_path);
         assert_eq!(loaded.get(&token).map(String::as_str), Some("alice"));
     }
 
     #[tokio::test]
     async fn issue_token_accumulates_on_disk() {
         let dir = tempfile::tempdir().unwrap();
-        let chat = dir.path().join("accum.chat");
+        let token_map_path = dir.path().join("accum.tokens");
 
         let map = make_token_map();
-        let t1 = issue_token("alice", &map, Some(&chat)).await.unwrap();
-        let t2 = issue_token("bob", &map, Some(&chat)).await.unwrap();
+        let t1 = issue_token("alice", &map, Some(&token_map_path))
+            .await
+            .unwrap();
+        let t2 = issue_token("bob", &map, Some(&token_map_path))
+            .await
+            .unwrap();
 
-        let loaded = load_token_map(&chat);
+        let loaded = load_token_map(&token_map_path);
         assert_eq!(loaded.len(), 2);
         assert_eq!(loaded.get(&t1).map(String::as_str), Some("alice"));
         assert_eq!(loaded.get(&t2).map(String::as_str), Some("bob"));
@@ -477,14 +462,16 @@ mod tests {
     #[tokio::test]
     async fn persisted_tokens_survive_new_token_map() {
         let dir = tempfile::tempdir().unwrap();
-        let chat = dir.path().join("survive.chat");
+        let token_map_path = dir.path().join("survive.tokens");
 
         // Issue tokens and persist
         let map1 = make_token_map();
-        let token = issue_token("alice", &map1, Some(&chat)).await.unwrap();
+        let token = issue_token("alice", &map1, Some(&token_map_path))
+            .await
+            .unwrap();
 
         // Simulate restart: new empty token map, load from disk
-        let loaded = load_token_map(&chat);
+        let loaded = load_token_map(&token_map_path);
         assert_eq!(loaded.get(&token).map(String::as_str), Some("alice"));
 
         // Populate a new token map from loaded data
