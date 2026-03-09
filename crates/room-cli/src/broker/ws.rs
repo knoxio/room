@@ -20,6 +20,7 @@ use tokio::sync::{broadcast, Mutex};
 use crate::{
     history,
     message::{make_dm, make_join, make_leave, make_message, parse_client_line, Message},
+    query::QueryFilter,
 };
 
 use super::{
@@ -43,6 +44,7 @@ pub(crate) fn create_router(state: WsAppState) -> Router {
         .route("/api/{room_id}/join", post(api_join))
         .route("/api/{room_id}/send", post(api_send))
         .route("/api/{room_id}/poll", get(api_poll))
+        .route("/api/{room_id}/query", get(api_query))
         .route("/api/health", get(api_health))
         .with_state(state)
 }
@@ -671,6 +673,142 @@ async fn api_poll(
         .into_response()
 }
 
+/// Query parameters for `GET /api/{room_id}/query`.
+///
+/// All fields are optional. Absent fields impose no constraint on that dimension.
+#[derive(Deserialize)]
+struct QueryParams {
+    /// Filter to messages from this user.
+    user: Option<String>,
+    /// Maximum number of messages to return.
+    n: Option<usize>,
+    /// Return only messages with seq strictly greater than this value.
+    since: Option<u64>,
+    /// Return only messages with seq strictly less than this value.
+    before: Option<u64>,
+    /// Substring search on message content (case-sensitive).
+    content: Option<String>,
+    /// Regex search on message content.
+    regex: Option<String>,
+    /// Only include messages that @mention this username.
+    mention: Option<String>,
+    /// If `true`, exclude DirectMessage variants.
+    public: Option<bool>,
+    /// If `true`, return messages oldest-first; otherwise newest-first.
+    asc: Option<bool>,
+    /// ISO-8601 lower bound on message timestamp (exclusive).
+    after_ts: Option<String>,
+    /// ISO-8601 upper bound on message timestamp (exclusive).
+    before_ts: Option<String>,
+}
+
+/// Build a [`QueryFilter`] from REST query params, scoped to `room_id`.
+fn build_query_filter(params: &QueryParams, room_id: &str) -> QueryFilter {
+    QueryFilter {
+        users: params
+            .user
+            .as_ref()
+            .map(|u| vec![u.clone()])
+            .unwrap_or_default(),
+        limit: params.n,
+        after_seq: params.since.map(|seq| (room_id.to_owned(), seq)),
+        before_seq: params.before.map(|seq| (room_id.to_owned(), seq)),
+        content_search: params.content.clone(),
+        content_regex: params.regex.clone(),
+        mention_user: params.mention.clone(),
+        public_only: params.public.unwrap_or(false),
+        ascending: params.asc.unwrap_or(false),
+        after_ts: params.after_ts.as_deref().and_then(|s| s.parse().ok()),
+        before_ts: params.before_ts.as_deref().and_then(|s| s.parse().ok()),
+        ..QueryFilter::default()
+    }
+}
+
+/// Apply a [`QueryFilter`] to a history, enforcing DM privacy.
+///
+/// Returns JSON-serialisable values, limited and ordered per filter settings.
+fn apply_query_filter(
+    history: Vec<Message>,
+    filter: &QueryFilter,
+    room_id: &str,
+    username: &str,
+    is_host: bool,
+) -> Vec<serde_json::Value> {
+    let mut messages: Vec<serde_json::Value> = history
+        .into_iter()
+        .filter(|msg| {
+            // Enforce DM privacy before running QueryFilter.
+            if let Message::DirectMessage { user, to, .. } = msg {
+                if !is_host && user != username && to != username {
+                    return false;
+                }
+            }
+            filter.matches(msg, room_id)
+        })
+        .filter_map(|msg| serde_json::to_value(&msg).ok())
+        .collect();
+
+    if !filter.ascending {
+        messages.reverse();
+    }
+
+    if let Some(limit) = filter.limit {
+        messages.truncate(limit);
+    }
+
+    messages
+}
+
+async fn api_query(
+    Path(room_id): Path<String>,
+    State(state): State<WsAppState>,
+    headers: HeaderMap,
+    Query(params): Query<QueryParams>,
+) -> impl IntoResponse {
+    if room_id != *state.room_state.room_id {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"type":"error","code":"room_not_found"})),
+        )
+            .into_response();
+    }
+
+    let token = match extract_bearer_token(&headers) {
+        Some(t) => t,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"type":"error","code":"missing_token"})),
+            )
+                .into_response()
+        }
+    };
+
+    let username = match validate_token(token, &state.room_state.token_map).await {
+        Some(u) => u,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"type":"error","code":"invalid_token"})),
+            )
+                .into_response()
+        }
+    };
+
+    let filter = build_query_filter(&params, &room_id);
+    let rs = &state.room_state;
+    let history = history::load(&rs.chat_path).await.unwrap_or_default();
+    let host_name = rs.host_user.lock().await.clone();
+    let is_host = host_name.as_deref() == Some(username.as_str());
+    let messages = apply_query_filter(history, &filter, &room_id, &username, is_host);
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "messages": messages })),
+    )
+        .into_response()
+}
+
 async fn api_health(State(state): State<WsAppState>) -> impl IntoResponse {
     let users = state.room_state.status_map.lock().await.len();
     Json(serde_json::json!({
@@ -703,6 +841,7 @@ pub(crate) fn create_daemon_router(state: DaemonWsState) -> Router {
         .route("/api/{room_id}/join", post(daemon_api_join))
         .route("/api/{room_id}/send", post(daemon_api_send))
         .route("/api/{room_id}/poll", get(daemon_api_poll))
+        .route("/api/{room_id}/query", get(daemon_api_query))
         .route("/api/health", get(daemon_api_health))
         .route("/api/rooms", get(daemon_api_rooms))
         .with_state(state)
@@ -972,4 +1111,56 @@ async fn daemon_api_rooms(State(state): State<DaemonWsState>) -> impl IntoRespon
     Json(serde_json::json!({
         "rooms": ids,
     }))
+}
+
+async fn daemon_api_query(
+    Path(room_id): Path<String>,
+    State(state): State<DaemonWsState>,
+    headers: HeaderMap,
+    Query(params): Query<QueryParams>,
+) -> impl IntoResponse {
+    let room = match state.get_room(&room_id).await {
+        Some(r) => r,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"type":"error","code":"room_not_found"})),
+            )
+                .into_response();
+        }
+    };
+
+    let token = match extract_bearer_token(&headers) {
+        Some(t) => t,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"type":"error","code":"missing_token"})),
+            )
+                .into_response()
+        }
+    };
+
+    let username = match validate_token(token, &room.token_map).await {
+        Some(u) => u,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"type":"error","code":"invalid_token"})),
+            )
+                .into_response()
+        }
+    };
+
+    let filter = build_query_filter(&params, &room_id);
+    let history = history::load(&room.chat_path).await.unwrap_or_default();
+    let host_name = room.host_user.lock().await.clone();
+    let is_host = host_name.as_deref() == Some(username.as_str());
+    let messages = apply_query_filter(history, &filter, &room_id, &username, is_host);
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "messages": messages })),
+    )
+        .into_response()
 }
