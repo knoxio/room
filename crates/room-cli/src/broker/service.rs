@@ -9,6 +9,8 @@
 
 use crate::message::Message;
 
+use room_protocol::SubscriptionTier;
+
 use super::{
     auth::{check_join_permission, check_send_permission, issue_token, validate_token},
     commands::{route_command, CommandResult},
@@ -89,7 +91,12 @@ impl RoomService for RoomState {
     }
 
     async fn issue_token(&self, username: &str) -> Result<String, String> {
-        issue_token(username, &self.token_map, Some(&self.token_map_path)).await
+        let token = issue_token(username, &self.token_map, Some(&self.token_map_path)).await?;
+        self.subscription_map
+            .lock()
+            .await
+            .insert(username.to_owned(), SubscriptionTier::Full);
+        Ok(token)
     }
 
     fn check_join(&self, username: &str) -> Result<(), String> {
@@ -214,6 +221,20 @@ mod tests {
         let state = make_state(tmp.path().to_path_buf());
         state.issue_token("alice").await.unwrap();
         assert!(state.issue_token("alice").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn issue_token_sets_full_subscription() {
+        use room_protocol::SubscriptionTier;
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+        state.issue_token("alice").await.unwrap();
+        let tier = state.subscription_map.lock().await.get("alice").copied();
+        assert_eq!(
+            tier,
+            Some(SubscriptionTier::Full),
+            "REST join must set Full so auto_subscribe_mentioned cannot downgrade"
+        );
     }
 
     #[tokio::test]
