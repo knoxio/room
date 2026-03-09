@@ -194,6 +194,16 @@ pub async fn run(
     let mut result: anyhow::Result<()> = Ok(());
     let mut frame_count: usize = 0;
 
+    // Seed for generative bot faces — fixed per session so the splash is stable.
+    let splash_seed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| {
+            d.as_secs()
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(d.subsec_nanos() as u64)
+        })
+        .unwrap_or(0xdeadbeef_cafebabe);
+
     // Seed online_users immediately so @mention autocomplete works for users
     // who were already connected before we joined.
     let who_payload = build_payload("/who");
@@ -365,7 +375,7 @@ pub async fn run(
 
             if !has_chat {
                 let splash_width = msg_chunk.width.saturating_sub(2) as usize;
-                let splash = welcome_splash(frame_count, splash_width);
+                let splash = welcome_splash(frame_count, splash_width, splash_seed);
                 let splash_widget = Paragraph::new(splash)
                     .block(
                         Block::default()
