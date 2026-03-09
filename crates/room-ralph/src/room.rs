@@ -55,7 +55,17 @@ pub fn join_room(
         }
     }
 
-    // Retry with numeric suffixes
+    // Retry with numeric suffixes, then fall back to cached token
+    retry_with_suffix(room_id, username, socket)
+}
+
+/// Try joining with suffixed usernames (`user-2`, `user-3`, ...). Falls back to
+/// the cached token file if all suffixed attempts are exhausted.
+fn retry_with_suffix(
+    room_id: &str,
+    username: &str,
+    socket: Option<&str>,
+) -> Result<JoinResult, String> {
     for i in 2..=MAX_USERNAME_RETRIES + 1 {
         let suffixed = format!("{username}-{i}");
         match try_join(room_id, &suffixed, socket) {
