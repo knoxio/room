@@ -46,7 +46,7 @@ pub(crate) fn load_subscription_map(path: &Path) -> HashMap<String, Subscription
 /// because the file is tiny (a few KB at most) and consistency matters more
 /// than shaving microseconds.
 pub(crate) async fn persist_subscriptions(state: &RoomState) {
-    let snapshot = state.subscription_map.lock().await.clone();
+    let snapshot = state.subscription_snapshot().await;
     if let Err(e) = save_subscription_map(&snapshot, &state.subscription_map_path) {
         eprintln!("[broker] subscription persist failed: {e}");
     }
@@ -106,11 +106,7 @@ pub(crate) async fn route_command(
 
         if cmd == "set_status" {
             let status = params.first().cloned().unwrap_or_default();
-            state
-                .status_map
-                .lock()
-                .await
-                .insert(username.to_owned(), status.clone());
+            state.set_status(username, status.clone()).await;
             let display = if status.is_empty() {
                 format!("{username} cleared their status")
             } else {
@@ -127,19 +123,12 @@ pub(crate) async fn route_command(
         }
 
         if cmd == "who" {
-            let map = state.status_map.lock().await;
-            let mut entries: Vec<String> = map
-                .iter()
-                .map(|(u, s)| {
-                    if s.is_empty() {
-                        u.clone()
-                    } else {
-                        format!("{u}: {s}")
-                    }
-                })
+            let entries: Vec<String> = state
+                .status_entries()
+                .await
+                .into_iter()
+                .map(|(u, s)| if s.is_empty() { u } else { format!("{u}: {s}") })
                 .collect();
-            entries.sort();
-            drop(map);
             let content = if entries.is_empty() {
                 "no users online".to_owned()
             } else {
@@ -153,11 +142,7 @@ pub(crate) async fn route_command(
         // Task claim commands.
         if cmd == "claim" {
             let task = params.join(" ");
-            state
-                .claim_map
-                .lock()
-                .await
-                .insert(username.to_owned(), task.clone());
+            state.set_claim(username, task.clone()).await;
             let display = format!("{username} claimed: {task}");
             let sys = make_system(&state.room_id, "broker", display);
             broadcast_and_persist(&sys, &state.clients, &state.chat_path, &state.seq_counter)
@@ -167,7 +152,7 @@ pub(crate) async fn route_command(
         }
 
         if cmd == "unclaim" {
-            let removed = state.claim_map.lock().await.remove(username);
+            let removed = state.remove_claim(username).await;
             let display = match removed {
                 Some(task) => format!("{username} released claim: {task}"),
                 None => format!("{username} has no active claim"),
@@ -180,18 +165,14 @@ pub(crate) async fn route_command(
         }
 
         if cmd == "claimed" {
-            let map = state.claim_map.lock().await;
-            let content = if map.is_empty() {
+            let raw = state.claim_entries().await;
+            let content = if raw.is_empty() {
                 "no active claims".to_owned()
             } else {
-                let mut entries: Vec<String> = map
-                    .iter()
-                    .map(|(user, task)| format!("{user}: {task}"))
-                    .collect();
-                entries.sort();
+                let entries: Vec<String> =
+                    raw.into_iter().map(|(u, t)| format!("{u}: {t}")).collect();
                 format!("claimed — {}", entries.join(", "))
             };
-            drop(map);
             let sys = make_system(&state.room_id, "broker", content);
             let json = serde_json::to_string(&sys)?;
             return Ok(CommandResult::Reply(json));
@@ -208,11 +189,7 @@ pub(crate) async fn route_command(
                     return Ok(CommandResult::Reply(json));
                 }
             };
-            state
-                .subscription_map
-                .lock()
-                .await
-                .insert(username.to_owned(), tier);
+            state.set_subscription(username, tier).await;
             persist_subscriptions(state).await;
             let display = format!("{username} subscribed to {} (tier: {tier})", state.room_id);
             let sys = make_system(&state.room_id, "broker", display);
@@ -224,10 +201,8 @@ pub(crate) async fn route_command(
 
         if cmd == "unsubscribe" {
             state
-                .subscription_map
-                .lock()
-                .await
-                .insert(username.to_owned(), SubscriptionTier::Unsubscribed);
+                .set_subscription(username, SubscriptionTier::Unsubscribed)
+                .await;
             persist_subscriptions(state).await;
             let display = format!("{username} unsubscribed from {}", state.room_id);
             let sys = make_system(&state.room_id, "broker", display);
@@ -238,18 +213,14 @@ pub(crate) async fn route_command(
         }
 
         if cmd == "subscriptions" {
-            let map = state.subscription_map.lock().await;
-            let content = if map.is_empty() {
+            let raw = state.subscription_entries().await;
+            let content = if raw.is_empty() {
                 "no subscriptions".to_owned()
             } else {
-                let mut entries: Vec<String> = map
-                    .iter()
-                    .map(|(user, tier)| format!("{user}: {tier}"))
-                    .collect();
-                entries.sort();
+                let entries: Vec<String> =
+                    raw.into_iter().map(|(u, t)| format!("{u}: {t}")).collect();
                 format!("subscriptions — {}", entries.join(", "))
             };
-            drop(map);
             let sys = make_system(&state.room_id, "broker", content);
             let json = serde_json::to_string(&sys)?;
             return Ok(CommandResult::Reply(json));
@@ -465,7 +436,6 @@ pub(crate) async fn handle_admin_cmd(
     let room_id = state.room_id.as_str();
     let clients = &state.clients;
     let token_map = &state.token_map;
-    let status_map = &state.status_map;
     let chat_path = &state.chat_path;
     let shutdown = &state.shutdown;
     let seq_counter = &state.seq_counter;
@@ -487,7 +457,7 @@ pub(crate) async fn handle_admin_cmd(
             map.insert(format!("KICKED:{target}"), target.clone());
             drop(map);
             // Remove from status map immediately so /who no longer shows the kicked user.
-            status_map.lock().await.remove(&target);
+            state.remove_status(&target).await;
             let content = format!("{issuer} kicked {target} (token invalidated)");
             let msg = make_system(room_id, "broker", content);
             let _ = broadcast_and_persist(&msg, clients, chat_path, seq_counter).await;
@@ -562,8 +532,8 @@ pub(crate) async fn handle_admin_cmd(
 
 /// Handle `/room-info` — display room visibility, config, and member count.
 async fn handle_room_info(state: &RoomState) -> String {
-    let member_count = state.status_map.lock().await.len();
-    let sub_count = state.subscription_map.lock().await.len();
+    let member_count = state.status_count().await;
+    let sub_count = state.subscription_count().await;
     match &state.config {
         Some(config) => {
             let vis = serde_json::to_string(&config.visibility).unwrap_or_default();
@@ -596,33 +566,23 @@ mod tests {
         message::{make_command, make_dm, make_message},
     };
     use room_protocol::SubscriptionTier;
-    use std::{
-        collections::HashMap,
-        sync::{atomic::AtomicU64, Arc},
-    };
+    use std::{collections::HashMap, sync::Arc};
     use tempfile::NamedTempFile;
-    use tokio::sync::{watch, Mutex};
+    use tokio::sync::Mutex;
 
     fn make_state(chat_path: std::path::PathBuf) -> Arc<RoomState> {
-        let (shutdown_tx, _) = watch::channel(false);
         let token_map_path = chat_path.with_extension("tokens");
         let subscription_map_path = chat_path.with_extension("subscriptions");
-        Arc::new(RoomState {
-            clients: Arc::new(Mutex::new(HashMap::new())),
-            status_map: Arc::new(Mutex::new(HashMap::new())),
-            host_user: Arc::new(Mutex::new(None)),
-            token_map: Arc::new(Mutex::new(HashMap::new())),
-            claim_map: Arc::new(Mutex::new(HashMap::new())),
-            subscription_map: Arc::new(Mutex::new(HashMap::new())),
-            chat_path: Arc::new(chat_path),
-            token_map_path: Arc::new(token_map_path),
-            subscription_map_path: Arc::new(subscription_map_path),
-            room_id: Arc::new("test-room".to_owned()),
-            shutdown: Arc::new(shutdown_tx),
-            seq_counter: Arc::new(AtomicU64::new(0)),
-            plugin_registry: Arc::new(crate::plugin::PluginRegistry::new()),
-            config: None,
-        })
+        RoomState::new(
+            "test-room".to_owned(),
+            chat_path,
+            token_map_path,
+            subscription_map_path,
+            Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(Mutex::new(HashMap::new())),
+            None,
+        )
+        .unwrap()
     }
 
     // ── route_command: passthrough ─────────────────────────────────────────
@@ -1182,25 +1142,18 @@ mod tests {
         chat_path: std::path::PathBuf,
         config: room_protocol::RoomConfig,
     ) -> Arc<RoomState> {
-        let (shutdown_tx, _) = watch::channel(false);
         let token_map_path = chat_path.with_extension("tokens");
         let subscription_map_path = chat_path.with_extension("subscriptions");
-        Arc::new(RoomState {
-            clients: Arc::new(Mutex::new(HashMap::new())),
-            status_map: Arc::new(Mutex::new(HashMap::new())),
-            host_user: Arc::new(Mutex::new(None)),
-            token_map: Arc::new(Mutex::new(HashMap::new())),
-            claim_map: Arc::new(Mutex::new(HashMap::new())),
-            subscription_map: Arc::new(Mutex::new(HashMap::new())),
-            chat_path: Arc::new(chat_path),
-            token_map_path: Arc::new(token_map_path),
-            subscription_map_path: Arc::new(subscription_map_path),
-            room_id: Arc::new("test-room".to_owned()),
-            shutdown: Arc::new(shutdown_tx),
-            seq_counter: Arc::new(AtomicU64::new(0)),
-            plugin_registry: Arc::new(crate::plugin::PluginRegistry::new()),
-            config: Some(config),
-        })
+        RoomState::new(
+            "test-room".to_owned(),
+            chat_path,
+            token_map_path,
+            subscription_map_path,
+            Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(Mutex::new(HashMap::new())),
+            Some(config),
+        )
+        .unwrap()
     }
 
     #[tokio::test]
@@ -1620,25 +1573,16 @@ mod tests {
         assert_eq!(loaded.get("alice"), Some(&SubscriptionTier::Full));
 
         // Verify it can be populated into a new RoomState.
-        let state2 = {
-            let (shutdown_tx, _) = watch::channel(false);
-            Arc::new(RoomState {
-                clients: Arc::new(Mutex::new(HashMap::new())),
-                status_map: Arc::new(Mutex::new(HashMap::new())),
-                host_user: Arc::new(Mutex::new(None)),
-                token_map: Arc::new(Mutex::new(HashMap::new())),
-                claim_map: Arc::new(Mutex::new(HashMap::new())),
-                subscription_map: Arc::new(Mutex::new(loaded)),
-                chat_path: state.chat_path.clone(),
-                token_map_path: state.token_map_path.clone(),
-                subscription_map_path: state.subscription_map_path.clone(),
-                room_id: state.room_id.clone(),
-                shutdown: Arc::new(shutdown_tx),
-                seq_counter: Arc::new(AtomicU64::new(0)),
-                plugin_registry: Arc::new(crate::plugin::PluginRegistry::new()),
-                config: None,
-            })
-        };
+        let state2 = RoomState::new(
+            state.room_id.as_ref().clone(),
+            state.chat_path.as_ref().clone(),
+            state.token_map_path.as_ref().clone(),
+            state.subscription_map_path.as_ref().clone(),
+            Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(Mutex::new(loaded)),
+            None,
+        )
+        .unwrap();
         assert_eq!(
             *state2.subscription_map.lock().await.get("alice").unwrap(),
             SubscriptionTier::Full
