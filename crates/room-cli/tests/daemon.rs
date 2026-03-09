@@ -7,7 +7,8 @@ mod common;
 use std::time::Duration;
 
 use common::{
-    daemon_connect, daemon_join, daemon_send, ws_connect, TestBroker, TestClient, TestDaemon,
+    daemon_connect, daemon_create, daemon_join, daemon_send, ws_connect, TestBroker, TestClient,
+    TestDaemon,
 };
 use futures_util::{SinkExt, StreamExt};
 use room_cli::message::Message;
@@ -319,6 +320,71 @@ async fn ws_dm_room_non_participant_join_rejected() {
             // Timeout or other — eve was not allowed in either way.
         }
     }
+}
+
+// ── P0: concurrent room creation race ────────────────────────────────────────
+
+/// Two simultaneous CREATE requests for the same room ID must be handled
+/// cleanly: exactly one must succeed with `room_created` and the other must
+/// fail with `room_exists`. The room must be functional afterwards.
+///
+/// Regression: without proper deduplication, both requests could race past the
+/// existence check and produce two `room_created` responses (and two broker
+/// goroutines for the same room).
+#[tokio::test]
+async fn daemon_concurrent_room_creation_deduplicates() {
+    let td = TestDaemon::start(&[]).await;
+    let socket1 = td.socket_path.clone();
+    let socket2 = td.socket_path.clone();
+
+    // Fire two concurrent CREATE requests for the same room ID.
+    let t1 = tokio::spawn(async move {
+        daemon_create(&socket1, "race-room", r#"{"visibility":"public"}"#).await
+    });
+    let t2 = tokio::spawn(async move {
+        daemon_create(&socket2, "race-room", r#"{"visibility":"public"}"#).await
+    });
+
+    let (r1, r2) = tokio::join!(t1, t2);
+    let resp1 = r1.expect("task 1 panicked");
+    let resp2 = r2.expect("task 2 panicked");
+
+    let responses = [&resp1, &resp2];
+
+    // Neither response should be an internal/unexpected error.
+    for r in &responses {
+        assert_ne!(
+            r["code"], "internal",
+            "unexpected internal error in concurrent create: {r}"
+        );
+    }
+
+    let created_count = responses
+        .iter()
+        .filter(|r| r["type"] == "room_created")
+        .count();
+    let exists_count = responses
+        .iter()
+        .filter(|r| r["type"] == "error" && r["code"] == "room_exists")
+        .count();
+
+    assert_eq!(
+        created_count, 1,
+        "exactly one concurrent create must succeed (got {:?} and {:?})",
+        resp1, resp2
+    );
+    assert_eq!(
+        exists_count, 1,
+        "exactly one must get room_exists error (got {:?} and {:?})",
+        resp1, resp2
+    );
+
+    // The created room must accept joins and sends.
+    let token = daemon_join(&td.socket_path, "race-room", "alice").await;
+    assert!(!token.is_empty(), "created room must accept joins");
+    let send_resp = daemon_send(&td.socket_path, "race-room", &token, "sanity check").await;
+    assert_eq!(send_resp["type"], "message");
+    assert_eq!(send_resp["room"], "race-room");
 }
 
 /// REST POST /api/{room}/send as a DM participant succeeds.
