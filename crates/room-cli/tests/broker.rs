@@ -772,3 +772,185 @@ async fn history_without_seq_parses_as_none() {
         );
     }
 }
+
+// ── P0: host disconnect / reconnect ──────────────────────────────────────────
+
+/// The original room host retains admin privileges after disconnecting and
+/// reconnecting. A second user who joins while the host is offline must NOT
+/// inherit the host role.
+///
+/// Regression: if host_user were cleared on disconnect, bob would become host
+/// on his arrival and alice's reconnect would be treated as a regular user.
+#[tokio::test]
+async fn host_retains_admin_privileges_after_reconnect() {
+    let broker = TestBroker::start("t_host_reconnect_admin").await;
+
+    // alice connects first → she becomes the host
+    let mut alice = TestClient::connect(&broker.socket_path, "alice").await;
+    alice
+        .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "alice"))
+        .await;
+
+    let mut bob = TestClient::connect(&broker.socket_path, "bob").await;
+    alice
+        .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "bob"))
+        .await;
+    bob.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "bob"))
+        .await;
+
+    // alice disconnects — host_user stays "alice" in broker state
+    drop(alice);
+    bob.recv_until(|m| matches!(m, Message::Leave { user, .. } if user == "alice"))
+        .await;
+
+    // alice reconnects — host_user is still "alice"; bob never became host
+    let mut alice = TestClient::connect(&broker.socket_path, "alice").await;
+    alice
+        .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "alice"))
+        .await;
+    bob.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "alice"))
+        .await;
+
+    // alice issues /clear — should succeed and broadcast "cleared chat history"
+    alice
+        .send_json(r#"{"type":"command","cmd":"clear","params":[]}"#)
+        .await;
+    alice
+        .recv_until(
+            |m| matches!(m, Message::System { content, .. } if content.contains("cleared chat history")),
+        )
+        .await;
+    bob.recv_until(
+        |m| matches!(m, Message::System { content, .. } if content.contains("cleared chat history")),
+    )
+    .await;
+
+    // bob tries /clear — must receive permission denied (privately, not broadcast)
+    bob.send_json(r#"{"type":"command","cmd":"clear","params":[]}"#)
+        .await;
+    let denied = bob
+        .recv_until(
+            |m| matches!(m, Message::System { content, .. } if content.contains("permission denied")),
+        )
+        .await;
+    assert!(
+        matches!(denied, Message::System { .. }),
+        "expected System denial for non-host clear"
+    );
+
+    // alice must NOT receive bob's private denial
+    let alice_saw_denial = tokio::time::timeout(Duration::from_millis(200), async {
+        let mut line = String::new();
+        loop {
+            line.clear();
+            if alice.reader.read_line(&mut line).await.unwrap_or(0) == 0 {
+                break false;
+            }
+            if let Ok(msg) = serde_json::from_str::<Message>(line.trim()) {
+                if matches!(&msg, Message::System { content, .. } if content.contains("permission denied"))
+                {
+                    break true;
+                }
+            }
+        }
+    })
+    .await;
+    assert!(
+        alice_saw_denial.is_err() || !alice_saw_denial.unwrap(),
+        "alice must not receive bob's private permission-denied message"
+    );
+}
+
+/// When the host reconnects after a period offline, history replay must include
+/// DMs exchanged between other users while the host was absent — because the
+/// host_user field is never cleared on disconnect.
+///
+/// Non-participants who later join the room must NOT receive those same DMs
+/// in their own history replay.
+#[tokio::test]
+async fn dm_history_replay_includes_dms_for_host() {
+    let broker = TestBroker::start("t_host_dm_history").await;
+
+    // alice connects first → becomes host
+    let mut alice = TestClient::connect(&broker.socket_path, "alice").await;
+    alice
+        .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "alice"))
+        .await;
+
+    let mut bob = TestClient::connect(&broker.socket_path, "bob").await;
+    alice
+        .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "bob"))
+        .await;
+    bob.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "bob"))
+        .await;
+
+    let mut carol = TestClient::connect(&broker.socket_path, "carol").await;
+    alice
+        .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "carol"))
+        .await;
+    bob.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "carol"))
+        .await;
+    carol
+        .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "carol"))
+        .await;
+
+    // alice goes offline
+    drop(alice);
+    bob.recv_until(|m| matches!(m, Message::Leave { user, .. } if user == "alice"))
+        .await;
+    carol
+        .recv_until(|m| matches!(m, Message::Leave { user, .. } if user == "alice"))
+        .await;
+
+    // bob sends a DM to carol while alice is offline
+    bob.send_json(r#"{"type":"dm","to":"carol","content":"secret while alice is away"}"#)
+        .await;
+
+    // confirm delivery to sender and recipient
+    bob.recv_until(
+        |m| matches!(m, Message::DirectMessage { content, .. } if content == "secret while alice is away"),
+    )
+    .await;
+    carol
+        .recv_until(
+            |m| matches!(m, Message::DirectMessage { content, .. } if content == "secret while alice is away"),
+        )
+        .await;
+
+    // allow the broker to persist the message
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // alice reconnects — history replay includes the DM because host_user is still "alice"
+    let mut alice = TestClient::connect(&broker.socket_path, "alice").await;
+    alice
+        .recv_until(
+            |m| matches!(m, Message::DirectMessage { content, .. } if content == "secret while alice is away"),
+        )
+        .await;
+
+    // dave is a newcomer with no relation to the DM — must NOT see it in history replay
+    let mut dave = TestClient::connect(&broker.socket_path, "dave").await;
+    dave.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "dave"))
+        .await;
+
+    let dave_saw_dm = tokio::time::timeout(Duration::from_millis(300), async {
+        let mut line = String::new();
+        loop {
+            line.clear();
+            if dave.reader.read_line(&mut line).await.unwrap_or(0) == 0 {
+                break false;
+            }
+            if let Ok(msg) = serde_json::from_str::<Message>(line.trim()) {
+                if matches!(&msg, Message::DirectMessage { content, .. } if content == "secret while alice is away")
+                {
+                    break true;
+                }
+            }
+        }
+    })
+    .await;
+    assert!(
+        dave_saw_dm.is_err() || !dave_saw_dm.unwrap(),
+        "dave (non-participant, non-host) must not receive the DM in history replay"
+    );
+}
