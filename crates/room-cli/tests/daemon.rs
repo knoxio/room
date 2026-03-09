@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use common::{
     daemon_connect, daemon_create, daemon_global_join, daemon_join, daemon_send, ws_connect,
-    TestBroker, TestClient, TestDaemon,
+    ws_recv_json, TestDaemon,
 };
 use futures_util::{SinkExt, StreamExt};
 use room_cli::message::Message;
@@ -554,4 +554,102 @@ async fn global_join_token_works_for_room_send() {
     );
     assert_eq!(echo["content"], "hello from global join");
     assert_eq!(echo["user"], "gj-sender");
+}
+
+// ── Global token fallback via WS and REST (#416) ─────────────────────────────
+
+#[tokio::test]
+async fn global_token_works_for_ws_oneshot_send() {
+    let (td, port) = TestDaemon::start_with_ws_configs(vec![("ws-lobby", None)]).await;
+
+    // Get a global token via UDS.
+    let token = daemon_global_join(&td.socket_path, "ws-gj").await;
+
+    // Use TOKEN: handshake over WS with the global token.
+    let first_frame = format!("TOKEN:{token}");
+    let (mut tx, mut rx) = ws_connect(port, "ws-lobby", &first_frame).await;
+
+    tx.send(TungsteniteMsg::Text("ws global token msg".into()))
+        .await
+        .unwrap();
+
+    let echo = ws_recv_json(&mut rx).await;
+    assert_eq!(
+        echo["type"], "message",
+        "WS global token send failed: {echo}"
+    );
+    assert_eq!(echo["content"], "ws global token msg");
+    assert_eq!(echo["user"], "ws-gj");
+}
+
+#[tokio::test]
+async fn global_token_works_for_rest_send() {
+    let (td, port) = TestDaemon::start_with_ws_configs(vec![("rest-lobby", None)]).await;
+
+    let token = daemon_global_join(&td.socket_path, "rest-gj").await;
+    let base = format!("http://127.0.0.1:{port}");
+    let client = reqwest::Client::new();
+
+    // Send via REST using the global token.
+    let echo = rest_send(&client, &base, "rest-lobby", &token, "rest global msg").await;
+    assert_eq!(
+        echo["type"], "message",
+        "REST global token send failed: {echo}"
+    );
+    assert_eq!(echo["content"], "rest global msg");
+    assert_eq!(echo["user"], "rest-gj");
+}
+
+#[tokio::test]
+async fn global_token_works_for_rest_poll() {
+    let (td, port) = TestDaemon::start_with_ws_configs(vec![("poll-lobby", None)]).await;
+
+    let token = daemon_global_join(&td.socket_path, "poll-gj").await;
+    let base = format!("http://127.0.0.1:{port}");
+    let client = reqwest::Client::new();
+
+    // Send a message first so there's something to poll.
+    rest_send(&client, &base, "poll-lobby", &token, "poll test msg").await;
+
+    // Poll via REST using the global token.
+    let resp = client
+        .get(format!("{base}/api/poll-lobby/poll"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "REST poll with global token failed");
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let messages = body["messages"].as_array().unwrap();
+    assert!(
+        messages.iter().any(|m| m["content"] == "poll test msg"),
+        "poll should contain the sent message: {body}"
+    );
+}
+
+#[tokio::test]
+async fn global_token_works_for_rest_query() {
+    let (td, port) = TestDaemon::start_with_ws_configs(vec![("query-lobby", None)]).await;
+
+    let token = daemon_global_join(&td.socket_path, "query-gj").await;
+    let base = format!("http://127.0.0.1:{port}");
+    let client = reqwest::Client::new();
+
+    // Send a message first so there's something to query.
+    rest_send(&client, &base, "query-lobby", &token, "query test msg").await;
+
+    // Query via REST using the global token.
+    let resp = client
+        .get(format!("{base}/api/query-lobby/query?user=query-gj"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "REST query with global token failed");
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let messages = body["messages"].as_array().unwrap();
+    assert!(
+        messages.iter().any(|m| m["content"] == "query test msg"),
+        "query should contain the sent message: {body}"
+    );
 }

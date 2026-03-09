@@ -35,6 +35,8 @@ pub(crate) mod rest;
 pub(crate) struct WsAppState {
     pub(crate) room_state: Arc<RoomState>,
     pub(crate) next_client_id: Arc<AtomicU64>,
+    /// Global user registry for daemon mode. `None` in single-room mode.
+    pub(crate) user_registry: Option<Arc<Mutex<crate::registry::UserRegistry>>>,
 }
 
 /// Build the axum router with WebSocket and REST routes.
@@ -70,6 +72,7 @@ async fn ws_upgrade_handler(
 
 async fn handle_ws_client(ws: WebSocket, app_state: WsAppState) -> anyhow::Result<()> {
     let state = app_state.room_state.clone();
+    let registry = app_state.user_registry.clone();
     let cid = app_state.next_client_id.fetch_add(1, Ordering::SeqCst) + 1;
 
     let (tx, _) = broadcast::channel::<String>(256);
@@ -79,7 +82,7 @@ async fn handle_ws_client(ws: WebSocket, app_state: WsAppState) -> anyhow::Resul
         .await
         .insert(cid, (String::new(), tx.clone()));
 
-    let result = run_ws_session(cid, ws, tx, &state).await;
+    let result = run_ws_session(cid, ws, tx, &state, registry.as_ref()).await;
     state.clients.lock().await.remove(&cid);
     result
 }
@@ -89,6 +92,7 @@ async fn run_ws_session(
     ws: WebSocket,
     own_tx: broadcast::Sender<String>,
     state: &Arc<RoomState>,
+    user_registry: Option<&Arc<Mutex<crate::registry::UserRegistry>>>,
 ) -> anyhow::Result<()> {
     let (mut ws_tx, mut ws_rx) = ws.split();
 
@@ -109,7 +113,21 @@ async fn run_ws_session(
             return ws_oneshot_send(u, &mut ws_rx, &mut ws_tx, state).await;
         }
         ClientHandshake::Token(token) => {
-            return match validate_token(&token, &state.token_map).await {
+            // Try room-level token map first, then fall back to global UserRegistry.
+            let resolved = match validate_token(&token, &state.token_map).await {
+                Some(u) => Some(u),
+                None => {
+                    if let Some(reg) = user_registry {
+                        reg.lock()
+                            .await
+                            .validate_token(&token)
+                            .map(|u| u.to_owned())
+                    } else {
+                        None
+                    }
+                }
+            };
+            return match resolved {
                 Some(u) => ws_oneshot_send(u, &mut ws_rx, &mut ws_tx, state).await,
                 None => {
                     let err = serde_json::json!({"type":"error","code":"invalid_token"});
@@ -466,10 +484,12 @@ async fn daemon_ws_upgrade(
     };
 
     let next_id = state.next_client_id.clone();
+    let registry = Some(state.user_registry.clone());
     ws.on_upgrade(move |socket| async move {
         let app_state = WsAppState {
             room_state: room,
             next_client_id: next_id,
+            user_registry: registry,
         };
         if let Err(e) = handle_ws_client(socket, app_state).await {
             eprintln!("[daemon/ws] error: {e:#}");

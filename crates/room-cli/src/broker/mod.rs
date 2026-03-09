@@ -123,6 +123,7 @@ impl Broker {
             let ws_state = ws::WsAppState {
                 room_state: state.clone(),
                 next_client_id: next_client_id.clone(),
+                user_registry: None,
             };
             let app = ws::create_router(ws_state);
             let tcp = tokio::net::TcpListener::bind(("0.0.0.0", port)).await?;

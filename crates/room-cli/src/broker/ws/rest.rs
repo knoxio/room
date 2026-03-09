@@ -14,6 +14,7 @@ use crate::{
 use super::super::{
     auth::validate_token,
     service::{DispatchResult, RoomService},
+    state::RoomState,
 };
 use super::{DaemonWsState, WsAppState};
 
@@ -390,6 +391,23 @@ pub(super) async fn api_health(State(state): State<WsAppState>) -> impl IntoResp
     }))
 }
 
+// ── Daemon helpers ──────────────────────────────────────────────────────
+
+/// Validate a bearer token against the room's local token map first, then fall
+/// back to the global [`UserRegistry`] (daemon mode). This mirrors the UDS
+/// `TOKEN:` fallback added in #415.
+async fn daemon_validate_token(
+    token: &str,
+    room: &RoomState,
+    state: &DaemonWsState,
+) -> Option<String> {
+    if let Some(u) = room.validate_token(token).await {
+        return Some(u);
+    }
+    let reg = state.user_registry.lock().await;
+    reg.validate_token(token).map(|u| u.to_owned())
+}
+
 // ── Daemon REST endpoints ────────────────────────────────────────────────
 
 pub(super) async fn daemon_api_join(
@@ -458,7 +476,7 @@ pub(super) async fn daemon_api_send(
         }
     };
 
-    let username = match room.validate_token(token).await {
+    let username = match daemon_validate_token(token, &room, &state).await {
         Some(u) => u,
         None => {
             return (
@@ -506,7 +524,7 @@ pub(super) async fn daemon_api_poll(
         }
     };
 
-    let username = match room.validate_token(token).await {
+    let username = match daemon_validate_token(token, &room, &state).await {
         Some(u) => u,
         None => {
             return (
@@ -695,7 +713,7 @@ pub(super) async fn daemon_api_query(
         }
     };
 
-    let username = match room.validate_token(token).await {
+    let username = match daemon_validate_token(token, &room, &state).await {
         Some(u) => u,
         None => {
             return (
