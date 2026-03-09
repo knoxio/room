@@ -74,6 +74,14 @@ pub fn broker_tokens_path(state_dir: &Path, room_id: &str) -> PathBuf {
     state_dir.join(format!("{room_id}.tokens"))
 }
 
+/// PID file for the daemon process: `~/.room/roomd.pid`.
+///
+/// Written by `ensure_daemon_running` when it auto-starts the daemon.
+/// Ephemeral — deleted on clean daemon shutdown, may linger after a crash.
+pub fn room_pid_path() -> PathBuf {
+    room_home().join("roomd.pid")
+}
+
 /// System-level token persistence path: `~/.room/state/tokens.json`.
 ///
 /// Tokens in a daemon are system-level — a single token issued by `room join`

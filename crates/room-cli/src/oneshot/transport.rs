@@ -81,6 +81,80 @@ pub fn resolve_socket_target(room_id: &str, explicit: Option<&Path>) -> SocketTa
     }
 }
 
+// ── Daemon auto-start ─────────────────────────────────────────────────────────
+
+const DAEMON_POLL_INTERVAL_MS: u64 = 50;
+const DAEMON_START_TIMEOUT_MS: u64 = 5_000;
+
+/// Ensure the multi-room daemon is running.
+///
+/// If the daemon socket is not connectable, spawns `room daemon` as a detached
+/// background process, writes its PID to `~/.room/roomd.pid`, and polls until
+/// the socket accepts connections (up to 5 seconds).
+///
+/// This is a no-op when the caller passes an explicit `--socket` override — in
+/// that case the caller is targeting a specific socket and the daemon should not
+/// be auto-started on their behalf.
+///
+/// # Errors
+///
+/// Returns an error if the process cannot be spawned or if the socket does not
+/// become connectable within the timeout.
+pub async fn ensure_daemon_running() -> anyhow::Result<()> {
+    let exe = std::env::current_exe()
+        .map_err(|e| anyhow::anyhow!("cannot resolve current executable: {e}"))?;
+    ensure_daemon_running_impl(&crate::paths::room_socket_path(), &exe).await
+}
+
+/// Test-visible variant: accepts explicit socket and exe paths so tests can
+/// target temp paths without relying on `current_exe()`.
+#[cfg(test)]
+pub(crate) async fn ensure_daemon_running_at(
+    socket: &Path,
+    exe: &std::path::Path,
+) -> anyhow::Result<()> {
+    ensure_daemon_running_impl(socket, exe).await
+}
+
+async fn ensure_daemon_running_impl(socket: &Path, exe: &Path) -> anyhow::Result<()> {
+    // Fast path: daemon is already running.
+    if UnixStream::connect(socket).await.is_ok() {
+        return Ok(());
+    }
+
+    let child = std::process::Command::new(exe)
+        .arg("daemon")
+        .arg("--socket")
+        .arg(socket)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| anyhow::anyhow!("failed to spawn daemon ({}): {e}", exe.display()))?;
+
+    // Persist PID so the user (or cleanup scripts) can identify the process.
+    let pid_path = crate::paths::room_pid_path();
+    let _ = std::fs::write(&pid_path, child.id().to_string());
+
+    // Poll until the socket accepts connections.
+    let deadline =
+        tokio::time::Instant::now() + tokio::time::Duration::from_millis(DAEMON_START_TIMEOUT_MS);
+
+    loop {
+        if UnixStream::connect(socket).await.is_ok() {
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            anyhow::bail!(
+                "daemon failed to start within {}ms (socket: {})",
+                DAEMON_START_TIMEOUT_MS,
+                socket.display()
+            );
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(DAEMON_POLL_INTERVAL_MS)).await;
+    }
+}
+
 // ── Transport functions ───────────────────────────────────────────────────────
 
 /// Connect to a running broker and deliver a single message without joining the room.
@@ -268,6 +342,81 @@ mod tests {
             t.handshake_line("TOKEN:uuid"),
             "ROOM:agent-room-2:TOKEN:uuid"
         );
+    }
+
+    // ── ensure_daemon_running_at ──────────────────────────────────────────────
+
+    /// Resolve the `room` binary from the test binary's location.
+    /// In cargo test layout: `target/debug/deps/../room` → `target/debug/room`.
+    fn room_bin() -> PathBuf {
+        let bin = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("room");
+        assert!(bin.exists(), "room binary not found at {}", bin.display());
+        bin
+    }
+
+    #[tokio::test]
+    async fn ensure_daemon_noop_when_socket_connectable() {
+        // Start a real daemon at a temp socket, verify ensure_daemon_running_at
+        // returns Ok without spawning a second process.
+        let dir = tempfile::TempDir::new().unwrap();
+        let socket = dir.path().join("roomd.sock");
+        let exe = room_bin();
+
+        let mut child = tokio::process::Command::new(&exe)
+            .args(["daemon", "--socket"])
+            .arg(&socket)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("failed to spawn room daemon");
+
+        // Wait for socket to become connectable.
+        for _ in 0..100 {
+            if tokio::net::UnixStream::connect(&socket).await.is_ok() {
+                break;
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        }
+        assert!(
+            tokio::net::UnixStream::connect(&socket).await.is_ok(),
+            "daemon socket not ready"
+        );
+
+        // Calling again must be a no-op (does not error).
+        ensure_daemon_running_at(&socket, &exe).await.unwrap();
+
+        child.kill().await.ok();
+    }
+
+    #[tokio::test]
+    async fn ensure_daemon_starts_daemon_and_writes_pid() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let socket = dir.path().join("autostart.sock");
+        let exe = room_bin();
+
+        // No daemon running yet — ensure_daemon_running_at must start one.
+        ensure_daemon_running_at(&socket, &exe).await.unwrap();
+
+        // Socket should now be connectable.
+        assert!(
+            tokio::net::UnixStream::connect(&socket).await.is_ok(),
+            "daemon socket not connectable after auto-start"
+        );
+
+        // PID file should exist.
+        assert!(
+            crate::paths::room_pid_path().exists(),
+            "PID file not written by auto-start"
+        );
+        // TempDir drop cleans up the socket; the daemon will exit when it can
+        // no longer accept connections.
     }
 
     // ── resolve_socket_target ─────────────────────────────────────────────────

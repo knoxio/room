@@ -275,6 +275,9 @@ async fn main() -> anyhow::Result<()> {
             username,
             socket,
         }) => {
+            if socket.is_none() {
+                oneshot::ensure_daemon_running().await?;
+            }
             oneshot::cmd_join(&room_id, &username, socket.as_deref()).await?;
         }
         Some(Cmd::Send {
@@ -284,6 +287,9 @@ async fn main() -> anyhow::Result<()> {
             socket,
             message,
         }) => {
+            if socket.is_none() {
+                oneshot::ensure_daemon_running().await?;
+            }
             let content = message.join(" ");
             oneshot::cmd_send(&room_id, &token, to.as_deref(), &content, socket.as_deref()).await?;
         }
@@ -479,6 +485,9 @@ async fn main() -> anyhow::Result<()> {
             json,
             socket,
         }) => {
+            if socket.is_none() {
+                oneshot::ensure_daemon_running().await?;
+            }
             oneshot::cmd_who(&room_id, &token, json, socket.as_deref()).await?;
         }
         Some(Cmd::Dm {
@@ -487,6 +496,9 @@ async fn main() -> anyhow::Result<()> {
             socket,
             message,
         }) => {
+            if socket.is_none() {
+                oneshot::ensure_daemon_running().await?;
+            }
             let content = message.join(" ");
             oneshot::cmd_dm(&user, &token, &content, socket.as_deref()).await?;
         }

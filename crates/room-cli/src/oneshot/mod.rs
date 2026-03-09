@@ -11,7 +11,7 @@ pub use poll::{
 };
 pub use token::{cmd_join, token_file_path, username_from_token, username_from_token_any_room};
 pub use transport::{
-    join_session, join_session_target, resolve_socket_target, send_message,
+    ensure_daemon_running, join_session, join_session_target, resolve_socket_target, send_message,
     send_message_with_token, send_message_with_token_target, SocketTarget,
 };
 pub use who::cmd_who;
