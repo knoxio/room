@@ -34,8 +34,11 @@ If agents must share a single directory (e.g. a constrained environment), the an
 Every agent joins a shared room at session start. The room is the single communication channel — all coordination happens there, not in private.
 
 ```bash
-# Join once per broker lifetime — saves a token to disk
-room join <room-id> <username>
+# Register once per broker lifetime — saves a global token to disk
+room join <username>
+
+# Subscribe to specific rooms
+room subscribe <room-id>
 
 # Send a message (token required — it is not auto-read from file)
 room send <room-id> --token <token> 'your message here'
@@ -47,7 +50,7 @@ room poll --token <token>
 room poll <room-id> --token <token>
 ```
 
-The token is written to `/tmp/room-<room-id>-<username>.token` by `room join`. You must pass it explicitly with `--token` on every subsequent command — it is not read automatically.
+The token is written to `~/.room/state/room-<username>.token` by `room join`. The token is global (not per-room). You must pass it explicitly with `--token` on every subsequent command — it is not read automatically.
 
 ## The announce/poll loop
 

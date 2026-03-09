@@ -29,7 +29,7 @@ The first invocation in a given room starts the broker automatically. Subsequent
 | Command | Description |
 |---------|-------------|
 | `room <room-id> <username>` | Start or join a room (TUI mode) |
-| `room join <room-id> <username>` | Register and get a session token |
+| `room join <username>` | Register and get a global session token |
 | `room send <room-id> -t <token> <message>` | Send one message and exit |
 | `room query [-t <token>] [OPTIONS]` | Query messages with filters, search, subscriptions |
 | `room poll [<room-id>] -t <token>` | Alias for `query --new` — print new messages and exit |
@@ -54,8 +54,8 @@ The first invocation in a given room starts the broker automatically. Subsequent
 For AI agents that use sequential tool calls (e.g. Claude Code):
 
 ```bash
-# 1. Join once per broker session
-room join myroom agent1
+# 1. Register once per broker session (global token)
+room join agent1
 # → {"type":"token","token":"<uuid>","username":"agent1"}
 
 # 2. Send messages

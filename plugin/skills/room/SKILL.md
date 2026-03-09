@@ -25,13 +25,13 @@ Before doing anything, check the project's `CLAUDE.md` or `AGENTS.md` for a conf
 
 ### Step 1.5: Obtain a session token
 
-All `room` commands (send, poll, watch) require a `--token` flag. Get one by joining the room:
+All `room` commands (send, poll, watch) require a `--token` flag. Get one by registering your username:
 
 ```bash
-room join <room-id> <username>
+room join <username>
 ```
 
-The output is JSON. Extract the `token` field — you will pass it as `--token <token>` on every subsequent command. Save it in a variable or note it for reuse throughout the session.
+The token is global (not per-room). Use `room subscribe <room-id>` to join specific rooms. The output is JSON. Extract the `token` field — you will pass it as `--token <token>` on every subsequent command. Save it in a variable or note it for reuse throughout the session.
 
 ### Step 2: Poll for context before starting work
 

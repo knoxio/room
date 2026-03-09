@@ -71,15 +71,15 @@ room myroom bob
 ### Join a session (required before send/poll/watch)
 
 ```
-room join <room-id> <username>
+room join <username>
 ```
 
-Registers your username with the broker and receives a session token. Writes the token to `/tmp/room-<room-id>-<username>.token` as a convenience record. Run this once per broker lifetime. Pass the token explicitly with `-t` on every subsequent `send`, `poll`, and `watch` call — it is not read automatically. Returns an error if the username is already taken in the room.
+Registers your username with the broker and receives a global session token. Writes the token to `~/.room/state/room-<username>.token` as a convenience record. Run this once per broker lifetime. Pass the token explicitly with `-t` on every subsequent `send`, `poll`, and `watch` call — it is not read automatically. Returns an error if the username is already taken. Use `room subscribe <room-id>` to join specific rooms after obtaining a token.
 
 ```bash
-room join myroom bot
+room join bot
 # {"type":"token","token":"<uuid>","username":"bot"}
-# Token written to /tmp/room-myroom-bot.token
+# Token written to ~/.room/state/room-bot.token
 ```
 
 ### Connect to a room (TUI)
@@ -104,7 +104,7 @@ Opens a full-screen terminal UI. This is the standard human-facing entry point. 
 room send --token <token> <room-id> [<message>...]
 ```
 
-Connects to a running broker, delivers one message, prints the broadcast JSON to stdout, and exits. Requires a broker to be running and a valid session token from `room join`. All tokens after `<room-id>` are joined into the message content.
+Connects to a running broker, delivers one message, prints the broadcast JSON to stdout, and exits. Requires a broker to be running and a valid session token from `room join`. All arguments after `<room-id>` are joined into the message content.
 
 ```bash
 room send --token <uuid> myroom hello from a script
@@ -242,8 +242,8 @@ Admin commands use the same `/` prefix as user commands and are available in the
 | Command | Description |
 |---|---|
 | `/kick <username>` | Invalidates the user's token — they cannot send further messages. Their username remains reserved; use `/reauth` to let them rejoin. |
-| `/reauth <username>` | Clears the user's token entry so they can `room join` again with the same username. |
-| `/clear-tokens` | Clears all tokens for the room — every user must `room join` again. |
+| `/reauth <username>` | Clears the user's token entry so they can `room join` again with the same username. Then they use `room subscribe` to rejoin rooms. |
+| `/clear-tokens` | Clears all tokens for the room — every user must `room join` again and re-subscribe. |
 | `/exit` | Broadcasts a shutdown notice and stops the broker. |
 | `/clear` | Truncates the chat history file and broadcasts a notice. |
 
@@ -281,7 +281,7 @@ tail -f /tmp/room-out.log
 For agents that need to stay resident all day without human re-prompting, use `room watch` with `run_in_background` and `TaskOutput`:
 
 ```
-1. room join <room-id> <username>        # once per broker lifetime
+1. room join <username>                  # once per broker lifetime (global token)
 2. room watch --token <uuid>             # watches all subscribed rooms
                                          # run_in_background=true, timeout=600000
 3. Block on TaskOutput — exits when a foreign message arrives
@@ -425,11 +425,11 @@ room <room-id> <username>           # TUI / agent mode
   |
   +-- socket found?     --> connect as Client (TUI or --agent)
 
-room join <room-id> <username>      # one-shot: get a session token
+room join <username>               # one-shot: get a global session token
   |
   +-- connect to socket --> handshake --> broker issues UUID token
                         <-- token JSON
-                        --> writes /tmp/room-<id>-<username>.token
+                        --> writes ~/.room/state/room-<username>.token
                         --> disconnect
 
 room send --token <uuid> <room-id>  # one-shot: authenticated send
@@ -452,7 +452,7 @@ room watch --token <uuid> [<room-id>] # alias for query --new --wait
 
 The broker accepts connections over a Unix domain socket. Each client gets a dedicated broadcast receiver. When the broker receives a message from one client, it persists it to disk and fans it out to all connected clients via a `tokio::broadcast` channel.
 
-`room join` issues a session token that identifies the user for all subsequent one-shot operations. `room send` and `room poll` use a lightweight token-authenticated handshake — no join/leave events are emitted. `room poll` and `room watch` are entirely broker-free (read the chat file directly) and safe to call from multiple processes simultaneously.
+`room join` issues a global session token that identifies the user for all subsequent one-shot operations. `room send` and `room poll` use a lightweight token-authenticated handshake — no join/leave events are emitted. `room poll` and `room watch` are entirely broker-free (read the chat file directly) and safe to call from multiple processes simultaneously.
 
 ## User status
 

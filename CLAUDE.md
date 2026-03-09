@@ -2,7 +2,7 @@
 
 > **TL;DR — read these first**
 >
-> 1. Join the room before doing anything: `room join <room-id> <username>`
+> 1. Get a token before doing anything: `room join <username>`, then subscribe to rooms with `room subscribe <room-id>`
 > 2. Announce your plan and wait for go-ahead before writing code
 > 3. One agent per file — declare ownership before touching a file
 > 4. Announce before every push, fix commit, or rebase — never push silently
@@ -24,9 +24,12 @@ Claude Code cannot block on a persistent socket connection. Use the one-shot sub
 ### Session setup (once per agent per broker restart)
 
 ```bash
-# Register your username with the broker — writes a token to /tmp/room-<id>-<username>.token
-room join <room-id> <your-username>
+# Register your username and get a global token — writes to ~/.room/state/room-<username>.token
+room join <your-username>
 # Output: {"type":"token","token":"<uuid>","username":"<your-username>"}
+
+# Subscribe to specific rooms
+room subscribe <room-id>
 ```
 
 Save the token from the output. Pass it explicitly with `-t` on every subsequent command. If the broker restarts, re-run `room join` to get a new token.
@@ -79,8 +82,8 @@ Run it with `run_in_background=true` and `timeout=600000`. Block on `TaskOutput`
 ### Typical loop
 
 ```bash
-# 0. Join the room (once per broker lifetime) — save the token from the output
-room join myroom feat-myfeature
+# 0. Get a token (once per broker lifetime) — save the token from the output
+room join feat-myfeature
 # → {"type":"token","token":"<uuid>","username":"feat-myfeature"}
 # Export for convenience:
 TOKEN=<uuid>
@@ -124,21 +127,23 @@ to keep the workflow smooth:
 
 **Workarounds:**
 1. Write multi-step scripts to `/tmp/` using the Write tool, then run with `bash /tmp/script.sh`
-2. For token extraction: `python3 -c "import json; print(json.load(open('/tmp/room-<id>-<user>.token'))['token'])"`
+2. For token extraction: `python3 -c "import json; print(json.load(open('~/.room/state/room-<user>.token'))['token'])"`
 3. Pass tokens inline with `--token` flag, not via environment variables
 4. For git commits with multi-line messages: write to `/tmp/commit_msg.txt`, then `git commit -F /tmp/commit_msg.txt`
 
 ## Token file format
 
-After `room join <room-id> <username>`, the token is saved to `/tmp/room-<room-id>-<username>.token`:
+After `room join <username>`, the token is saved to `~/.room/state/room-<username>.token`:
 
 ```json
 {"type":"token","token":"<uuid>","username":"<username>"}
 ```
 
+The token is global (not per-room). Use `room subscribe <room-id>` to join specific rooms.
+
 Extract the UUID with:
 ```bash
-python3 -c "import json; print(json.load(open('/tmp/room-<id>-<user>.token'))['token'])"
+python3 -c "import json; print(json.load(open('~/.room/state/room-<user>.token'))['token'])"
 ```
 
 The cursor (last-seen message ID) is stored at `/tmp/room-<id>-<username>.cursor`.
@@ -235,7 +240,7 @@ room send myroom -t $TOKEN "opening PR for #42"
 ## Expected behaviour
 
 ### On starting work
-1. Join the room if you don't have a token yet: `room join <room-id> <username>` — save the token UUID from the output.
+1. Get a token if you don't have one yet: `room join <username>` — save the token UUID from the output. Then subscribe to rooms with `room subscribe <room-id>`.
 2. Set your status: `room send <room-id> -t <token> /set_status reading issue`
 3. Poll for recent history: `room poll <room-id> -t <token>`
 4. Announce yourself and **propose your plan**: who you are, what branch you are on, which

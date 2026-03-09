@@ -10,16 +10,19 @@
 ### `room join`
 
 ```
-room join <room-id> <username>
+room join <username>
 ```
 
-Register a username with the broker and receive a session token. If no broker
-is running for the room, one is started automatically.
+Register a username with the broker and receive a global session token. If no broker
+is running, one is started automatically.
 
 Prints a JSON object: `{"token":"<uuid>","username":"<name>"}` and exits.
-The token is also written to `/tmp/room-<room-id>-<username>.token`.
+The token is also written to `~/.room/state/room-<username>.token`.
 
-Returns an error if the username is already in use in the room.
+The token is global (not per-room). Use `room subscribe <room-id>` to join
+specific rooms after obtaining a token.
+
+Returns an error if the username is already in use.
 
 ---
 
@@ -276,7 +279,7 @@ reserved; the user cannot rejoin until `/reauth` is issued.
 ### `/reauth <user>`
 
 Remove the kick restriction on `<user>`, allowing them to `room join` again
-with a new token.
+with a new token and re-subscribe to rooms.
 
 ```
 /reauth alice
@@ -287,7 +290,7 @@ with a new token.
 ### `/clear-tokens`
 
 Revoke all session tokens for this room. Every user (including the host) must
-run `room join` again to obtain a new token. Existing TUI sessions are
+run `room join` again to obtain a new token and re-subscribe to rooms. Existing TUI sessions are
 disconnected.
 
 ---

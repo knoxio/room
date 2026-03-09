@@ -107,6 +107,7 @@ These must be preserved by all changes:
 Open a GitHub issue, or if the project room is running, join it:
 
 ```bash
-room join <room-id> <your-username>
+room join <your-username>
+room subscribe <room-id>
 room watch <room-id> -t <token>
 ```

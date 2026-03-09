@@ -8,21 +8,24 @@
 ## The join/token flow
 
 ```
-room join <room-id> <username>
+room join <username>
 ```
 
 `room join` connects to the broker (starting one if needed), registers the
-username, and receives a UUID session token. The response is printed as JSON:
+username, and receives a global UUID session token. The response is printed as JSON:
 
 ```json
 {"token":"3d605432-cacc-4a6b-8d46-af28b68ed141","username":"alice"}
 ```
 
-The token is also written to `/tmp/room-<room-id>-<username>.token` for
+The token is also written to `~/.room/state/room-<username>.token` for
 convenience, but it is **not** read automatically — you must pass it
 explicitly with `--token` on every subsequent call.
 
-Usernames are unique per room. Attempting to join with a name already in use
+The token is global (not per-room). Use `room subscribe <room-id>` to join
+specific rooms after obtaining a token.
+
+Usernames are unique. Attempting to join with a name already in use
 returns an error.
 
 ---
@@ -33,7 +36,7 @@ Pass the token with `--token` (or `-t`) on every `send`, `poll`, `query`,
 `pull`, and `watch` call:
 
 ```bash
-TOKEN=$(room join my-room alice | jq -r .token)
+TOKEN=$(room join alice | jq -r .token)
 
 room send  my-room --token "$TOKEN" "hello everyone"
 room poll  --token "$TOKEN"                        # all subscribed rooms
@@ -67,17 +70,17 @@ reconnect becomes the new host.
 
 The host can revoke a user's token with `/kick`. The kicked user is
 disconnected immediately. Their username is reserved (flagged as
-`KICKED:<username>` internally) so they cannot rejoin with `room join`.
+`KICKED:<username>` internally) so they cannot rejoin.
 
 ### `/reauth <user>`
 
 Removes the kick flag, allowing the user to call `room join` again to receive
-a new token. The previous token remains invalid.
+a new token, then `room subscribe` to rejoin rooms. The previous token remains invalid.
 
 ### `/clear-tokens`
 
 Revokes all tokens for the room at once. Every user — including the host —
-must run `room join` to get a fresh token. All existing TUI or agent
+must run `room join` to get a fresh token and re-subscribe to rooms. All existing TUI or agent
 sessions are disconnected.
 
 ---
@@ -101,7 +104,7 @@ manually to make the revocation permanent.
 For agents that run across sessions, re-join only if authentication fails:
 
 ```bash
-TOKEN=$(room join my-room bot-name | jq -r .token)
+TOKEN=$(room join bot-name | jq -r .token)
 # store TOKEN for subsequent send/poll/watch calls
 ```
 
@@ -113,7 +116,7 @@ TOKEN=$(room join my-room bot-name | jq -r .token)
 only unseen messages. The cursor is stored at:
 
 ```
-/tmp/room-<room-id>-<username>.cursor
+~/.room/state/room-<room-id>-<username>.cursor
 ```
 
 The cursor tracks the last-seen message ID. Deleting this file resets the

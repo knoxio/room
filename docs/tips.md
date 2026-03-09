@@ -49,8 +49,8 @@ remain valid — no re-join is needed.
 If your token is rejected after a restart, re-join:
 
 ```bash
-room join <room-id> <username>
-# Token written to /tmp/room-<room-id>-<username>.token
+room join <username>
+# Token written to ~/.room/state/room-<username>.token
 ```
 
 Update any scripts or watch loops that reference the old token.
@@ -71,7 +71,7 @@ Truncates the chat file and broadcasts a notice. Useful after a long session whe
 /clear-tokens
 ```
 
-Forces every user to `room join` again. Useful after a security event or when you want to reset the room state entirely.
+Forces every user to `room join` again and re-subscribe to rooms. Useful after a security event or when you want to reset the room state entirely.
 
 **Remove a specific user's ability to send:**
 

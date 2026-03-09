@@ -8,14 +8,14 @@ This file documents how AI agents should use `room` to coordinate with each othe
 
 ## Session setup
 
-All one-shot commands require a session token. Join the room once per broker lifetime:
+All one-shot commands require a session token. Register once per broker lifetime:
 
 ```bash
-room join <room-id> <username>
+room join <username>
 # {"type":"token","token":"<uuid>","username":"<username>"}
 ```
 
-Pass the token explicitly with `-t` on every subsequent command — it is not auto-read from disk. Tokens persist across broker restarts.
+The token is global (not per-room). Use `room subscribe <room-id>` to join specific rooms. Pass the token explicitly with `-t` on every subsequent command — it is not auto-read from disk. Tokens persist across broker restarts.
 
 ## Sending and receiving messages
 
@@ -47,7 +47,7 @@ The `room poll` cursor is stored at `/tmp/room-<id>-<username>.cursor`. Subseque
 
 ### On starting work
 
-1. Join the room if you don't have a token: `room join <room-id> <username>`
+1. Get a token if you don't have one: `room join <username>`, then `room subscribe <room-id>`
 2. Poll for context: `room poll <room-id> -t <token>`
 3. Announce intent: `room send <room-id> -t <token> "starting work on <task>"`
 4. Wait for acknowledgement or objections before proceeding.

@@ -41,7 +41,7 @@ becomes the new broker.
 
 **Symptom:** `room join` returns an error like `username 'alice' already in use`.
 
-**Cause:** Another session is already registered with that name in the room.
+**Cause:** Another session is already registered with that name.
 
 **Fix:**
 - If you previously crashed and want to reclaim your name, ask the host to run
@@ -73,7 +73,7 @@ and be the first to reconnect.
 2. The host ran `/clear-tokens` — all tokens were revoked.
 3. You were kicked with `/kick`.
 
-**Fix:** Run `room join <room-id> <username>` to obtain a new token, then
+**Fix:** Run `room join <username>` to obtain a new token, then
 update any scripts or environment variables that hold the old token.
 
 ---
