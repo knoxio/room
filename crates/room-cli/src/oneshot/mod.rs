@@ -11,7 +11,7 @@ pub use poll::{
     pull_messages, QueryOptions,
 };
 pub use subscribe::cmd_subscribe;
-pub use token::{cmd_join, token_file_path, username_from_token, username_from_token_any_room};
+pub use token::{cmd_join, username_from_token};
 pub use transport::{create_room, destroy_room};
 pub use transport::{
     ensure_daemon_running, global_join_session, join_session, join_session_target,
@@ -78,7 +78,7 @@ pub async fn cmd_dm(
     socket: Option<&std::path::Path>,
 ) -> anyhow::Result<()> {
     // Resolve the caller's username from the token
-    let caller = username_from_token_any_room(token)?;
+    let caller = username_from_token(token)?;
 
     // Compute canonical DM room ID
     let dm_id = dm_room_id(&caller, recipient).map_err(|e| anyhow::anyhow!("{e}"))?;

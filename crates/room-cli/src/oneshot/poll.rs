@@ -162,7 +162,7 @@ pub async fn pull_messages(
 /// Reads from the chat file directly (no broker connection required).
 /// Does **not** update the poll cursor.
 pub async fn cmd_pull(room_id: &str, token: &str, n: usize) -> anyhow::Result<()> {
-    let username = username_from_token(room_id, token)?;
+    let username = username_from_token(token)?;
     let meta_path = paths::room_meta_path(room_id);
     let chat_path = chat_path_from_meta(room_id, &meta_path);
 
@@ -184,7 +184,7 @@ pub async fn cmd_pull(room_id: &str, token: &str, n: usize) -> anyhow::Result<()
 /// Shares the cursor file with `room poll` — the two subcommands never re-deliver
 /// the same message.
 pub async fn cmd_watch(room_id: &str, token: &str, interval_secs: u64) -> anyhow::Result<()> {
-    let username = username_from_token(room_id, token)?;
+    let username = username_from_token(token)?;
     let meta_path = paths::room_meta_path(room_id);
     let chat_path = chat_path_from_meta(room_id, &meta_path);
     let cursor_path = paths::cursor_path(room_id, &username);
@@ -231,7 +231,7 @@ pub async fn cmd_poll(
     since: Option<String>,
     mentions_only: bool,
 ) -> anyhow::Result<()> {
-    let username = username_from_token(room_id, token)?;
+    let username = username_from_token(token)?;
     let meta_path = paths::room_meta_path(room_id);
     let chat_path = chat_path_from_meta(room_id, &meta_path);
     let cursor_path = paths::cursor_path(room_id, &username);
@@ -294,7 +294,7 @@ pub async fn cmd_poll_multi(
     mentions_only: bool,
 ) -> anyhow::Result<()> {
     // Resolve username by trying the token against each room
-    let username = resolve_username_from_rooms(room_ids, token)?;
+    let username = username_from_token(token)?;
 
     // Resolve chat paths for all rooms
     let mut rooms: Vec<(&str, PathBuf)> = Vec::new();
@@ -339,7 +339,7 @@ pub async fn cmd_query(
         anyhow::bail!("at least one room ID is required");
     }
 
-    let username = resolve_username_from_rooms(room_ids, token)?;
+    let username = username_from_token(token)?;
 
     // Resolve mention_user from caller if mentions_only is requested.
     if opts.mentions_only {
@@ -487,18 +487,6 @@ fn apply_sort_and_limit(messages: &mut Vec<Message>, filter: &QueryFilter) {
     if let Some(limit) = filter.limit {
         messages.truncate(limit);
     }
-}
-
-/// Try to resolve a username from a token by scanning token files for each room.
-///
-/// Returns the username from the first room where the token is found.
-fn resolve_username_from_rooms(room_ids: &[String], token: &str) -> anyhow::Result<String> {
-    for room_id in room_ids {
-        if let Ok(username) = username_from_token(room_id, token) {
-            return Ok(username);
-        }
-    }
-    anyhow::bail!("token not recognised in any of the specified rooms — run: room join <username>")
 }
 
 /// Read the room host username from the meta file, if present.
@@ -887,13 +875,13 @@ mod tests {
         let token_dir = TempDir::new().unwrap();
 
         let room_id = format!("test-cqh-{}", std::process::id());
-        write_token_file(&token_dir, &room_id, "alice", "tok-alice");
+        write_token_file(&token_dir, &room_id, "alice-cqh", "tok-cqh");
         write_meta_file(&room_id, chat.path());
 
         for i in 0..3u32 {
             crate::history::append(
                 chat.path(),
-                &make_message(&room_id, "alice", format!("{i}")),
+                &make_message(&room_id, "alice-cqh", format!("{i}")),
             )
             .await
             .unwrap();
@@ -913,11 +901,11 @@ mod tests {
         };
 
         // cursor should NOT advance (historical mode)
-        let cursor_path = crate::paths::cursor_path(&room_id, "alice");
+        let cursor_path = crate::paths::cursor_path(&room_id, "alice-cqh");
         let _ = std::fs::remove_file(&cursor_path);
 
         // Run cmd_query — captures stdout indirectly by ensuring cursor unchanged.
-        oneshot_cmd_query_to_vec(&[room_id.clone()], "tok-alice", filter, opts, &cursor_dir)
+        oneshot_cmd_query_to_vec(&[room_id.clone()], "tok-cqh", filter, opts, &cursor_dir)
             .await
             .unwrap();
 
@@ -928,7 +916,7 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(crate::paths::room_meta_path(&room_id));
-        let _ = std::fs::remove_file(&token_path(&room_id, "alice"));
+        let _ = std::fs::remove_file(&global_token_path("alice-cqh"));
     }
 
     /// cmd_query in --new mode advances the cursor.
@@ -939,7 +927,7 @@ mod tests {
         let token_dir = TempDir::new().unwrap();
 
         let room_id = format!("test-cqn-{}", std::process::id());
-        write_token_file(&token_dir, &room_id, "alice", "tok-cqn");
+        write_token_file(&token_dir, &room_id, "alice-cqn", "tok-cqn");
         write_meta_file(&room_id, chat.path());
 
         let msg = make_message(&room_id, "bob", "hello");
@@ -981,7 +969,7 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(crate::paths::room_meta_path(&room_id));
-        let _ = std::fs::remove_file(&token_path(&room_id, "alice"));
+        let _ = std::fs::remove_file(&global_token_path("alice-cqn"));
     }
 
     /// cmd_query with content_search only returns matching messages.
@@ -992,7 +980,7 @@ mod tests {
         let token_dir = TempDir::new().unwrap();
 
         let room_id = format!("test-cqs-{}", std::process::id());
-        write_token_file(&token_dir, &room_id, "alice", "tok-cqs");
+        write_token_file(&token_dir, &room_id, "alice-cqs", "tok-cqs");
         write_meta_file(&room_id, chat.path());
 
         crate::history::append(chat.path(), &make_message(&room_id, "bob", "hello world"))
@@ -1024,7 +1012,7 @@ mod tests {
         assert!(result[0].content().unwrap().contains("hello"));
 
         let _ = std::fs::remove_file(crate::paths::room_meta_path(&room_id));
-        let _ = std::fs::remove_file(&token_path(&room_id, "alice"));
+        let _ = std::fs::remove_file(&global_token_path("alice-cqs"));
     }
 
     /// cmd_query with user filter only returns messages from that user.
@@ -1035,7 +1023,7 @@ mod tests {
         let token_dir = TempDir::new().unwrap();
 
         let room_id = format!("test-cqu-{}", std::process::id());
-        write_token_file(&token_dir, &room_id, "alice", "tok-cqu");
+        write_token_file(&token_dir, &room_id, "alice-cqu", "tok-cqu");
         write_meta_file(&room_id, chat.path());
 
         crate::history::append(chat.path(), &make_message(&room_id, "alice", "from alice"))
@@ -1067,7 +1055,7 @@ mod tests {
         assert_eq!(result[0].user(), "bob");
 
         let _ = std::fs::remove_file(crate::paths::room_meta_path(&room_id));
-        let _ = std::fs::remove_file(&token_path(&room_id, "alice"));
+        let _ = std::fs::remove_file(&global_token_path("alice-cqu"));
     }
 
     /// cmd_query with limit returns only N messages.
@@ -1078,7 +1066,7 @@ mod tests {
         let token_dir = TempDir::new().unwrap();
 
         let room_id = format!("test-cql-{}", std::process::id());
-        write_token_file(&token_dir, &room_id, "alice", "tok-cql");
+        write_token_file(&token_dir, &room_id, "alice-cql", "tok-cql");
         write_meta_file(&room_id, chat.path());
 
         for i in 0..5u32 {
@@ -1111,17 +1099,17 @@ mod tests {
         assert_eq!(result.len(), 2, "limit should restrict to 2 messages");
 
         let _ = std::fs::remove_file(crate::paths::room_meta_path(&room_id));
-        let _ = std::fs::remove_file(&token_path(&room_id, "alice"));
+        let _ = std::fs::remove_file(&global_token_path("alice-cql"));
     }
 
     // ── Test helpers ──────────────────────────────────────────────────────────
 
-    fn token_path(room_id: &str, username: &str) -> PathBuf {
-        crate::paths::token_path(room_id, username)
+    fn global_token_path(username: &str) -> PathBuf {
+        crate::paths::global_token_path(username)
     }
 
-    fn write_token_file(_dir: &TempDir, room_id: &str, username: &str, token: &str) {
-        let path = token_path(room_id, username);
+    fn write_token_file(_dir: &TempDir, _room_id: &str, username: &str, token: &str) {
+        let path = global_token_path(username);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).unwrap();
         }
@@ -1155,7 +1143,7 @@ mod tests {
             .first()
             .map(|id| {
                 // Resolve username by reading the token file for this room.
-                super::super::token::username_from_token(id, token)
+                super::super::token::username_from_token(token)
                     .ok()
                     .map(|u| {
                         let p = crate::paths::cursor_path(id, &u);
@@ -1172,7 +1160,7 @@ mod tests {
         let cursor_after = room_ids
             .first()
             .map(|id| {
-                super::super::token::username_from_token(id, token)
+                super::super::token::username_from_token(token)
                     .ok()
                     .map(|u| {
                         let p = crate::paths::cursor_path(id, &u);
@@ -1194,7 +1182,7 @@ mod tests {
                 let msgs = history::load(&chat_path).await?;
                 all.extend(msgs);
             }
-            let username = resolve_username_from_rooms(room_ids, token).unwrap_or_default();
+            let username = username_from_token(token).unwrap_or_default();
             let mut result: Vec<Message> = all
                 .into_iter()
                 .filter(|m| filter.matches(m, m.room()))
@@ -1235,12 +1223,10 @@ mod tests {
         }
     }
 
-    /// resolve_username_from_rooms finds username from the first matching room.
+    /// username_from_token returns an error for an unknown token.
     #[test]
-    fn resolve_username_finds_token_in_second_room() {
-        // This test can't easily be hermetic since resolve_username_from_rooms
-        // calls username_from_token which scans /tmp. We test the error case instead.
-        let result = resolve_username_from_rooms(&["nonexistent-room-xyz".to_owned()], "bad-token");
+    fn unknown_token_returns_error() {
+        let result = super::super::token::username_from_token("bad-token-nonexistent");
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -1341,15 +1327,15 @@ mod tests {
         let cursor_dir = TempDir::new().unwrap();
 
         let room_id = format!("test-pub-tier-{}", std::process::id());
-        write_token_file(&token_dir, &room_id, "alice", "tok-pub-tier");
+        write_token_file(&token_dir, &room_id, "alice-pub", "tok-pub-tier");
         write_meta_file(&room_id, chat.path());
 
-        // Write subscription map marking alice as Unsubscribed.
+        // Write subscription map marking alice-pub as Unsubscribed.
         let state_dir = crate::paths::room_state_dir();
         let _ = std::fs::create_dir_all(&state_dir);
         let sub_path = crate::paths::broker_subscriptions_path(&state_dir, &room_id);
         let mut map = std::collections::HashMap::new();
-        map.insert("alice".to_string(), SubscriptionTier::Unsubscribed);
+        map.insert("alice-pub".to_string(), SubscriptionTier::Unsubscribed);
         std::fs::write(&sub_path, serde_json::to_string(&map).unwrap()).unwrap();
 
         // Add a message.
@@ -1389,7 +1375,7 @@ mod tests {
 
         let _ = std::fs::remove_file(&sub_path);
         let _ = std::fs::remove_file(crate::paths::room_meta_path(&room_id));
-        let _ = std::fs::remove_file(&token_path(&room_id, "alice"));
+        let _ = std::fs::remove_file(&global_token_path("alice-pub"));
     }
 
     /// MentionsOnly tier sets mention_user filter, narrowing results to @mentions.

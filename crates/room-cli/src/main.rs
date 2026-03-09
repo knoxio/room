@@ -394,7 +394,7 @@ async fn main() -> anyhow::Result<()> {
             } else if let Some(id) = room_id {
                 vec![id]
             } else if use_all {
-                let username = oneshot::username_from_token_any_room(&token)?;
+                let username = oneshot::username_from_token(&token)?;
                 let discovered = oneshot::discover_joined_rooms(&username);
                 if discovered.is_empty() {
                     anyhow::bail!(
@@ -517,7 +517,7 @@ async fn main() -> anyhow::Result<()> {
                 vec![id]
             } else {
                 // Auto-discover rooms the user has joined.
-                let username = oneshot::username_from_token_any_room(&token)?;
+                let username = oneshot::username_from_token(&token)?;
                 let discovered = oneshot::discover_joined_rooms(&username);
                 if discovered.is_empty() {
                     anyhow::bail!(
@@ -560,7 +560,7 @@ async fn main() -> anyhow::Result<()> {
                 vec![id]
             } else {
                 // Auto-discover rooms the user has joined.
-                let username = oneshot::username_from_token_any_room(&token)?;
+                let username = oneshot::username_from_token(&token)?;
                 let discovered = oneshot::discover_joined_rooms(&username);
                 if discovered.is_empty() {
                     anyhow::bail!(

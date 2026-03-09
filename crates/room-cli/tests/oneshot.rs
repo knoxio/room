@@ -606,7 +606,7 @@ async fn pull_messages_does_not_update_cursor() {
     let (_user, token) = room_cli::oneshot::join_session(&broker.socket_path, "alice")
         .await
         .unwrap();
-    let token_path = room_cli::oneshot::token_file_path(room_id, "alice");
+    let token_path = room_cli::paths::global_token_path("alice");
     let token_data = serde_json::json!({ "username": "alice", "token": token });
     std::fs::write(&token_path, format!("{token_data}\n")).unwrap();
 
