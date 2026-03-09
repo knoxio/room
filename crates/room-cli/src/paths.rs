@@ -194,6 +194,12 @@ fn create_dir_0700(path: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    /// Serialises tests that read or write the `ROOM_SOCKET` environment
+    /// variable.  Env vars are process-global state — without this lock,
+    /// `cargo test` runs these tests in parallel and they race.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn room_home_ends_with_dot_room() {
@@ -279,8 +285,7 @@ mod tests {
 
     #[test]
     fn effective_socket_path_uses_env_var() {
-        // This test must not conflict with other env-dependent tests running in
-        // parallel.  We snapshot and restore ROOM_SOCKET around the assertion.
+        let _lock = ENV_LOCK.lock().unwrap();
         let key = "ROOM_SOCKET";
         let prev = std::env::var(key).ok();
         std::env::set_var(key, "/tmp/test-roomd.sock");
@@ -294,6 +299,7 @@ mod tests {
 
     #[test]
     fn effective_socket_path_explicit_overrides_env() {
+        let _lock = ENV_LOCK.lock().unwrap();
         let key = "ROOM_SOCKET";
         let prev = std::env::var(key).ok();
         std::env::set_var(key, "/tmp/env-roomd.sock");
@@ -308,11 +314,16 @@ mod tests {
 
     #[test]
     fn effective_socket_path_default_without_env() {
-        // Only test when ROOM_SOCKET is not set in the current environment.
-        if std::env::var("ROOM_SOCKET").is_err() {
-            let result = effective_socket_path(None);
-            assert_eq!(result, room_socket_path());
+        let _lock = ENV_LOCK.lock().unwrap();
+        let key = "ROOM_SOCKET";
+        let prev = std::env::var(key).ok();
+        std::env::remove_var(key);
+        let result = effective_socket_path(None);
+        match prev {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
         }
+        assert_eq!(result, room_socket_path());
     }
 
     #[test]
