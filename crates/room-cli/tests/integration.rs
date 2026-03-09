@@ -4385,3 +4385,182 @@ async fn create_then_destroy_then_recreate() {
     let token2 = daemon_join(&td.socket_path, "ephemeral", "bob").await;
     assert!(!token2.is_empty());
 }
+
+// ── REST POST /api/rooms tests ───────────────────────────────────────────────
+
+#[tokio::test]
+async fn rest_create_room_without_token_returns_401() {
+    let (_td, port) = TestDaemon::start_with_ws_configs(vec![]).await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(format!("http://127.0.0.1:{port}/api/rooms"))
+        .json(&serde_json::json!({"room_id": "newroom"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["code"], "missing_token");
+}
+
+#[tokio::test]
+async fn rest_create_room_with_invalid_token_returns_401() {
+    let (_td, port) = TestDaemon::start_with_ws_configs(vec![]).await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .post(format!("http://127.0.0.1:{port}/api/rooms"))
+        .header("Authorization", "Bearer not-a-real-token")
+        .json(&serde_json::json!({"room_id": "newroom"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["code"], "invalid_token");
+}
+
+#[tokio::test]
+async fn rest_create_room_returns_201() {
+    let (td, port) = TestDaemon::start_with_ws_configs(vec![("seed-room", None)]).await;
+    let base = format!("http://127.0.0.1:{port}");
+    let client = reqwest::Client::new();
+
+    // Get a valid token by joining an existing room.
+    let token = rest_join(&client, &base, "seed-room", "alice_cr").await;
+
+    let resp = client
+        .post(format!("{base}/api/rooms"))
+        .header("Authorization", format!("Bearer {token}"))
+        .json(&serde_json::json!({"room_id": "brand-new-room"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["type"], "room_created");
+    assert_eq!(body["room"], "brand-new-room");
+
+    // Room should now be accessible — join it.
+    let token2 = rest_join(&client, &base, "brand-new-room", "bob_cr").await;
+    assert!(!token2.is_empty());
+    drop(td);
+}
+
+#[tokio::test]
+async fn rest_create_room_duplicate_returns_409() {
+    let (td, port) = TestDaemon::start_with_ws_configs(vec![("existing-room-409", None)]).await;
+    let base = format!("http://127.0.0.1:{port}");
+    let client = reqwest::Client::new();
+
+    let token = rest_join(&client, &base, "existing-room-409", "alice_dup").await;
+
+    let resp = client
+        .post(format!("{base}/api/rooms"))
+        .header("Authorization", format!("Bearer {token}"))
+        .json(&serde_json::json!({"room_id": "existing-room-409"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 409);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["code"], "room_exists");
+    drop(td);
+}
+
+#[tokio::test]
+async fn rest_create_room_invalid_id_returns_400() {
+    let (td, port) = TestDaemon::start_with_ws_configs(vec![("seed400", None)]).await;
+    let base = format!("http://127.0.0.1:{port}");
+    let client = reqwest::Client::new();
+
+    let token = rest_join(&client, &base, "seed400", "alice_inv").await;
+
+    let resp = client
+        .post(format!("{base}/api/rooms"))
+        .header("Authorization", format!("Bearer {token}"))
+        .json(&serde_json::json!({"room_id": "../escape"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["code"], "invalid_room_id");
+    drop(td);
+}
+
+#[tokio::test]
+async fn rest_create_room_with_private_visibility() {
+    let (td, port) = TestDaemon::start_with_ws_configs(vec![("seed-priv", None)]).await;
+    let base = format!("http://127.0.0.1:{port}");
+    let client = reqwest::Client::new();
+
+    // alice_priv_creator gets a token from the seed room for auth.
+    let token = rest_join(&client, &base, "seed-priv", "alice_priv_creator").await;
+
+    let resp = client
+        .post(format!("{base}/api/rooms"))
+        .header("Authorization", format!("Bearer {token}"))
+        .json(&serde_json::json!({"room_id": "private-room", "visibility": "private", "invite": ["bob_priv_invited"]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["type"], "room_created");
+
+    // bob_priv_invited (in invite list) can join the private room.
+    let tok2 = rest_join(&client, &base, "private-room", "bob_priv_invited").await;
+    assert!(!tok2.is_empty());
+    drop(td);
+}
+
+#[tokio::test]
+async fn rest_create_dm_room_returns_201() {
+    let (td, port) = TestDaemon::start_with_ws_configs(vec![("seed-dm", None)]).await;
+    let base = format!("http://127.0.0.1:{port}");
+    let client = reqwest::Client::new();
+
+    // Use a separate creator user to get the auth token from the seed room.
+    let token = rest_join(&client, &base, "seed-dm", "dm_creator").await;
+
+    let resp = client
+        .post(format!("{base}/api/rooms"))
+        .header("Authorization", format!("Bearer {token}"))
+        .json(&serde_json::json!({"room_id": "dm-alice-bob-rest", "visibility": "dm", "invite": ["alice_dm_u", "bob_dm_u"]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["type"], "room_created");
+
+    // bob_dm_u (in invite list) can join the DM room.
+    let tok2 = rest_join(&client, &base, "dm-alice-bob-rest", "bob_dm_u").await;
+    assert!(!tok2.is_empty());
+    drop(td);
+}
+
+#[tokio::test]
+async fn rest_create_dm_room_wrong_invite_count_returns_400() {
+    let (td, port) = TestDaemon::start_with_ws_configs(vec![("seed-dm2", None)]).await;
+    let base = format!("http://127.0.0.1:{port}");
+    let client = reqwest::Client::new();
+
+    let token = rest_join(&client, &base, "seed-dm2", "alice_dm2").await;
+
+    let resp = client
+        .post(format!("{base}/api/rooms"))
+        .header("Authorization", format!("Bearer {token}"))
+        .json(
+            &serde_json::json!({"room_id": "dm-bad", "visibility": "dm", "invite": ["alice_dm2"]}),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["code"], "invalid_config");
+    drop(td);
+}

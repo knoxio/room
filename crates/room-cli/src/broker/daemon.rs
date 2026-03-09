@@ -209,48 +209,14 @@ impl DaemonState {
     /// Create a room and register it. Returns `Err` if the room ID is invalid
     /// or the room already exists.
     pub async fn create_room(&self, room_id: &str) -> Result<(), String> {
-        validate_room_id(room_id)?;
-        let mut rooms = self.rooms.lock().await;
-        if rooms.contains_key(room_id) {
-            return Err(format!("room already exists: {room_id}"));
-        }
-
-        let chat_path = self.config.chat_path(room_id);
-        let subscription_map_path = self.config.subscription_map_path(room_id);
-        let (shutdown_tx, _) = watch::channel(false);
-
-        let mut registry = PluginRegistry::new();
-        registry
-            .register(Box::new(plugin::help::HelpPlugin))
-            .map_err(|e| format!("plugin error: {e}"))?;
-        registry
-            .register(Box::new(plugin::stats::StatsPlugin))
-            .map_err(|e| format!("plugin error: {e}"))?;
-
-        // Load persisted subscriptions from previous session (if any).
-        let persisted_subs = super::commands::load_subscription_map(&subscription_map_path);
-
-        let state = Arc::new(RoomState {
-            clients: Arc::new(Mutex::new(HashMap::new())),
-            status_map: Arc::new(Mutex::new(HashMap::new())),
-            host_user: Arc::new(Mutex::new(None)),
-            // All rooms in this daemon share the same token map so a token
-            // issued in any room is valid in all rooms.
-            token_map: Arc::clone(&self.system_token_map),
-            claim_map: Arc::new(Mutex::new(HashMap::new())),
-            subscription_map: Arc::new(Mutex::new(persisted_subs)),
-            chat_path: Arc::new(chat_path),
-            token_map_path: Arc::new(self.config.system_tokens_path()),
-            subscription_map_path: Arc::new(subscription_map_path),
-            room_id: Arc::new(room_id.to_owned()),
-            shutdown: Arc::new(shutdown_tx),
-            seq_counter: Arc::new(AtomicU64::new(0)),
-            plugin_registry: Arc::new(registry),
-            config: None,
-        });
-
-        rooms.insert(room_id.to_owned(), state);
-        Ok(())
+        create_room_entry(
+            room_id,
+            None,
+            &self.rooms,
+            &self.config,
+            &self.system_token_map,
+        )
+        .await
     }
 
     /// Create a room with explicit configuration. Returns `Err` if the room ID
@@ -260,52 +226,14 @@ impl DaemonState {
         room_id: &str,
         config: room_protocol::RoomConfig,
     ) -> Result<(), String> {
-        validate_room_id(room_id)?;
-        let mut rooms = self.rooms.lock().await;
-        if rooms.contains_key(room_id) {
-            return Err(format!("room already exists: {room_id}"));
-        }
-
-        let chat_path = self.config.chat_path(room_id);
-        let subscription_map_path = self.config.subscription_map_path(room_id);
-        let (shutdown_tx, _) = watch::channel(false);
-
-        let mut registry = PluginRegistry::new();
-        registry
-            .register(Box::new(plugin::help::HelpPlugin))
-            .map_err(|e| format!("plugin error: {e}"))?;
-        registry
-            .register(Box::new(plugin::stats::StatsPlugin))
-            .map_err(|e| format!("plugin error: {e}"))?;
-
-        // Merge persisted subscriptions with config defaults (DM auto-subscribe).
-        // Config defaults seed any missing entries; persisted values take precedence
-        // because a user may have explicitly changed their tier after room creation.
-        let mut merged_subs = build_initial_subscriptions(&config);
-        let persisted_subs = super::commands::load_subscription_map(&subscription_map_path);
-        merged_subs.extend(persisted_subs);
-
-        let state = Arc::new(RoomState {
-            clients: Arc::new(Mutex::new(HashMap::new())),
-            status_map: Arc::new(Mutex::new(HashMap::new())),
-            host_user: Arc::new(Mutex::new(None)),
-            // All rooms in this daemon share the same token map so a token
-            // issued in any room is valid in all rooms.
-            token_map: Arc::clone(&self.system_token_map),
-            claim_map: Arc::new(Mutex::new(HashMap::new())),
-            subscription_map: Arc::new(Mutex::new(merged_subs)),
-            chat_path: Arc::new(chat_path),
-            token_map_path: Arc::new(self.config.system_tokens_path()),
-            subscription_map_path: Arc::new(subscription_map_path),
-            room_id: Arc::new(room_id.to_owned()),
-            shutdown: Arc::new(shutdown_tx),
-            seq_counter: Arc::new(AtomicU64::new(0)),
-            plugin_registry: Arc::new(registry),
-            config: Some(config),
-        });
-
-        rooms.insert(room_id.to_owned(), state);
-        Ok(())
+        create_room_entry(
+            room_id,
+            Some(config),
+            &self.rooms,
+            &self.config,
+            &self.system_token_map,
+        )
+        .await
     }
 
     /// Get a room's config, if it exists.
@@ -399,6 +327,8 @@ impl DaemonState {
             let ws_state = DaemonWsState {
                 rooms: self.rooms.clone(),
                 next_client_id: self.next_client_id.clone(),
+                config: self.config.clone(),
+                system_token_map: self.system_token_map.clone(),
             };
             let app = ws::create_daemon_router(ws_state);
             let tcp = tokio::net::TcpListener::bind(("0.0.0.0", port)).await?;
@@ -629,6 +559,70 @@ fn build_initial_subscriptions(
     subs
 }
 
+/// Core room-creation logic shared by UDS and REST paths.
+///
+/// Validates the room ID, checks for duplicates, builds a [`RoomState`], and
+/// inserts it into the room map. Pass `config: None` to create a configless
+/// room (no invite list, no visibility constraint).
+pub(crate) async fn create_room_entry(
+    room_id: &str,
+    config: Option<room_protocol::RoomConfig>,
+    rooms: &RoomMap,
+    daemon_config: &DaemonConfig,
+    system_token_map: &TokenMap,
+) -> Result<(), String> {
+    validate_room_id(room_id)?;
+    {
+        let map = rooms.lock().await;
+        if map.contains_key(room_id) {
+            return Err(format!("room already exists: {room_id}"));
+        }
+    }
+
+    let chat_path = daemon_config.chat_path(room_id);
+    let subscription_map_path = daemon_config.subscription_map_path(room_id);
+    let (shutdown_tx, _) = watch::channel(false);
+
+    let mut registry = PluginRegistry::new();
+    registry
+        .register(Box::new(plugin::help::HelpPlugin))
+        .map_err(|e| format!("plugin error: {e}"))?;
+    registry
+        .register(Box::new(plugin::stats::StatsPlugin))
+        .map_err(|e| format!("plugin error: {e}"))?;
+
+    let persisted_subs = super::commands::load_subscription_map(&subscription_map_path);
+    let merged_subs = if let Some(ref cfg) = config {
+        let mut initial = build_initial_subscriptions(cfg);
+        initial.extend(persisted_subs);
+        initial
+    } else {
+        persisted_subs
+    };
+
+    let state = Arc::new(RoomState {
+        clients: Arc::new(Mutex::new(HashMap::new())),
+        status_map: Arc::new(Mutex::new(HashMap::new())),
+        host_user: Arc::new(Mutex::new(None)),
+        // All rooms in this daemon share the same token map so a token
+        // issued in any room is valid in all rooms.
+        token_map: Arc::clone(system_token_map),
+        claim_map: Arc::new(Mutex::new(HashMap::new())),
+        subscription_map: Arc::new(Mutex::new(merged_subs)),
+        chat_path: Arc::new(chat_path),
+        token_map_path: Arc::new(daemon_config.system_tokens_path()),
+        subscription_map_path: Arc::new(subscription_map_path),
+        room_id: Arc::new(room_id.to_owned()),
+        shutdown: Arc::new(shutdown_tx),
+        seq_counter: Arc::new(AtomicU64::new(0)),
+        plugin_registry: Arc::new(registry),
+        config,
+    });
+
+    rooms.lock().await.insert(room_id.to_owned(), state);
+    Ok(())
+}
+
 /// Parse the `ROOM:<room_id>:` prefix from a handshake line.
 ///
 /// Returns `(room_id, rest)` on success. `rest` is the remainder after the
@@ -810,55 +804,24 @@ async fn handle_create(
         }
     };
 
-    // Build RoomState (mirrors DaemonState::create_room_with_config).
-    let chat_path = daemon_config.chat_path(room_id);
-    let subscription_map_path = daemon_config.subscription_map_path(room_id);
-    let (shutdown_tx, _) = watch::channel(false);
-
-    let mut registry = PluginRegistry::new();
-    if let Err(e) = registry.register(Box::new(plugin::help::HelpPlugin)) {
+    // Delegate to the shared room-creation helper.
+    if let Err(e) = create_room_entry(
+        room_id,
+        Some(room_config),
+        rooms,
+        daemon_config,
+        system_token_map,
+    )
+    .await
+    {
         let err = serde_json::json!({
             "type": "error",
             "code": "internal",
-            "message": format!("plugin error: {e}")
+            "message": e
         });
         write_half.write_all(format!("{err}\n").as_bytes()).await?;
         return Ok(());
     }
-    if let Err(e) = registry.register(Box::new(plugin::stats::StatsPlugin)) {
-        let err = serde_json::json!({
-            "type": "error",
-            "code": "internal",
-            "message": format!("plugin error: {e}")
-        });
-        write_half.write_all(format!("{err}\n").as_bytes()).await?;
-        return Ok(());
-    }
-
-    // Merge persisted subscriptions with config defaults (DM auto-subscribe).
-    let mut merged_subs = build_initial_subscriptions(&room_config);
-    let persisted_subs = super::commands::load_subscription_map(&subscription_map_path);
-    merged_subs.extend(persisted_subs);
-
-    let state = Arc::new(RoomState {
-        clients: Arc::new(Mutex::new(HashMap::new())),
-        status_map: Arc::new(Mutex::new(HashMap::new())),
-        host_user: Arc::new(Mutex::new(None)),
-        // Share the daemon's system-level token map so tokens work across rooms.
-        token_map: Arc::clone(system_token_map),
-        claim_map: Arc::new(Mutex::new(HashMap::new())),
-        subscription_map: Arc::new(Mutex::new(merged_subs)),
-        chat_path: Arc::new(chat_path),
-        token_map_path: Arc::new(daemon_config.system_tokens_path()),
-        subscription_map_path: Arc::new(subscription_map_path),
-        room_id: Arc::new(room_id.to_owned()),
-        shutdown: Arc::new(shutdown_tx),
-        seq_counter: Arc::new(AtomicU64::new(0)),
-        plugin_registry: Arc::new(registry),
-        config: Some(room_config),
-    });
-
-    rooms.lock().await.insert(room_id.to_owned(), state);
 
     let ok = serde_json::json!({
         "type": "room_created",

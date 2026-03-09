@@ -839,6 +839,8 @@ async fn api_health(State(state): State<WsAppState>) -> impl IntoResponse {
 pub(crate) struct DaemonWsState {
     pub(crate) rooms: super::daemon::RoomMap,
     pub(crate) next_client_id: Arc<AtomicU64>,
+    pub(crate) config: super::daemon::DaemonConfig,
+    pub(crate) system_token_map: super::state::TokenMap,
 }
 
 impl DaemonWsState {
@@ -858,6 +860,7 @@ pub(crate) fn create_daemon_router(state: DaemonWsState) -> Router {
         .route("/api/{room_id}/query", get(daemon_api_query))
         .route("/api/health", get(daemon_api_health))
         .route("/api/rooms", get(daemon_api_rooms))
+        .route("/api/rooms", post(daemon_api_create_room))
         .with_state(state)
 }
 
@@ -1125,6 +1128,115 @@ async fn daemon_api_rooms(State(state): State<DaemonWsState>) -> impl IntoRespon
     Json(serde_json::json!({
         "rooms": ids,
     }))
+}
+
+#[derive(Deserialize)]
+struct CreateRoomRequest {
+    room_id: String,
+    #[serde(default)]
+    visibility: Option<String>,
+    #[serde(default)]
+    invite: Option<Vec<String>>,
+}
+
+async fn daemon_api_create_room(
+    State(state): State<DaemonWsState>,
+    headers: HeaderMap,
+    Json(body): Json<CreateRoomRequest>,
+) -> impl IntoResponse {
+    let token = match extract_bearer_token(&headers) {
+        Some(t) => t,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"type":"error","code":"missing_token"})),
+            )
+                .into_response()
+        }
+    };
+
+    // Validate token against the shared token map.
+    if validate_token(token, &state.system_token_map)
+        .await
+        .is_none()
+    {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"type":"error","code":"invalid_token"})),
+        )
+            .into_response();
+    }
+
+    let visibility_str = body.visibility.as_deref().unwrap_or("public");
+    let invite = body.invite.unwrap_or_default();
+
+    let room_config = match visibility_str {
+        "public" => room_protocol::RoomConfig {
+            visibility: room_protocol::RoomVisibility::Public,
+            max_members: None,
+            invite_list: invite.into_iter().collect(),
+            created_by: "system".to_owned(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+        },
+        "private" => room_protocol::RoomConfig {
+            visibility: room_protocol::RoomVisibility::Private,
+            max_members: None,
+            invite_list: invite.into_iter().collect(),
+            created_by: "system".to_owned(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+        },
+        "dm" => {
+            if invite.len() != 2 {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "type": "error",
+                        "code": "invalid_config",
+                        "message": "dm visibility requires exactly 2 users in invite list"
+                    })),
+                )
+                    .into_response();
+            }
+            room_protocol::RoomConfig::dm(&invite[0], &invite[1])
+        }
+        other => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "type": "error",
+                    "code": "invalid_config",
+                    "message": format!("unknown visibility: {other}")
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    match super::daemon::create_room_entry(
+        &body.room_id,
+        Some(room_config),
+        &state.rooms,
+        &state.config,
+        &state.system_token_map,
+    )
+    .await
+    {
+        Ok(()) => (
+            StatusCode::CREATED,
+            Json(serde_json::json!({"type":"room_created","room": body.room_id})),
+        )
+            .into_response(),
+        Err(e) if e.contains("room already exists") => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({"type":"error","code":"room_exists","message": e})),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"type":"error","code":"invalid_room_id","message": e})),
+        )
+            .into_response(),
+    }
 }
 
 async fn daemon_api_query(
