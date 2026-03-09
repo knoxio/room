@@ -1,14 +1,20 @@
 /// Room lifecycle tests: UDS CREATE:/DESTROY: protocol and REST POST /api/rooms.
 ///
 /// Covers: dynamic room creation, duplicate/invalid ID errors, private/DM room
-/// configuration, room destruction, and REST room creation endpoint.
+/// configuration, room destruction (including with connected clients), and REST
+/// room creation endpoint.
 mod common;
 
-use common::{daemon_create, daemon_destroy, daemon_join, daemon_send, rest_join, TestDaemon};
+use std::time::Duration;
+
+use common::{
+    daemon_connect, daemon_create, daemon_destroy, daemon_join, daemon_send, rest_join, TestDaemon,
+};
 use room_protocol::RoomConfig;
 use std::path::PathBuf;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
+use tokio::time::timeout;
 
 #[tokio::test]
 async fn create_room_via_uds_then_join_and_send() {
@@ -437,4 +443,138 @@ async fn rest_create_dm_room_wrong_invite_count_returns_400() {
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["code"], "invalid_config");
     drop(td);
+}
+
+// ── Destroy with connected clients (P0 gap) ─────────────────────────────────
+
+/// When a room is destroyed, UDS interactive clients should receive EOF
+/// (read returns 0 bytes), and subsequent join/send attempts to the
+/// destroyed room should return room_not_found.
+#[tokio::test]
+async fn destroy_room_disconnects_uds_interactive_client() {
+    let td = TestDaemon::start(&["live-room"]).await;
+
+    // Connect an interactive client via UDS.
+    let (mut reader, _writer) = daemon_connect(&td.socket_path, "live-room", "observer").await;
+
+    // Drain the join broadcast and any history replay.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Destroy the room while the client is connected.
+    let resp = daemon_destroy(&td.socket_path, "live-room").await;
+    assert_eq!(resp["type"], "room_destroyed");
+
+    // The interactive client should receive EOF (0 bytes read) within a
+    // reasonable timeout — the shutdown signal triggers stream closure.
+    let mut buf = String::new();
+    let result = timeout(Duration::from_secs(2), reader.read_line(&mut buf)).await;
+    match result {
+        Ok(Ok(0)) => { /* EOF — expected */ }
+        Ok(Ok(_)) => {
+            // Got data — could be a final system message before EOF. Drain and
+            // expect EOF on the next read.
+            buf.clear();
+            let eof = timeout(Duration::from_secs(1), reader.read_line(&mut buf)).await;
+            match eof {
+                Ok(Ok(0)) => { /* EOF after final message */ }
+                Ok(Err(_)) => { /* read error after shutdown — acceptable */ }
+                Err(_) => panic!("client did not receive EOF after room destroy"),
+                Ok(Ok(n)) => panic!("unexpected data ({n} bytes) after destroy: {buf}"),
+            }
+        }
+        Ok(Err(_)) => { /* read error — connection was severed, acceptable */ }
+        Err(_) => panic!("timed out — client never received EOF after room destroy"),
+    }
+
+    // Subsequent join to the destroyed room should fail.
+    let stream = UnixStream::connect(&td.socket_path).await.unwrap();
+    let (r, mut w) = stream.into_split();
+    w.write_all(b"ROOM:live-room:JOIN:latecomer\n")
+        .await
+        .unwrap();
+    let mut reader2 = BufReader::new(r);
+    let mut line = String::new();
+    reader2.read_line(&mut line).await.unwrap();
+    let v: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+    assert_eq!(v["type"], "error");
+    assert_eq!(v["code"], "room_not_found");
+}
+
+/// When a room is destroyed, a token-authenticated send to that room
+/// should fail with room_not_found.
+#[tokio::test]
+async fn destroy_room_rejects_subsequent_token_send() {
+    let td = TestDaemon::start(&["send-room"]).await;
+
+    // Get a token before destroy.
+    let token = daemon_join(&td.socket_path, "send-room", "alice").await;
+
+    // Verify send works before destroy.
+    let msg = daemon_send(&td.socket_path, "send-room", &token, "before").await;
+    assert_eq!(msg["type"], "message");
+
+    // Destroy the room.
+    let resp = daemon_destroy(&td.socket_path, "send-room").await;
+    assert_eq!(resp["type"], "room_destroyed");
+
+    // Subsequent send should fail — room no longer exists.
+    let stream = UnixStream::connect(&td.socket_path).await.unwrap();
+    let (r, mut w) = stream.into_split();
+    w.write_all(format!("ROOM:send-room:TOKEN:{token}\n").as_bytes())
+        .await
+        .unwrap();
+    let mut reader = BufReader::new(r);
+    let mut line = String::new();
+    reader.read_line(&mut line).await.unwrap();
+    let v: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+    assert_eq!(
+        v["type"], "error",
+        "send to destroyed room should return error: {v}"
+    );
+    assert_eq!(v["code"], "room_not_found");
+}
+
+/// Multiple interactive clients connected to the same room should all
+/// receive EOF when the room is destroyed.
+#[tokio::test]
+async fn destroy_room_disconnects_multiple_uds_clients() {
+    let td = TestDaemon::start(&["multi-client-room"]).await;
+
+    // Connect three interactive clients.
+    let (mut r1, _w1) = daemon_connect(&td.socket_path, "multi-client-room", "client-1").await;
+    let (mut r2, _w2) = daemon_connect(&td.socket_path, "multi-client-room", "client-2").await;
+    let (mut r3, _w3) = daemon_connect(&td.socket_path, "multi-client-room", "client-3").await;
+
+    // Let join broadcasts settle.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Destroy the room.
+    let resp = daemon_destroy(&td.socket_path, "multi-client-room").await;
+    assert_eq!(resp["type"], "room_destroyed");
+
+    // All three clients should eventually get EOF or a read error.
+    // We check by trying to read — should return 0 bytes (EOF) or error
+    // within the timeout.
+    async fn expect_disconnect(
+        reader: &mut BufReader<tokio::net::unix::OwnedReadHalf>,
+        label: &str,
+    ) {
+        let deadline = Duration::from_secs(2);
+        loop {
+            let mut buf = String::new();
+            match timeout(deadline, reader.read_line(&mut buf)).await {
+                Ok(Ok(0)) => return,  // EOF
+                Ok(Err(_)) => return, // read error (connection reset)
+                Err(_) => panic!("{label} did not disconnect after room destroy"),
+                Ok(Ok(_)) => continue, // drain residual messages
+            }
+        }
+    }
+
+    // Run all three checks concurrently.
+    tokio::join!(
+        expect_disconnect(&mut r1, "client-1"),
+        expect_disconnect(&mut r2, "client-2"),
+        expect_disconnect(&mut r3, "client-3"),
+    );
 }
