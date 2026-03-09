@@ -7,7 +7,6 @@ pub(crate) mod state;
 pub(crate) mod ws;
 
 use std::{
-    collections::HashMap,
     path::PathBuf,
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -18,7 +17,6 @@ use std::{
 use crate::{
     history,
     message::{make_join, make_leave, make_system, parse_client_line, Message},
-    plugin::{self, PluginRegistry},
 };
 use auth::{handle_oneshot_join, validate_token};
 use commands::{route_command, CommandResult};
@@ -31,7 +29,7 @@ use tokio::{
         unix::{OwnedReadHalf, OwnedWriteHalf},
         UnixListener, UnixStream,
     },
-    sync::{broadcast, watch, Mutex},
+    sync::{broadcast, Mutex},
 };
 
 pub struct Broker {
@@ -75,12 +73,6 @@ impl Broker {
         let listener = UnixListener::bind(&self.socket_path)?;
         eprintln!("[broker] listening on {}", self.socket_path.display());
 
-        let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
-
-        let mut registry = PluginRegistry::new();
-        registry.register(Box::new(plugin::help::HelpPlugin))?;
-        registry.register(Box::new(plugin::stats::StatsPlugin))?;
-
         // Load persisted state from a previous broker session (if any).
         let persisted_tokens = auth::load_token_map(&self.token_map_path);
         if !persisted_tokens.is_empty() {
@@ -97,22 +89,18 @@ impl Broker {
             );
         }
 
-        let state = Arc::new(RoomState {
-            clients: Arc::new(Mutex::new(HashMap::new())),
-            status_map: Arc::new(Mutex::new(HashMap::new())),
-            host_user: Arc::new(Mutex::new(None)),
-            token_map: Arc::new(Mutex::new(persisted_tokens)),
-            claim_map: Arc::new(Mutex::new(HashMap::new())),
-            subscription_map: Arc::new(Mutex::new(persisted_subs)),
-            chat_path: Arc::new(self.chat_path.clone()),
-            token_map_path: Arc::new(self.token_map_path.clone()),
-            subscription_map_path: Arc::new(self.subscription_map_path.clone()),
-            room_id: Arc::new(self.room_id.clone()),
-            shutdown: Arc::new(shutdown_tx),
-            seq_counter: Arc::new(AtomicU64::new(0)),
-            plugin_registry: Arc::new(registry),
-            config: None,
-        });
+        let state = RoomState::new(
+            self.room_id.clone(),
+            self.chat_path.clone(),
+            self.token_map_path.clone(),
+            self.subscription_map_path.clone(),
+            Arc::new(Mutex::new(persisted_tokens)),
+            Arc::new(Mutex::new(persisted_subs)),
+            None,
+        )
+        .map_err(anyhow::Error::msg)?;
+        // Subscribe to the shutdown signal before entering the accept loop.
+        let mut shutdown_rx = state.shutdown.subscribe();
         let next_client_id = Arc::new(AtomicU64::new(0));
 
         // Start WebSocket/REST server if a port was configured.
@@ -583,27 +571,20 @@ async fn auto_subscribe_mentioned(msg: &Message, state: &RoomState) {
 mod tests {
     use super::*;
     use crate::message::make_message;
-    use std::collections::HashMap;
-    use tokio::sync::watch;
+    use std::{collections::HashMap, sync::Arc};
+    use tokio::sync::Mutex;
 
     fn make_test_state(chat_path: std::path::PathBuf) -> Arc<RoomState> {
-        let (shutdown_tx, _) = watch::channel(false);
-        Arc::new(RoomState {
-            clients: Arc::new(Mutex::new(HashMap::new())),
-            status_map: Arc::new(Mutex::new(HashMap::new())),
-            host_user: Arc::new(Mutex::new(None)),
-            token_map: Arc::new(Mutex::new(HashMap::new())),
-            claim_map: Arc::new(Mutex::new(HashMap::new())),
-            subscription_map: Arc::new(Mutex::new(HashMap::new())),
-            chat_path: Arc::new(chat_path.clone()),
-            token_map_path: Arc::new(chat_path.with_extension("tokens")),
-            subscription_map_path: Arc::new(chat_path.with_extension("subscriptions")),
-            room_id: Arc::new("test-room".to_owned()),
-            shutdown: Arc::new(shutdown_tx),
-            seq_counter: Arc::new(AtomicU64::new(0)),
-            plugin_registry: Arc::new(PluginRegistry::new()),
-            config: None,
-        })
+        RoomState::new(
+            "test-room".to_owned(),
+            chat_path.clone(),
+            chat_path.with_extension("tokens"),
+            chat_path.with_extension("subscriptions"),
+            Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(Mutex::new(HashMap::new())),
+            None,
+        )
+        .unwrap()
     }
 
     #[tokio::test]
