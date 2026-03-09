@@ -74,6 +74,15 @@ pub fn broker_tokens_path(state_dir: &Path, room_id: &str) -> PathBuf {
     state_dir.join(format!("{room_id}.tokens"))
 }
 
+/// System-level token persistence path: `~/.room/state/tokens.json`.
+///
+/// Tokens in a daemon are system-level — a single token issued by `room join`
+/// in any room is valid in all rooms managed by the same daemon. This file
+/// stores the complete token → username mapping across all rooms.
+pub fn system_tokens_path() -> PathBuf {
+    room_state_dir().join("tokens.json")
+}
+
 // ── Directory initialisation ──────────────────────────────────────────────────
 
 /// Ensure `~/.room/state/` and `~/.room/data/` exist.

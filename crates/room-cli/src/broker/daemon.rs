@@ -38,7 +38,7 @@ use crate::plugin::{self, PluginRegistry};
 
 use super::{
     handle_oneshot_send,
-    state::RoomState,
+    state::{RoomState, TokenMap},
     ws::{self, DaemonWsState},
 };
 
@@ -99,6 +99,15 @@ impl DaemonConfig {
     pub fn token_map_path(&self, room_id: &str) -> PathBuf {
         crate::paths::broker_tokens_path(&self.state_dir, room_id)
     }
+
+    /// System-level token persistence path: `<state_dir>/tokens.json`.
+    ///
+    /// Used by the daemon to share a single token store across all rooms.
+    /// Production default is `~/.room/state/tokens.json`; tests override
+    /// `state_dir` with a temp directory.
+    pub fn system_tokens_path(&self) -> PathBuf {
+        self.state_dir.join("tokens.json")
+    }
 }
 
 impl Default for DaemonConfig {
@@ -123,17 +132,26 @@ pub struct DaemonState {
     pub(crate) next_client_id: Arc<AtomicU64>,
     /// Daemon-level shutdown signal.
     pub(crate) shutdown: Arc<watch::Sender<bool>>,
+    /// System-level token map shared across all rooms.
+    ///
+    /// A single `Arc<Mutex<HashMap>>` instance is cloned into every room's
+    /// `token_map`. Tokens issued in any room are valid in all rooms managed
+    /// by this daemon. Persisted to `~/.room/state/tokens.json`.
+    pub(crate) system_token_map: TokenMap,
 }
 
 impl DaemonState {
     /// Create a new daemon with the given configuration and no rooms.
     pub fn new(config: DaemonConfig) -> Self {
         let (shutdown_tx, _) = watch::channel(false);
+        // Load persisted system-level tokens from previous session (if any).
+        let persisted = super::auth::load_token_map(&config.system_tokens_path());
         Self {
             rooms: Arc::new(Mutex::new(HashMap::new())),
             config,
             next_client_id: Arc::new(AtomicU64::new(0)),
             shutdown: Arc::new(shutdown_tx),
+            system_token_map: Arc::new(Mutex::new(persisted)),
         }
     }
 
@@ -147,7 +165,6 @@ impl DaemonState {
         }
 
         let chat_path = self.config.chat_path(room_id);
-        let token_map_path = self.config.token_map_path(room_id);
         let (shutdown_tx, _) = watch::channel(false);
 
         let mut registry = PluginRegistry::new();
@@ -158,18 +175,17 @@ impl DaemonState {
             .register(Box::new(plugin::stats::StatsPlugin))
             .map_err(|e| format!("plugin error: {e}"))?;
 
-        // Load persisted tokens from previous session (if any).
-        let persisted_tokens = super::auth::load_token_map(&token_map_path);
-
         let state = Arc::new(RoomState {
             clients: Arc::new(Mutex::new(HashMap::new())),
             status_map: Arc::new(Mutex::new(HashMap::new())),
             host_user: Arc::new(Mutex::new(None)),
-            token_map: Arc::new(Mutex::new(persisted_tokens)),
+            // All rooms in this daemon share the same token map so a token
+            // issued in any room is valid in all rooms.
+            token_map: Arc::clone(&self.system_token_map),
             claim_map: Arc::new(Mutex::new(HashMap::new())),
             subscription_map: Arc::new(Mutex::new(HashMap::new())),
             chat_path: Arc::new(chat_path),
-            token_map_path: Arc::new(token_map_path),
+            token_map_path: Arc::new(self.config.system_tokens_path()),
             room_id: Arc::new(room_id.to_owned()),
             shutdown: Arc::new(shutdown_tx),
             seq_counter: Arc::new(AtomicU64::new(0)),
@@ -195,7 +211,6 @@ impl DaemonState {
         }
 
         let chat_path = self.config.chat_path(room_id);
-        let token_map_path = self.config.token_map_path(room_id);
         let (shutdown_tx, _) = watch::channel(false);
 
         let mut registry = PluginRegistry::new();
@@ -208,17 +223,18 @@ impl DaemonState {
 
         // Auto-subscribe DM participants at Full tier.
         let initial_subs = build_initial_subscriptions(&config);
-        let persisted_tokens = super::auth::load_token_map(&token_map_path);
 
         let state = Arc::new(RoomState {
             clients: Arc::new(Mutex::new(HashMap::new())),
             status_map: Arc::new(Mutex::new(HashMap::new())),
             host_user: Arc::new(Mutex::new(None)),
-            token_map: Arc::new(Mutex::new(persisted_tokens)),
+            // All rooms in this daemon share the same token map so a token
+            // issued in any room is valid in all rooms.
+            token_map: Arc::clone(&self.system_token_map),
             claim_map: Arc::new(Mutex::new(HashMap::new())),
             subscription_map: Arc::new(Mutex::new(initial_subs)),
             chat_path: Arc::new(chat_path),
-            token_map_path: Arc::new(token_map_path),
+            token_map_path: Arc::new(self.config.system_tokens_path()),
             room_id: Arc::new(room_id.to_owned()),
             shutdown: Arc::new(shutdown_tx),
             seq_counter: Arc::new(AtomicU64::new(0)),

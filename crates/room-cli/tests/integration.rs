@@ -2918,28 +2918,27 @@ async fn daemon_multi_room_message_isolation() {
     );
 }
 
-// ── Test: token from room-alpha is invalid in room-beta ───────────────────
+// ── Test: system-level tokens are valid across all rooms in a daemon ──────
+//
+// Tokens are daemon-scoped (not room-scoped): a token issued by any room JOIN
+// can be used to send to any other room managed by the same daemon (#293).
 
 #[tokio::test]
-async fn daemon_token_scoped_to_room() {
+async fn daemon_token_valid_across_rooms() {
     let td = TestDaemon::start(&["room-x", "room-y"]).await;
 
+    // Join room-x — the resulting token is system-level.
     let token_x = daemon_join(&td.socket_path, "room-x", "user-x").await;
 
-    // Try to use token_x in room-y — should fail with invalid_token.
-    let stream = UnixStream::connect(&td.socket_path).await.unwrap();
-    let (r, mut w) = stream.into_split();
-    w.write_all(format!("ROOM:room-y:TOKEN:{token_x}\n").as_bytes())
-        .await
-        .unwrap();
-    w.write_all(b"cross-room attempt\n").await.unwrap();
-
-    let mut reader = BufReader::new(r);
-    let mut line = String::new();
-    reader.read_line(&mut line).await.unwrap();
-    let v: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
-    assert_eq!(v["type"], "error");
-    assert_eq!(v["code"], "invalid_token");
+    // Use the token issued in room-x to send to room-y.
+    let resp = daemon_send(&td.socket_path, "room-y", &token_x, "cross-room msg").await;
+    assert_eq!(
+        resp["type"], "message",
+        "system-level token should be valid in a different room: {resp}"
+    );
+    assert_eq!(resp["content"], "cross-room msg");
+    assert_eq!(resp["user"], "user-x");
+    assert_eq!(resp["room"], "room-y");
 }
 
 // ── DM room visibility integration tests ─────────────────────────────────
