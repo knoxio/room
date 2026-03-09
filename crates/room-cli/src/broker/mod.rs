@@ -114,6 +114,7 @@ impl Broker {
             seq_counter: Arc::new(AtomicU64::new(0)),
             plugin_registry: Arc::new(registry),
             config: None,
+            registry: std::sync::OnceLock::new(),
         });
         let next_client_id = Arc::new(AtomicU64::new(0));
 
@@ -608,6 +609,7 @@ mod tests {
             seq_counter: Arc::new(AtomicU64::new(0)),
             plugin_registry: Arc::new(PluginRegistry::new()),
             config: None,
+            registry: std::sync::OnceLock::new(),
         })
     }
 

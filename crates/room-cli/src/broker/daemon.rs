@@ -265,6 +265,7 @@ impl DaemonState {
             &self.rooms,
             &self.config,
             &self.system_token_map,
+            Some(self.user_registry.clone()),
         )
         .await
     }
@@ -282,6 +283,7 @@ impl DaemonState {
             &self.rooms,
             &self.config,
             &self.system_token_map,
+            Some(self.user_registry.clone()),
         )
         .await
     }
@@ -394,6 +396,7 @@ impl DaemonState {
                 next_client_id: self.next_client_id.clone(),
                 config: self.config.clone(),
                 system_token_map: self.system_token_map.clone(),
+                user_registry: self.user_registry.clone(),
             };
             let app = ws::create_daemon_router(ws_state);
             let tcp = tokio::net::TcpListener::bind(("0.0.0.0", port)).await?;
@@ -636,12 +639,17 @@ fn build_initial_subscriptions(
 /// Validates the room ID, checks for duplicates, builds a [`RoomState`], and
 /// inserts it into the room map. Pass `config: None` to create a configless
 /// room (no invite list, no visibility constraint).
+///
+/// `registry` is attached to the [`RoomState`] via [`RoomState::set_registry`]
+/// so that admin commands (`/kick`, `/reauth`) can also revoke tokens from the
+/// daemon-level [`UserRegistry`] in addition to the in-memory token map.
 pub(crate) async fn create_room_entry(
     room_id: &str,
     config: Option<room_protocol::RoomConfig>,
     rooms: &RoomMap,
     daemon_config: &DaemonConfig,
     system_token_map: &TokenMap,
+    registry: Option<Arc<tokio::sync::Mutex<UserRegistry>>>,
 ) -> Result<(), String> {
     validate_room_id(room_id)?;
     {
@@ -674,6 +682,9 @@ pub(crate) async fn create_room_entry(
         Arc::new(Mutex::new(merged_subs)),
         config,
     )?;
+    if let Some(reg) = registry {
+        state.set_registry(reg);
+    }
 
     rooms.lock().await.insert(room_id.to_owned(), state);
 
@@ -755,6 +766,7 @@ async fn handle_create(
     rooms: &RoomMap,
     daemon_config: &DaemonConfig,
     system_token_map: &TokenMap,
+    user_registry: &Arc<tokio::sync::Mutex<UserRegistry>>,
 ) -> anyhow::Result<()> {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
@@ -861,6 +873,7 @@ async fn handle_create(
         rooms,
         daemon_config,
         system_token_map,
+        Some(user_registry.clone()),
     )
     .await
     {
@@ -922,6 +935,7 @@ async fn dispatch_connection(
                 rooms,
                 daemon_config,
                 system_token_map,
+                user_registry,
             )
             .await;
         }

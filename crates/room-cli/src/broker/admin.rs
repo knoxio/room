@@ -59,6 +59,13 @@ pub(crate) async fn handle_admin_cmd(
             map.retain(|_, u| u != &target);
             map.insert(format!("KICKED:{target}"), target.clone());
             drop(map);
+            // In daemon mode, also revoke from the UserRegistry so the kicked user
+            // cannot rejoin via issue_token_via_registry (which checks has_token_for_user).
+            if let Some(reg) = state.registry.get() {
+                if let Err(e) = reg.lock().await.revoke_user_tokens(&target) {
+                    eprintln!("[admin] registry revoke failed for {target}: {e}");
+                }
+            }
             // Remove from status map immediately so /who no longer shows the kicked user.
             state.remove_status(&target).await;
             let content = format!("{issuer} kicked {target} (token invalidated)");
@@ -73,6 +80,13 @@ pub(crate) async fn handle_admin_cmd(
             let mut map = token_map.lock().await;
             map.retain(|_, u| u != &target);
             drop(map);
+            // In daemon mode, also revoke from the UserRegistry so the reauthed user
+            // can obtain a fresh token via issue_token_via_registry.
+            if let Some(reg) = state.registry.get() {
+                if let Err(e) = reg.lock().await.revoke_user_tokens(&target) {
+                    eprintln!("[admin] registry revoke failed for {target}: {e}");
+                }
+            }
             // Remove the on-disk token file so the user can join afresh.
             let prefix = format!("room-{room_id}-");
             let suffix = format!("-{target}.token");
@@ -136,7 +150,7 @@ pub(crate) async fn handle_admin_cmd(
 #[cfg(test)]
 mod tests {
     use super::handle_admin_cmd;
-    use crate::broker::state::RoomState;
+    use crate::{broker::state::RoomState, registry::UserRegistry};
     use std::{collections::HashMap, sync::Arc};
     use tempfile::NamedTempFile;
     use tokio::sync::Mutex;
@@ -259,6 +273,100 @@ mod tests {
         assert!(
             *rx.borrow_and_update(),
             "shutdown signal should be true after /exit"
+        );
+    }
+
+    // ── registry-aware admin commands ─────────────────────────────────────────
+
+    fn make_state_with_registry(
+        chat_path: std::path::PathBuf,
+        registry: Arc<Mutex<UserRegistry>>,
+    ) -> Arc<RoomState> {
+        let token_map_path = chat_path.with_extension("tokens");
+        let subscription_map_path = chat_path.with_extension("subscriptions");
+        let state = RoomState::new(
+            "test-room".to_owned(),
+            chat_path,
+            token_map_path,
+            subscription_map_path,
+            Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(Mutex::new(HashMap::new())),
+            None,
+        )
+        .unwrap();
+        state.set_registry(registry);
+        state
+    }
+
+    #[tokio::test]
+    async fn kick_revokes_token_from_registry_in_daemon_mode() {
+        let tmp = NamedTempFile::new().unwrap();
+        let reg_dir = tempfile::tempdir().unwrap();
+        let registry = Arc::new(Mutex::new(UserRegistry::new(reg_dir.path().to_owned())));
+
+        // Register bob and issue a token in the registry.
+        let bob_token = {
+            let mut reg = registry.lock().await;
+            reg.register_user("bob").unwrap();
+            reg.issue_token("bob").unwrap()
+        };
+
+        let state = make_state_with_registry(tmp.path().to_path_buf(), registry.clone());
+        *state.host_user.lock().await = Some("alice".to_owned());
+        state
+            .token_map
+            .lock()
+            .await
+            .insert(bob_token.clone(), "bob".to_owned());
+
+        let err = handle_admin_cmd("kick bob", "alice", &state).await;
+        assert!(err.is_none(), "kick should succeed");
+
+        // Registry token must be gone so bob cannot rejoin via issue_token_via_registry.
+        let reg = registry.lock().await;
+        assert!(
+            reg.validate_token(&bob_token).is_none(),
+            "kick must revoke bob's token from the registry"
+        );
+        assert!(
+            !reg.has_token_for_user("bob"),
+            "kick must remove all registry tokens for bob"
+        );
+    }
+
+    #[tokio::test]
+    async fn reauth_revokes_token_from_registry_in_daemon_mode() {
+        let tmp = NamedTempFile::new().unwrap();
+        let reg_dir = tempfile::tempdir().unwrap();
+        let registry = Arc::new(Mutex::new(UserRegistry::new(reg_dir.path().to_owned())));
+
+        // Register bob and issue a token in the registry.
+        let bob_token = {
+            let mut reg = registry.lock().await;
+            reg.register_user("bob").unwrap();
+            reg.issue_token("bob").unwrap()
+        };
+
+        let state = make_state_with_registry(tmp.path().to_path_buf(), registry.clone());
+        *state.host_user.lock().await = Some("alice".to_owned());
+        state
+            .token_map
+            .lock()
+            .await
+            .insert(bob_token.clone(), "bob".to_owned());
+
+        let err = handle_admin_cmd("reauth bob", "alice", &state).await;
+        assert!(err.is_none(), "reauth should succeed");
+
+        // Registry token must be gone so bob can obtain a new token on the next join.
+        let reg = registry.lock().await;
+        assert!(
+            reg.validate_token(&bob_token).is_none(),
+            "reauth must revoke bob's token from the registry"
+        );
+        assert!(
+            !reg.has_token_for_user("bob"),
+            "reauth must remove all registry tokens for bob so rejoin is unblocked"
         );
     }
 }

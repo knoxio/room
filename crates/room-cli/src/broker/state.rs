@@ -7,7 +7,8 @@ use std::{
 use room_protocol::{RoomConfig, SubscriptionTier};
 use tokio::sync::{broadcast, watch, Mutex};
 
-use crate::plugin::PluginRegistry;
+use crate::{plugin::PluginRegistry, registry::UserRegistry};
+use std::sync::OnceLock;
 
 /// Maps client ID → (username, broadcast sender).
 /// Username is set after the handshake completes.
@@ -61,6 +62,14 @@ pub(crate) struct RoomState {
     /// Room visibility and access control configuration.
     /// `None` for rooms created without explicit config (backward compat).
     pub(crate) config: Option<RoomConfig>,
+    /// Daemon-level user registry for cross-room identity. Unset in
+    /// single-room mode. When set, admin commands (`/kick`, `/reauth`)
+    /// also revoke tokens from the registry so users can rejoin after reauth.
+    ///
+    /// Uses `OnceLock` so it can be set after [`RoomState::new`] without
+    /// requiring an extra constructor parameter (which would exceed the
+    /// clippy `too-many-arguments` threshold).
+    pub(crate) registry: OnceLock<Arc<Mutex<UserRegistry>>>,
 }
 
 impl RoomState {
@@ -80,6 +89,10 @@ impl RoomState {
     ///   for a fresh map or supply an existing shared map (daemon mode uses one map per daemon).
     /// - `subscription_map` — pre-populated subscription map loaded from disk (or empty).
     /// - `config` — room visibility/ACL config; `None` for legacy configless rooms.
+    ///
+    /// To attach a daemon-level [`UserRegistry`] (needed for admin commands in
+    /// daemon mode), call [`RoomState::set_registry`] on the returned `Arc`
+    /// immediately after construction — before handing it to other tasks.
     pub(crate) fn new(
         room_id: String,
         chat_path: PathBuf,
@@ -89,11 +102,11 @@ impl RoomState {
         subscription_map: SubscriptionMap,
         config: Option<RoomConfig>,
     ) -> Result<Arc<Self>, String> {
-        let mut registry = crate::plugin::PluginRegistry::new();
-        registry
+        let mut plugins = crate::plugin::PluginRegistry::new();
+        plugins
             .register(Box::new(crate::plugin::help::HelpPlugin))
             .map_err(|e| format!("plugin error: {e}"))?;
-        registry
+        plugins
             .register(Box::new(crate::plugin::stats::StatsPlugin))
             .map_err(|e| format!("plugin error: {e}"))?;
 
@@ -112,9 +125,21 @@ impl RoomState {
             room_id: Arc::new(room_id),
             shutdown: Arc::new(shutdown_tx),
             seq_counter: Arc::new(AtomicU64::new(0)),
-            plugin_registry: Arc::new(registry),
+            plugin_registry: Arc::new(plugins),
             config,
+            registry: OnceLock::new(),
         }))
+    }
+
+    // ── registry ──────────────────────────────────────────────────────────────
+
+    /// Attach the daemon-level [`UserRegistry`] to this room.
+    ///
+    /// Must be called at most once, immediately after construction, before the
+    /// `Arc<RoomState>` is shared with other tasks. Silently no-ops if called
+    /// a second time (consistent with `OnceLock` semantics).
+    pub(crate) fn set_registry(&self, registry: Arc<Mutex<UserRegistry>>) {
+        let _ = self.registry.set(registry);
     }
 
     // ── status_map accessors ──────────────────────────────────────────────────

@@ -645,6 +645,7 @@ pub(super) async fn daemon_api_create_room(
         &state.rooms,
         &state.config,
         &state.system_token_map,
+        Some(state.user_registry.clone()),
     )
     .await
     {

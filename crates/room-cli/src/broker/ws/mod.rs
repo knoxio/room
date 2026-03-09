@@ -427,6 +427,7 @@ pub(crate) struct DaemonWsState {
     pub(crate) next_client_id: Arc<AtomicU64>,
     pub(crate) config: super::daemon::DaemonConfig,
     pub(crate) system_token_map: super::state::TokenMap,
+    pub(crate) user_registry: Arc<Mutex<crate::registry::UserRegistry>>,
 }
 
 impl DaemonWsState {
