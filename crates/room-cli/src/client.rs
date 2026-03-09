@@ -5,7 +5,11 @@ use tokio::{
     net::UnixStream,
 };
 
-use crate::{message::Message, oneshot::transport::join_session, paths, tui};
+use crate::{
+    message::Message,
+    oneshot::transport::{join_session_target, resolve_socket_target},
+    paths, tui,
+};
 
 pub struct Client {
     pub socket_path: PathBuf,
@@ -60,7 +64,10 @@ impl Client {
             return;
         }
 
-        match join_session(&self.socket_path, &self.username).await {
+        // Use resolve_socket_target so that ROOM_SOCKET env and daemon
+        // auto-discovery are consistent with all other oneshot commands.
+        let target = resolve_socket_target(&self.room_id, None);
+        match join_session_target(&target, &self.username).await {
             Ok((returned_user, token)) => {
                 let token_data = serde_json::json!({"username": returned_user, "token": token});
                 let path = paths::token_path(&self.room_id, &returned_user);

@@ -50,7 +50,8 @@ impl SocketTarget {
 ///    socket does not exist.
 pub fn resolve_socket_target(room_id: &str, explicit: Option<&Path>) -> SocketTarget {
     let per_room = crate::paths::room_single_socket_path(room_id);
-    let daemon = crate::paths::room_socket_path();
+    // ROOM_SOCKET env var overrides the default daemon socket path.
+    let daemon = crate::paths::effective_socket_path(None);
 
     if let Some(path) = explicit {
         // If the caller gave us the per-room socket path, use per-room mode.
@@ -103,7 +104,8 @@ const DAEMON_START_TIMEOUT_MS: u64 = 5_000;
 pub async fn ensure_daemon_running() -> anyhow::Result<()> {
     let exe = std::env::current_exe()
         .map_err(|e| anyhow::anyhow!("cannot resolve current executable: {e}"))?;
-    ensure_daemon_running_impl(&crate::paths::room_socket_path(), &exe).await
+    // Respect ROOM_SOCKET env var when deciding where to start/find the daemon.
+    ensure_daemon_running_impl(&crate::paths::effective_socket_path(None), &exe).await
 }
 
 /// Test-visible variant: accepts explicit socket and exe paths so tests can

@@ -58,6 +58,59 @@ use super::{
 /// Characters that are unsafe in filesystem paths or shell contexts.
 const UNSAFE_CHARS: &[char] = &['/', '\\', ':', '*', '?', '"', '<', '>', '|', '\0'];
 
+// ── PID file management ───────────────────────────────────────────────────────
+
+/// Write the current process's PID to `path` (creates or overwrites).
+pub fn write_pid_file(path: &std::path::Path) -> std::io::Result<()> {
+    std::fs::write(path, std::process::id().to_string())
+}
+
+/// Returns `true` if the PID recorded in `path` belongs to a running process.
+///
+/// Returns `false` when the file is missing, unreadable, or unparseable, and
+/// when the process is confirmed dead (ESRCH).
+pub fn is_pid_alive(path: &std::path::Path) -> bool {
+    let Ok(contents) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    let Ok(pid) = contents.trim().parse::<u32>() else {
+        return false;
+    };
+    pid_alive(pid)
+}
+
+/// Remove the PID file, ignoring errors (best-effort cleanup).
+pub fn remove_pid_file(path: &std::path::Path) {
+    let _ = std::fs::remove_file(path);
+}
+
+/// Check whether a process with the given PID is currently running.
+///
+/// Uses POSIX `kill(pid, 0)` — signal 0 never delivers a signal but the kernel
+/// validates whether the calling process may signal `pid`, returning:
+/// - `0`  → process exists
+/// - `-1` with `EPERM` (errno 1)  → process exists, permission denied
+/// - `-1` with `ESRCH` (errno 3)  → no such process
+#[cfg(unix)]
+fn pid_alive(pid: u32) -> bool {
+    extern "C" {
+        fn kill(pid: i32, sig: i32) -> i32;
+    }
+    // SAFETY: kill(pid, 0) never delivers a signal; it only checks liveness.
+    let ret = unsafe { kill(pid as i32, 0) };
+    if ret == 0 {
+        return true;
+    }
+    // EPERM == 1 on Linux and macOS: process exists but we lack permission.
+    std::io::Error::last_os_error().raw_os_error() == Some(1)
+}
+
+#[cfg(not(unix))]
+fn pid_alive(_pid: u32) -> bool {
+    // Conservative: assume the process is alive on non-Unix platforms.
+    true
+}
+
 /// Maximum allowed length for a room ID.
 const MAX_ROOM_ID_LEN: usize = 64;
 
@@ -302,6 +355,21 @@ impl DaemonState {
     /// grace period cancels the timer. On exit, cleans up the PID file and
     /// socket file.
     pub async fn run(&self) -> anyhow::Result<()> {
+        // Write PID file only for the default daemon socket.  Daemons with an
+        // explicit socket override (tests, CI) are independent instances and
+        // must not clobber the system PID file.
+        let pid_path = if self.config.socket_path == crate::paths::room_socket_path() {
+            match write_pid_file(&crate::paths::room_pid_path()) {
+                Ok(()) => Some(crate::paths::room_pid_path()),
+                Err(e) => {
+                    eprintln!("[daemon] failed to write PID file: {e}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         // Remove stale socket synchronously.
         if self.config.socket_path.exists() {
             std::fs::remove_file(&self.config.socket_path)?;
@@ -399,6 +467,9 @@ impl DaemonState {
                 }
                 _ = shutdown_rx.changed() => {
                     eprintln!("[daemon] shutdown requested, exiting");
+                    if let Some(ref p) = pid_path {
+                        remove_pid_file(p);
+                    }
                     break Ok(());
                 }
             }
@@ -977,6 +1048,49 @@ async fn dispatch_connection(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── PID management ───────────────────────────────────────────────────
+
+    #[test]
+    fn write_pid_file_creates_file_with_current_pid() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("test.pid");
+        write_pid_file(&path).unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+        let pid: u32 = content.trim().parse().expect("PID should be a number");
+        assert_eq!(pid, std::process::id());
+    }
+
+    #[test]
+    fn is_pid_alive_true_for_current_process() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("test.pid");
+        write_pid_file(&path).unwrap();
+        assert!(is_pid_alive(&path), "current process should be alive");
+    }
+
+    #[test]
+    fn is_pid_alive_false_for_missing_file() {
+        let path = std::path::Path::new("/tmp/nonexistent-room-test-99999999.pid");
+        assert!(!is_pid_alive(path));
+    }
+
+    #[test]
+    fn remove_pid_file_deletes_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("remove.pid");
+        write_pid_file(&path).unwrap();
+        assert!(path.exists());
+        remove_pid_file(&path);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn remove_pid_file_noop_when_missing() {
+        // Should not panic if the file is already gone.
+        let path = std::path::Path::new("/tmp/gone-99999999.pid");
+        remove_pid_file(path); // must not panic
+    }
 
     // ── parse_room_prefix ─────────────────────────────────────────────────
 

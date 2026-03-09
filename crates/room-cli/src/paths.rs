@@ -43,6 +43,24 @@ pub fn room_socket_path() -> PathBuf {
     runtime_dir().join("roomd.sock")
 }
 
+/// Resolve the effective daemon socket path.
+///
+/// Resolution order:
+/// 1. `explicit` — caller-supplied path (e.g. from `--socket` flag).
+/// 2. `ROOM_SOCKET` environment variable.
+/// 3. Platform-native default (`room_socket_path()`).
+pub fn effective_socket_path(explicit: Option<&std::path::Path>) -> PathBuf {
+    if let Some(p) = explicit {
+        return p.to_owned();
+    }
+    if let Ok(p) = std::env::var("ROOM_SOCKET") {
+        if !p.is_empty() {
+            return PathBuf::from(p);
+        }
+    }
+    room_socket_path()
+}
+
 /// Platform-native socket path for a single-room broker.
 pub fn room_single_socket_path(room_id: &str) -> PathBuf {
     runtime_dir().join(format!("room-{room_id}.sock"))
@@ -246,6 +264,46 @@ mod tests {
             "expected 0700, got {:o}",
             perms.mode() & 0o777
         );
+    }
+
+    // ── effective_socket_path ─────────────────────────────────────────────
+
+    #[test]
+    fn effective_socket_path_uses_env_var() {
+        // This test must not conflict with other env-dependent tests running in
+        // parallel.  We snapshot and restore ROOM_SOCKET around the assertion.
+        let key = "ROOM_SOCKET";
+        let prev = std::env::var(key).ok();
+        std::env::set_var(key, "/tmp/test-roomd.sock");
+        let result = effective_socket_path(None);
+        match prev {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+        assert_eq!(result, PathBuf::from("/tmp/test-roomd.sock"));
+    }
+
+    #[test]
+    fn effective_socket_path_explicit_overrides_env() {
+        let key = "ROOM_SOCKET";
+        let prev = std::env::var(key).ok();
+        std::env::set_var(key, "/tmp/env-roomd.sock");
+        let explicit = PathBuf::from("/tmp/explicit.sock");
+        let result = effective_socket_path(Some(&explicit));
+        match prev {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+        assert_eq!(result, explicit);
+    }
+
+    #[test]
+    fn effective_socket_path_default_without_env() {
+        // Only test when ROOM_SOCKET is not set in the current environment.
+        if std::env::var("ROOM_SOCKET").is_err() {
+            let result = effective_socket_path(None);
+            assert_eq!(result, room_socket_path());
+        }
     }
 
     #[test]
