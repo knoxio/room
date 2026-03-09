@@ -4051,3 +4051,46 @@ async fn rest_query_dm_privacy_enforced() {
         "non-participant must not see DM messages via /query"
     );
 }
+
+#[tokio::test]
+async fn rest_query_public_alone_returns_400() {
+    // ?public=true without any other narrowing param should be rejected.
+    let (_tb, port) = TestBroker::start_with_ws("ws_query_pub400").await;
+    let base = format!("http://127.0.0.1:{port}");
+    let client = reqwest::Client::new();
+
+    let token = rest_join(&client, &base, "ws_query_pub400", "alice_pub").await;
+
+    let resp = client
+        .get(format!("{base}/api/ws_query_pub400/query?public=true"))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["code"], "public_requires_filter");
+}
+
+#[tokio::test]
+async fn rest_query_public_with_narrowing_param_allowed() {
+    // ?public=true with at least one narrowing param should succeed.
+    let (_tb, port) = TestBroker::start_with_ws("ws_query_pub_ok").await;
+    let base = format!("http://127.0.0.1:{port}");
+    let client = reqwest::Client::new();
+
+    let token = rest_join(&client, &base, "ws_query_pub_ok", "alice_pubq").await;
+    rest_send(&client, &base, "ws_query_pub_ok", &token, "hello").await;
+
+    let resp = client
+        .get(format!(
+            "{base}/api/ws_query_pub_ok/query?public=true&n=10"
+        ))
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert!(body["messages"].is_array());
+}

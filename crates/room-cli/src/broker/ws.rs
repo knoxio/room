@@ -20,7 +20,7 @@ use tokio::sync::{broadcast, Mutex};
 use crate::{
     history,
     message::{make_dm, make_join, make_leave, make_message, parse_client_line, Message},
-    query::QueryFilter,
+    query::{has_narrowing_filter, QueryFilter},
 };
 
 use super::{
@@ -796,6 +796,20 @@ async fn api_query(
     };
 
     let filter = build_query_filter(&params, &room_id);
+
+    // `public=true` alone is not a valid query — require at least one narrowing param.
+    if filter.public_only && !has_narrowing_filter(&filter) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "type": "error",
+                "code": "public_requires_filter",
+                "message": "public=true requires at least one narrowing filter (user, content, regex, mention, since, before, n)"
+            })),
+        )
+            .into_response();
+    }
+
     let rs = &state.room_state;
     let history = history::load(&rs.chat_path).await.unwrap_or_default();
     let host_name = rs.host_user.lock().await.clone();
@@ -1153,6 +1167,20 @@ async fn daemon_api_query(
     };
 
     let filter = build_query_filter(&params, &room_id);
+
+    // `public=true` alone is not a valid query — require at least one narrowing param.
+    if filter.public_only && !has_narrowing_filter(&filter) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "type": "error",
+                "code": "public_requires_filter",
+                "message": "public=true requires at least one narrowing filter (user, content, regex, mention, since, before, n)"
+            })),
+        )
+            .into_response();
+    }
+
     let history = history::load(&room.chat_path).await.unwrap_or_default();
     let host_name = room.host_user.lock().await.clone();
     let is_host = host_name.as_deref() == Some(username.as_str());
