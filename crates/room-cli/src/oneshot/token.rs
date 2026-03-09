@@ -1,9 +1,9 @@
 use std::path::{Path, PathBuf};
 
-use super::transport::{join_session_target, resolve_socket_target};
+use super::transport::global_join_session;
 use crate::paths;
 
-/// Returns the canonical token file path for a given room/user pair.
+/// Returns the canonical token file path for a given room/user pair (legacy).
 ///
 /// Resolves to `~/.room/state/room-<room_id>-<username>.token`.
 /// One file per (room, user) pair — multiple agents on the same machine never
@@ -12,24 +12,20 @@ pub fn token_file_path(room_id: &str, username: &str) -> PathBuf {
     paths::token_path(room_id, username)
 }
 
-/// One-shot join subcommand: register username, receive token, write token file.
+/// One-shot join subcommand: register username globally, receive token, write token file.
 ///
-/// Writes to `~/.room/state/room-<room_id>-<username>.token` so agents sharing
-/// a machine do not clobber each other. Subsequent `send`, `poll`, and `watch`
-/// calls find the file automatically (single-agent) or via `--user <username>`
-/// (multi-agent).
+/// Writes to `~/.room/state/room-<username>.token`. The token is global —
+/// not tied to any specific room. Use `room subscribe <room>` to join rooms.
+///
+/// If the username is already registered, returns the existing token.
 ///
 /// `socket` overrides the default socket path (auto-discovered if `None`).
-pub async fn cmd_join(
-    room_id: &str,
-    username: &str,
-    socket: Option<&std::path::Path>,
-) -> anyhow::Result<()> {
+pub async fn cmd_join(username: &str, socket: Option<&std::path::Path>) -> anyhow::Result<()> {
     paths::ensure_room_dirs().map_err(|e| anyhow::anyhow!("cannot create ~/.room: {e}"))?;
-    let target = resolve_socket_target(room_id, socket);
-    let (returned_user, token) = join_session_target(&target, username).await?;
+    let socket_path = paths::effective_socket_path(socket);
+    let (returned_user, token) = global_join_session(&socket_path, username).await?;
     let token_data = serde_json::json!({"username": returned_user, "token": token});
-    let token_path = token_file_path(room_id, &returned_user);
+    let token_path = paths::global_token_path(&returned_user);
     std::fs::write(&token_path, format!("{token_data}\n"))?;
     println!("{token_data}");
     Ok(())
@@ -37,9 +33,8 @@ pub async fn cmd_join(
 
 /// Look up the username associated with `token` by scanning stored token files for `room_id`.
 ///
-/// `room join` writes `~/.room/state/room-<room_id>-<username>.token` for each session.
-/// This function finds the file whose `token` field matches the given value and
-/// returns the corresponding username. Used by `poll` and `watch` to resolve the
+/// Checks both the global token file (`room-<username>.token`) and legacy per-room
+/// files (`room-<room_id>-<username>.token`). Used by `poll` and `watch` to resolve the
 /// cursor file path without requiring the caller to pass a username explicitly.
 pub fn username_from_token(room_id: &str, token: &str) -> anyhow::Result<String> {
     let state_dir = paths::room_state_dir();
@@ -69,7 +64,7 @@ pub fn username_from_token(room_id: &str, token: &str) -> anyhow::Result<String>
         }
     }
 
-    anyhow::bail!("token not recognised — run: room join {room_id} <username> to get a fresh token")
+    anyhow::bail!("token not recognised — run: room join <username> to get a fresh token")
 }
 
 /// Look up the username associated with `token` by scanning ALL token files in the state dir.
@@ -106,7 +101,7 @@ pub fn username_from_token_any_room(token: &str) -> anyhow::Result<String> {
         }
     }
 
-    anyhow::bail!("token not recognised — run: room join <room-id> <username> to get a fresh token")
+    anyhow::bail!("token not recognised — run: room join <username> to get a fresh token")
 }
 
 /// Read the cursor position from disk, returning `None` if the file is absent or empty.
@@ -172,7 +167,7 @@ mod tests {
                 }
             }
         }
-        anyhow::bail!("token not recognised — run: room join {room_id} <username>")
+        anyhow::bail!("token not recognised — run: room join <username>")
     }
 
     #[test]

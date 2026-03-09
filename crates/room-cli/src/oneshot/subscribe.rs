@@ -17,7 +17,7 @@ pub async fn cmd_subscribe(
         serde_json::json!({"type": "command", "cmd": "subscribe", "params": [tier]}).to_string();
     let msg = transport_send(&target, token, &wire).await.map_err(|e| {
         if e.to_string().contains("invalid token") {
-            anyhow::anyhow!("invalid token — run: room join {room_id} <username>")
+            anyhow::anyhow!("invalid token — run: room join <username>")
         } else {
             e
         }

@@ -320,6 +320,41 @@ pub async fn join_session_target(
     Ok((returned_user, token))
 }
 
+/// Global user registration: sends `JOIN:<username>` directly to the daemon.
+///
+/// Unlike [`join_session`] which routes through `ROOM:<room_id>:JOIN:<username>`,
+/// this sends `JOIN:<username>` at daemon level — no room association.
+/// Returns the existing token if the username is already registered.
+pub async fn global_join_session(
+    socket_path: &Path,
+    username: &str,
+) -> anyhow::Result<(String, String)> {
+    let stream = UnixStream::connect(socket_path).await.map_err(|e| {
+        anyhow::anyhow!("cannot connect to daemon at {}: {e}", socket_path.display())
+    })?;
+    let (r, mut w) = stream.into_split();
+    w.write_all(format!("JOIN:{username}\n").as_bytes()).await?;
+
+    let mut reader = BufReader::new(r);
+    let mut line = String::new();
+    reader.read_line(&mut line).await?;
+    let v: serde_json::Value = serde_json::from_str(line.trim())
+        .map_err(|e| anyhow::anyhow!("daemon returned invalid JSON: {e}: {:?}", line.trim()))?;
+    if v["type"] == "error" {
+        let code = v["code"].as_str().unwrap_or("unknown");
+        anyhow::bail!("daemon error: {code}");
+    }
+    let token = v["token"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("daemon response missing 'token' field"))?
+        .to_owned();
+    let returned_user = v["username"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("daemon response missing 'username' field"))?
+        .to_owned();
+    Ok((returned_user, token))
+}
+
 // ── Room creation ────────────────────────────────────────────────────────────
 
 /// Connect to a daemon socket and create a new room via `CREATE:<room_id>`.

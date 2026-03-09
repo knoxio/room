@@ -7,8 +7,8 @@ mod common;
 use std::time::Duration;
 
 use common::{
-    daemon_connect, daemon_create, daemon_join, daemon_send, ws_connect, TestBroker, TestClient,
-    TestDaemon,
+    daemon_connect, daemon_create, daemon_global_join, daemon_join, daemon_send, ws_connect,
+    TestBroker, TestClient, TestDaemon,
 };
 use futures_util::{SinkExt, StreamExt};
 use room_cli::message::Message;
@@ -494,4 +494,47 @@ async fn rest_send(
         .unwrap();
     assert_eq!(resp.status(), 200, "rest_send failed for content={content}");
     resp.json().await.unwrap()
+}
+
+// ── Global join (room-independent) tests ────────────────────────────────
+
+#[tokio::test]
+async fn global_join_returns_token_and_username() {
+    let td = TestDaemon::start(&["test-room"]).await;
+    let token = daemon_global_join(&td.socket_path, "alice").await;
+    assert!(!token.is_empty(), "expected non-empty token");
+}
+
+#[tokio::test]
+async fn global_join_idempotent_returns_same_token() {
+    let td = TestDaemon::start(&["test-room"]).await;
+    let token1 = daemon_global_join(&td.socket_path, "bob").await;
+    let token2 = daemon_global_join(&td.socket_path, "bob").await;
+    assert_eq!(token1, token2, "idempotent join should return same token");
+}
+
+#[tokio::test]
+async fn global_join_different_users_get_different_tokens() {
+    let td = TestDaemon::start(&["test-room"]).await;
+    let token_alice = daemon_global_join(&td.socket_path, "alice").await;
+    let token_bob = daemon_global_join(&td.socket_path, "bob").await;
+    assert_ne!(
+        token_alice, token_bob,
+        "different users must get different tokens"
+    );
+}
+
+#[tokio::test]
+async fn global_join_empty_username_rejected() {
+    let td = TestDaemon::start(&["test-room"]).await;
+
+    let stream = UnixStream::connect(&td.socket_path).await.unwrap();
+    let (r, mut w) = stream.into_split();
+    w.write_all(b"JOIN:\n").await.unwrap();
+
+    let mut reader = BufReader::new(r);
+    let mut line = String::new();
+    reader.read_line(&mut line).await.unwrap();
+    let v: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+    assert_eq!(v["type"], "error", "empty username should be rejected: {v}");
 }

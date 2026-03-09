@@ -325,6 +325,23 @@ pub async fn daemon_join(socket_path: &PathBuf, room_id: &str, username: &str) -
     v["token"].as_str().unwrap().to_owned()
 }
 
+/// Global join (room-independent) via the daemon protocol, returns the token UUID.
+pub async fn daemon_global_join(socket_path: &PathBuf, username: &str) -> String {
+    let stream = UnixStream::connect(socket_path).await.unwrap();
+    let (r, mut w) = stream.into_split();
+    w.write_all(format!("JOIN:{username}\n").as_bytes())
+        .await
+        .unwrap();
+
+    let mut reader = BufReader::new(r);
+    let mut line = String::new();
+    reader.read_line(&mut line).await.unwrap();
+    let v: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+    assert_eq!(v["type"], "token", "expected token response: {v}");
+    assert_eq!(v["username"], username);
+    v["token"].as_str().unwrap().to_owned()
+}
+
 /// One-shot send via the daemon protocol, returns the broadcast JSON.
 pub async fn daemon_send(
     socket_path: &PathBuf,

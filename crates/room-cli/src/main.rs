@@ -13,13 +13,12 @@ use room_cli::{
 
 #[derive(Subcommand, Debug)]
 enum Cmd {
-    /// Register a username with the broker and receive a session token.
+    /// Register a username with the daemon and receive a global session token.
     ///
-    /// Writes the token to `~/.room/state/room-<room_id>-<username>.token`. Subsequent
-    /// `send`, `poll`, and `watch` calls read the username and token from that file —
-    /// no username argument required. Returns an error if the username is already in use.
+    /// Writes the token to `~/.room/state/room-<username>.token`. The token is
+    /// global — use `room subscribe <room>` to join specific rooms.
+    /// Returns the existing token if the username is already registered.
     Join {
-        room_id: String,
         username: String,
         /// Override the broker socket path (default: auto-discover daemon or per-room socket)
         #[arg(long)]
@@ -337,11 +336,7 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
     match args.command {
-        Some(Cmd::Join {
-            room_id,
-            username,
-            socket,
-        }) => {
+        Some(Cmd::Join { username, socket }) => {
             // Auto-start the daemon for commands that require a live broker
             // connection (join, send, who, dm). Read-only commands (poll, pull,
             // watch, query) read the chat file directly and work without a running
@@ -349,7 +344,7 @@ async fn main() -> anyhow::Result<()> {
             if socket.is_none() {
                 oneshot::ensure_daemon_running().await?;
             }
-            oneshot::cmd_join(&room_id, &username, socket.as_deref()).await?;
+            oneshot::cmd_join(&username, socket.as_deref()).await?;
         }
         Some(Cmd::Send {
             room_id,

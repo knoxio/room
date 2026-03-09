@@ -881,6 +881,43 @@ async fn handle_create(
     Ok(())
 }
 
+/// Handle a global `JOIN:<username>` request at daemon level.
+///
+/// Registers the user in the global UserRegistry (or returns the existing token
+/// if already registered) and writes the token response. No room association.
+async fn handle_global_join(
+    username: &str,
+    write_half: &mut tokio::net::unix::OwnedWriteHalf,
+    registry: &Arc<tokio::sync::Mutex<UserRegistry>>,
+) -> anyhow::Result<()> {
+    use tokio::io::AsyncWriteExt;
+
+    let mut reg = registry.lock().await;
+
+    // If user already has a token, return it. Otherwise register and issue.
+    let token = if reg.has_token_for_user(username) {
+        // Find existing token via snapshot (reverse lookup: token→user).
+        reg.token_snapshot()
+            .into_iter()
+            .find(|(_, u)| u == username)
+            .map(|(t, _)| t)
+            .expect("has_token_for_user was true but no token found")
+    } else {
+        reg.register_user_idempotent(username)
+            .map_err(|e| anyhow::anyhow!("registration failed: {e}"))?;
+        reg.issue_token(username)
+            .map_err(|e| anyhow::anyhow!("token issuance failed: {e}"))?
+    };
+
+    let resp = serde_json::json!({
+        "type": "token",
+        "token": token,
+        "username": username
+    });
+    write_half.write_all(format!("{resp}\n").as_bytes()).await?;
+    Ok(())
+}
+
 /// Dispatch a raw UDS connection to the correct room based on the handshake.
 ///
 /// Handles two top-level protocols:
@@ -924,6 +961,9 @@ async fn dispatch_connection(
                 system_token_map,
             )
             .await;
+        }
+        DaemonPrefix::Join(username) => {
+            return handle_global_join(&username, &mut write_half, user_registry).await;
         }
         DaemonPrefix::Room { room_id, rest } => (room_id, rest),
         DaemonPrefix::Unknown => {

@@ -498,9 +498,7 @@ fn resolve_username_from_rooms(room_ids: &[String], token: &str) -> anyhow::Resu
             return Ok(username);
         }
     }
-    anyhow::bail!(
-        "token not recognised in any of the specified rooms — run: room join <room_id> <username>"
-    )
+    anyhow::bail!("token not recognised in any of the specified rooms — run: room join <username>")
 }
 
 /// Read the room host username from the meta file, if present.

@@ -68,13 +68,18 @@ pub(crate) enum DaemonPrefix {
     /// `rest` is everything after the second colon: `JOIN:alice`, `TOKEN:uuid`,
     /// `SEND:bob`, or a plain username for an interactive join.
     Room { room_id: String, rest: String },
+    /// `JOIN:<username>` — global user registration (no room association).
+    ///
+    /// Issues a global token via the UserRegistry. The user must subsequently
+    /// `subscribe` to specific rooms to receive messages.
+    Join(String),
     /// Unrecognised prefix — the connection should be rejected with an error.
     Unknown,
 }
 
 /// Parse the first line of a daemon connection into a typed prefix.
 ///
-/// Recognition order: `DESTROY:` → `CREATE:` → `ROOM:` → Unknown.
+/// Recognition order: `DESTROY:` → `CREATE:` → `JOIN:` → `ROOM:` → Unknown.
 /// Whitespace has already been trimmed by the caller.
 pub(crate) fn parse_daemon_prefix(line: &str) -> DaemonPrefix {
     if let Some(room_id) = line.strip_prefix("DESTROY:") {
@@ -82,6 +87,12 @@ pub(crate) fn parse_daemon_prefix(line: &str) -> DaemonPrefix {
     }
     if let Some(room_id) = line.strip_prefix("CREATE:") {
         return DaemonPrefix::Create(room_id.to_owned());
+    }
+    // Global join: `JOIN:<username>` — register user, get token, no room.
+    if let Some(username) = line.strip_prefix("JOIN:") {
+        if !username.is_empty() {
+            return DaemonPrefix::Join(username.to_owned());
+        }
     }
     if let Some(stripped) = line.strip_prefix("ROOM:") {
         if let Some(colon) = stripped.find(':') {
@@ -237,8 +248,16 @@ mod tests {
     }
 
     #[test]
-    fn daemon_unknown_plain_join() {
-        assert_eq!(parse_daemon_prefix("JOIN:alice"), DaemonPrefix::Unknown);
+    fn daemon_global_join() {
+        assert_eq!(
+            parse_daemon_prefix("JOIN:alice"),
+            DaemonPrefix::Join("alice".into())
+        );
+    }
+
+    #[test]
+    fn daemon_global_join_empty_username_is_unknown() {
+        assert_eq!(parse_daemon_prefix("JOIN:"), DaemonPrefix::Unknown);
     }
 
     #[test]

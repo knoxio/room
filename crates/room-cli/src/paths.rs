@@ -80,11 +80,19 @@ pub fn room_meta_path(room_id: &str) -> PathBuf {
     runtime_dir().join(format!("room-{room_id}.meta"))
 }
 
-/// Token file path for a given room/user pair.
+/// Token file path for a given room/user pair (legacy, per-room tokens).
 ///
 /// Returns `~/.room/state/room-<room_id>-<username>.token`.
 pub fn token_path(room_id: &str, username: &str) -> PathBuf {
     room_state_dir().join(format!("room-{room_id}-{username}.token"))
+}
+
+/// Global token file path for a user (room-independent).
+///
+/// Returns `~/.room/state/room-<username>.token`.
+/// Used by `room join <username>` which issues a global token not tied to any room.
+pub fn global_token_path(username: &str) -> PathBuf {
+    room_state_dir().join(format!("room-{username}.token"))
 }
 
 /// Cursor file path for a given room/user pair.

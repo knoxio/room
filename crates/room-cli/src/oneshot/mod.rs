@@ -14,8 +14,9 @@ pub use subscribe::cmd_subscribe;
 pub use token::{cmd_join, token_file_path, username_from_token, username_from_token_any_room};
 pub use transport::{create_room, destroy_room};
 pub use transport::{
-    ensure_daemon_running, join_session, join_session_target, resolve_socket_target, send_message,
-    send_message_with_token, send_message_with_token_target, SocketTarget,
+    ensure_daemon_running, global_join_session, join_session, join_session_target,
+    resolve_socket_target, send_message, send_message_with_token, send_message_with_token_target,
+    SocketTarget,
 };
 pub use who::cmd_who;
 
@@ -50,7 +51,7 @@ pub async fn cmd_send(
         .await
         .map_err(|e| {
             if e.to_string().contains("invalid token") {
-                anyhow::anyhow!("invalid token — run: room join {room_id} <username>")
+                anyhow::anyhow!("invalid token — run: room join <username>")
             } else {
                 e
             }

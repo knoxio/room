@@ -8,8 +8,16 @@ pub fn log_file_path(username: &str) -> PathBuf {
     PathBuf::from(format!("/tmp/ralph-room-{username}.log"))
 }
 
-/// Returns the path to the room token file.
-pub fn token_file_path(room_id: &str, username: &str) -> PathBuf {
+/// Returns the path to the global token file (room-independent).
+pub fn token_file_path(username: &str) -> PathBuf {
+    PathBuf::from(format!("/tmp/room-{username}.token"))
+}
+
+/// Returns the path to the legacy per-room token file.
+///
+/// Used as a fallback when the global token file doesn't exist (e.g. tokens
+/// issued before the join/subscribe split).
+pub fn legacy_token_file_path(room_id: &str, username: &str) -> PathBuf {
     PathBuf::from(format!("/tmp/room-{room_id}-{username}.token"))
 }
 
@@ -25,11 +33,12 @@ pub struct JoinResult {
 /// Maximum number of suffixed username attempts before giving up.
 const MAX_USERNAME_RETRIES: u32 = 5;
 
-/// Join a room and return the token UUID and actual username.
+/// Register a user globally and return the token UUID and actual username.
 ///
-/// Runs `room join <room_id> <username>` and parses the token from JSON output.
+/// Runs `room join <username>` (room-independent) and parses the token from JSON output.
 /// If the username is already taken, retries with numeric suffixes (e.g. `user-2`,
-/// `user-3`, up to 5 attempts). Falls back to cached token file as a last resort.
+/// `user-3`, up to 5 attempts). Falls back to cached token file as a last resort —
+/// tries the global path first, then the legacy per-room path.
 /// If `socket` is provided, passes `--socket <path>` to the `room` command.
 pub fn join_room(
     room_id: &str,
@@ -37,7 +46,7 @@ pub fn join_room(
     socket: Option<&str>,
 ) -> Result<JoinResult, String> {
     // Try the original username first
-    match try_join(room_id, username, socket) {
+    match try_join(username, socket) {
         Ok(token) => {
             return Ok(JoinResult {
                 token,
@@ -68,7 +77,7 @@ fn retry_with_suffix(
 ) -> Result<JoinResult, String> {
     for i in 2..=MAX_USERNAME_RETRIES + 1 {
         let suffixed = format!("{username}-{i}");
-        match try_join(room_id, &suffixed, socket) {
+        match try_join(&suffixed, socket) {
             Ok(token) => {
                 tracing::info!(
                     "joined as '{}' (original '{}' was taken)",
@@ -90,13 +99,20 @@ fn retry_with_suffix(
         }
     }
 
-    // All suffixed attempts exhausted — fall back to cached token
-    let token_file = token_file_path(room_id, username);
+    // All suffixed attempts exhausted — fall back to cached token (global, then legacy)
+    let global_token = token_file_path(username);
     tracing::warn!(
         "all username variants taken, trying cached token at {}",
-        token_file.display()
+        global_token.display()
     );
-    let token = read_cached_token(&token_file)?;
+    let token = read_cached_token(&global_token).or_else(|_| {
+        let legacy = legacy_token_file_path(room_id, username);
+        tracing::warn!(
+            "global token not found, trying legacy path at {}",
+            legacy.display()
+        );
+        read_cached_token(&legacy)
+    })?;
     Ok(JoinResult {
         token,
         username: username.to_owned(),
@@ -104,9 +120,9 @@ fn retry_with_suffix(
 }
 
 /// Attempt a single `room join` and return the token or an error string.
-fn try_join(room_id: &str, username: &str, socket: Option<&str>) -> Result<String, String> {
+fn try_join(username: &str, socket: Option<&str>) -> Result<String, String> {
     let mut cmd = Command::new("room");
-    cmd.args(["join", room_id, username]);
+    cmd.args(["join", username]);
     if let Some(s) = socket {
         cmd.args(["--socket", s]);
     }
@@ -314,7 +330,15 @@ mod tests {
     #[test]
     fn token_file_path_format() {
         assert_eq!(
-            token_file_path("myroom", "agent1"),
+            token_file_path("agent1"),
+            PathBuf::from("/tmp/room-agent1.token")
+        );
+    }
+
+    #[test]
+    fn legacy_token_file_path_format() {
+        assert_eq!(
+            legacy_token_file_path("myroom", "agent1"),
             PathBuf::from("/tmp/room-myroom-agent1.token")
         );
     }
