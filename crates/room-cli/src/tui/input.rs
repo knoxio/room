@@ -64,111 +64,17 @@ pub(super) fn handle_key(
     input_width: usize,
 ) -> Option<Action> {
     match key.code {
-        KeyCode::Esc => {
-            if state.mention.active {
-                state.mention.deactivate();
-            } else if state.palette.active {
-                state.palette.deactivate();
-            } else if !state.input.is_empty() {
-                state.input.clear();
-                state.cursor_pos = 0;
-                state.input_row_scroll = 0;
-            }
-        }
-        KeyCode::Tab if state.mention.active => {
-            if let Some(user) = state.mention.selected_user() {
-                let user = user.to_owned();
-                let replacement = format!("@{user} ");
-                let query_end = state.cursor_pos;
-                let at_start = state.mention.at_byte;
-                state.input.replace_range(at_start..query_end, &replacement);
-                state.cursor_pos = at_start + replacement.len();
-                state.input_row_scroll = 0;
-            }
-            state.mention.deactivate();
-        }
+        KeyCode::Esc => handle_esc(state),
+        KeyCode::Tab if state.mention.active => handle_tab_mention(state),
         KeyCode::Tab if state.palette.active => {
             complete_palette_selection(state, online_users);
         }
-        KeyCode::Enter => {
-            if state.mention.active {
-                if let Some(user) = state.mention.selected_user() {
-                    let user = user.to_owned();
-                    let replacement = format!("@{user} ");
-                    let query_end = state.cursor_pos;
-                    let at_start = state.mention.at_byte;
-                    state.input.replace_range(at_start..query_end, &replacement);
-                    state.cursor_pos = at_start + replacement.len();
-                    state.input_row_scroll = 0;
-                }
-                state.mention.deactivate();
-            } else if state.palette.active {
-                complete_palette_selection(state, online_users);
-            } else if key.modifiers.contains(KeyModifiers::SHIFT) {
-                // Shift+Enter: insert a newline at the cursor.
-                state.input.insert(state.cursor_pos, '\n');
-                state.cursor_pos += 1;
-            } else if let Some(new_pos) = apply_backslash_enter(&mut state.input, state.cursor_pos)
-            {
-                // Backslash + Enter: strip the trailing '\' and insert a newline.
-                state.cursor_pos = new_pos;
-            } else if !state.input.is_empty() {
-                // Intercept `/dm <user> <msg>` to return a DmRoom action
-                // instead of sending an intra-room DM.
-                if let Some(dm) = parse_dm_input(&state.input) {
-                    state.input.clear();
-                    state.cursor_pos = 0;
-                    state.input_row_scroll = 0;
-                    state.scroll_offset = 0;
-                    return Some(dm);
-                }
-                let payload = build_payload(&state.input);
-                state.input.clear();
-                state.cursor_pos = 0;
-                state.input_row_scroll = 0;
-                state.scroll_offset = 0;
-                return Some(Action::Send(payload));
-            }
-        }
-        KeyCode::Up => {
-            if state.mention.active {
-                state.mention.move_up();
-            } else if state.palette.active {
-                state.palette.move_up();
-            } else {
-                let (cur_row, cur_col) =
-                    cursor_display_pos(&state.input, state.cursor_pos, input_width);
-                if cur_row > 0 {
-                    state.cursor_pos =
-                        byte_offset_at_display_pos(&state.input, cur_row - 1, cur_col, input_width);
-                    sync_mention_after_cursor_move(state, online_users);
-                } else {
-                    state.scroll_offset = state.scroll_offset.saturating_add(1);
-                }
-            }
-        }
-        KeyCode::Down => {
-            if state.mention.active {
-                state.mention.move_down();
-            } else if state.palette.active {
-                state.palette.move_down();
-            } else {
-                let (cur_row, cur_col) =
-                    cursor_display_pos(&state.input, state.cursor_pos, input_width);
-                let last_row = cursor_display_pos(&state.input, state.input.len(), input_width).0;
-                if cur_row < last_row {
-                    state.cursor_pos =
-                        byte_offset_at_display_pos(&state.input, cur_row + 1, cur_col, input_width);
-                    sync_mention_after_cursor_move(state, online_users);
-                } else {
-                    state.scroll_offset = state.scroll_offset.saturating_sub(1);
-                }
-            }
-        }
+        KeyCode::Enter => return handle_enter(key, state, online_users),
+        KeyCode::Up => handle_up(state, online_users, input_width),
+        KeyCode::Down => handle_down(state, online_users, input_width),
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             return Some(Action::Quit);
         }
-        // Tab switching: Ctrl+N / Ctrl+P cycle, Ctrl+1–9 jump to tab by index.
         KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             return Some(Action::NextTab);
         }
@@ -178,7 +84,6 @@ pub(super) fn handle_key(
         KeyCode::Char(c @ '1'..='9') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             return Some(Action::SwitchTab((c as usize) - ('1' as usize)));
         }
-        // Emacs-style word navigation (sent by macOS Terminal / iTerm2 for Option+arrow).
         KeyCode::Char('b') if key.modifiers.contains(KeyModifiers::ALT) => {
             state.cursor_pos = prev_word_start(&state.input, state.cursor_pos);
             sync_mention_after_cursor_move(state, online_users);
@@ -188,55 +93,10 @@ pub(super) fn handle_key(
             sync_mention_after_cursor_move(state, online_users);
         }
         KeyCode::Backspace if key.modifiers.contains(KeyModifiers::ALT) => {
-            let word_start = prev_word_start(&state.input, state.cursor_pos);
-            if word_start < state.cursor_pos {
-                state.input.drain(word_start..state.cursor_pos);
-                state.cursor_pos = word_start;
-                sync_mention_after_delete(state, online_users);
-                sync_palette_after_delete(state);
-            }
+            handle_word_delete(state, online_users);
         }
-        KeyCode::Char(c) => {
-            state.input.insert(state.cursor_pos, c);
-            state.cursor_pos += c.len_utf8();
-            // Update mention picker state.
-            if let Some((at_byte, query)) = find_at_context(&state.input, state.cursor_pos) {
-                if state.mention.active || c == '@' {
-                    state.mention.activate(at_byte, online_users, query);
-                    if state.mention.filtered.is_empty() {
-                        state.mention.deactivate();
-                    }
-                }
-            } else {
-                state.mention.deactivate();
-            }
-            // Activate slash palette when `/` is typed into an empty input.
-            if c == '/' && state.input == "/" {
-                state.palette.activate();
-            } else if state.palette.active {
-                if let Some(query) = state.input.strip_prefix('/') {
-                    state.palette.update_filter(query);
-                    if state.palette.filtered.is_empty() {
-                        state.palette.deactivate();
-                    }
-                } else {
-                    state.palette.deactivate();
-                }
-            }
-        }
-        KeyCode::Backspace => {
-            if state.cursor_pos > 0 {
-                let prev = state.input[..state.cursor_pos]
-                    .char_indices()
-                    .next_back()
-                    .map(|(i, _)| i)
-                    .unwrap_or(0);
-                state.input.remove(prev);
-                state.cursor_pos = prev;
-                sync_mention_after_delete(state, online_users);
-                sync_palette_after_delete(state);
-            }
-        }
+        KeyCode::Char(c) => handle_char(c, state, online_users),
+        KeyCode::Backspace => handle_backspace(state, online_users),
         KeyCode::Left if key.modifiers.contains(KeyModifiers::ALT) => {
             state.cursor_pos = prev_word_start(&state.input, state.cursor_pos);
             sync_mention_after_cursor_move(state, online_users);
@@ -245,23 +105,8 @@ pub(super) fn handle_key(
             state.cursor_pos = next_word_end(&state.input, state.cursor_pos);
             sync_mention_after_cursor_move(state, online_users);
         }
-        KeyCode::Left => {
-            if state.cursor_pos > 0 {
-                state.cursor_pos = state.input[..state.cursor_pos]
-                    .char_indices()
-                    .next_back()
-                    .map(|(i, _)| i)
-                    .unwrap_or(0);
-            }
-            sync_mention_after_cursor_move(state, online_users);
-        }
-        KeyCode::Right => {
-            if state.cursor_pos < state.input.len() {
-                let ch = state.input[state.cursor_pos..].chars().next().unwrap();
-                state.cursor_pos += ch.len_utf8();
-            }
-            sync_mention_after_cursor_move(state, online_users);
-        }
+        KeyCode::Left => handle_left(state, online_users),
+        KeyCode::Right => handle_right(state, online_users),
         KeyCode::Home => {
             state.cursor_pos = 0;
             sync_mention_after_cursor_move(state, online_users);
@@ -279,6 +124,188 @@ pub(super) fn handle_key(
         _ => {}
     }
     None
+}
+
+/// Dismiss mention picker, command palette, or clear input on Esc.
+fn handle_esc(state: &mut InputState) {
+    if state.mention.active {
+        state.mention.deactivate();
+    } else if state.palette.active {
+        state.palette.deactivate();
+    } else if !state.input.is_empty() {
+        state.input.clear();
+        state.cursor_pos = 0;
+        state.input_row_scroll = 0;
+    }
+}
+
+/// Complete the currently selected mention on Tab.
+fn handle_tab_mention(state: &mut InputState) {
+    if let Some(user) = state.mention.selected_user() {
+        let user = user.to_owned();
+        let replacement = format!("@{user} ");
+        let query_end = state.cursor_pos;
+        let at_start = state.mention.at_byte;
+        state.input.replace_range(at_start..query_end, &replacement);
+        state.cursor_pos = at_start + replacement.len();
+        state.input_row_scroll = 0;
+    }
+    state.mention.deactivate();
+}
+
+/// Handle the Enter key: mention/palette completion, newline insertion, DM
+/// intercept, or message submission.
+fn handle_enter(key: KeyEvent, state: &mut InputState, online_users: &[String]) -> Option<Action> {
+    if state.mention.active {
+        if let Some(user) = state.mention.selected_user() {
+            let user = user.to_owned();
+            let replacement = format!("@{user} ");
+            let query_end = state.cursor_pos;
+            let at_start = state.mention.at_byte;
+            state.input.replace_range(at_start..query_end, &replacement);
+            state.cursor_pos = at_start + replacement.len();
+            state.input_row_scroll = 0;
+        }
+        state.mention.deactivate();
+    } else if state.palette.active {
+        complete_palette_selection(state, online_users);
+    } else if key.modifiers.contains(KeyModifiers::SHIFT) {
+        state.input.insert(state.cursor_pos, '\n');
+        state.cursor_pos += 1;
+    } else if let Some(new_pos) = apply_backslash_enter(&mut state.input, state.cursor_pos) {
+        state.cursor_pos = new_pos;
+    } else if !state.input.is_empty() {
+        if let Some(dm) = parse_dm_input(&state.input) {
+            state.input.clear();
+            state.cursor_pos = 0;
+            state.input_row_scroll = 0;
+            state.scroll_offset = 0;
+            return Some(dm);
+        }
+        let payload = build_payload(&state.input);
+        state.input.clear();
+        state.cursor_pos = 0;
+        state.input_row_scroll = 0;
+        state.scroll_offset = 0;
+        return Some(Action::Send(payload));
+    }
+    None
+}
+
+/// Navigate mention/palette picker upward, move cursor up in multi-line input,
+/// or scroll the chat history.
+fn handle_up(state: &mut InputState, online_users: &[String], input_width: usize) {
+    if state.mention.active {
+        state.mention.move_up();
+    } else if state.palette.active {
+        state.palette.move_up();
+    } else {
+        let (cur_row, cur_col) = cursor_display_pos(&state.input, state.cursor_pos, input_width);
+        if cur_row > 0 {
+            state.cursor_pos =
+                byte_offset_at_display_pos(&state.input, cur_row - 1, cur_col, input_width);
+            sync_mention_after_cursor_move(state, online_users);
+        } else {
+            state.scroll_offset = state.scroll_offset.saturating_add(1);
+        }
+    }
+}
+
+/// Navigate mention/palette picker downward, move cursor down in multi-line
+/// input, or scroll the chat history.
+fn handle_down(state: &mut InputState, online_users: &[String], input_width: usize) {
+    if state.mention.active {
+        state.mention.move_down();
+    } else if state.palette.active {
+        state.palette.move_down();
+    } else {
+        let (cur_row, cur_col) = cursor_display_pos(&state.input, state.cursor_pos, input_width);
+        let last_row = cursor_display_pos(&state.input, state.input.len(), input_width).0;
+        if cur_row < last_row {
+            state.cursor_pos =
+                byte_offset_at_display_pos(&state.input, cur_row + 1, cur_col, input_width);
+            sync_mention_after_cursor_move(state, online_users);
+        } else {
+            state.scroll_offset = state.scroll_offset.saturating_sub(1);
+        }
+    }
+}
+
+/// Delete the previous word (Alt+Backspace).
+fn handle_word_delete(state: &mut InputState, online_users: &[String]) {
+    let word_start = prev_word_start(&state.input, state.cursor_pos);
+    if word_start < state.cursor_pos {
+        state.input.drain(word_start..state.cursor_pos);
+        state.cursor_pos = word_start;
+        sync_mention_after_delete(state, online_users);
+        sync_palette_after_delete(state);
+    }
+}
+
+/// Insert a character and update mention picker / command palette state.
+fn handle_char(c: char, state: &mut InputState, online_users: &[String]) {
+    state.input.insert(state.cursor_pos, c);
+    state.cursor_pos += c.len_utf8();
+    // Update mention picker state.
+    if let Some((at_byte, query)) = find_at_context(&state.input, state.cursor_pos) {
+        if state.mention.active || c == '@' {
+            state.mention.activate(at_byte, online_users, query);
+            if state.mention.filtered.is_empty() {
+                state.mention.deactivate();
+            }
+        }
+    } else {
+        state.mention.deactivate();
+    }
+    // Activate slash palette when `/` is typed into an empty input.
+    if c == '/' && state.input == "/" {
+        state.palette.activate();
+    } else if state.palette.active {
+        if let Some(query) = state.input.strip_prefix('/') {
+            state.palette.update_filter(query);
+            if state.palette.filtered.is_empty() {
+                state.palette.deactivate();
+            }
+        } else {
+            state.palette.deactivate();
+        }
+    }
+}
+
+/// Delete the character before the cursor.
+fn handle_backspace(state: &mut InputState, online_users: &[String]) {
+    if state.cursor_pos > 0 {
+        let prev = state.input[..state.cursor_pos]
+            .char_indices()
+            .next_back()
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+        state.input.remove(prev);
+        state.cursor_pos = prev;
+        sync_mention_after_delete(state, online_users);
+        sync_palette_after_delete(state);
+    }
+}
+
+/// Move cursor one character to the left.
+fn handle_left(state: &mut InputState, online_users: &[String]) {
+    if state.cursor_pos > 0 {
+        state.cursor_pos = state.input[..state.cursor_pos]
+            .char_indices()
+            .next_back()
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+    }
+    sync_mention_after_cursor_move(state, online_users);
+}
+
+/// Move cursor one character to the right.
+fn handle_right(state: &mut InputState, online_users: &[String]) {
+    if state.cursor_pos < state.input.len() {
+        let ch = state.input[state.cursor_pos..].chars().next().unwrap();
+        state.cursor_pos += ch.len_utf8();
+    }
+    sync_mention_after_cursor_move(state, online_users);
 }
 
 /// Wrap input text for display in the input box.
