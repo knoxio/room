@@ -1,7 +1,10 @@
 use std::path::{Path, PathBuf};
 
+use room_protocol::SubscriptionTier;
 use tokio::net::UnixStream;
 use tokio::time::{timeout, Duration};
+
+use crate::broker::commands::load_subscription_map;
 
 /// Information about a discovered room with a live broker.
 #[derive(serde::Serialize)]
@@ -21,14 +24,32 @@ pub fn discover_daemon_rooms() -> Vec<String> {
     discover_daemon_rooms_in(&crate::paths::room_runtime_dir())
 }
 
-/// Discover daemon rooms the user has joined (has a token file for).
+/// Discover daemon rooms the user is subscribed to.
 ///
-/// Scans for `.meta` files, then filters to rooms where a token file
-/// exists for `username`. Returns room IDs sorted alphabetically.
+/// Scans for `.meta` files, then filters to rooms where the user has
+/// a subscription entry that is not `Unsubscribed`. Returns room IDs
+/// sorted alphabetically.
 pub fn discover_joined_rooms(username: &str) -> Vec<String> {
-    discover_daemon_rooms()
+    discover_joined_rooms_in(
+        &crate::paths::room_runtime_dir(),
+        &crate::paths::room_state_dir(),
+        username,
+    )
+}
+
+/// Testable inner: discover rooms from `runtime_dir` where `username` has an
+/// active subscription in `state_dir`.
+fn discover_joined_rooms_in(runtime_dir: &Path, state_dir: &Path, username: &str) -> Vec<String> {
+    discover_daemon_rooms_in(runtime_dir)
         .into_iter()
-        .filter(|room_id| crate::paths::token_path(room_id, username).exists())
+        .filter(|room_id| {
+            let sub_path = crate::paths::broker_subscriptions_path(state_dir, room_id);
+            let map = load_subscription_map(&sub_path);
+            matches!(
+                map.get(username),
+                Some(SubscriptionTier::Full) | Some(SubscriptionTier::MentionsOnly)
+            )
+        })
         .collect()
 }
 
@@ -271,5 +292,102 @@ mod tests {
         }
         let rooms = discover_daemon_rooms_in(dir.path());
         assert_eq!(rooms, vec!["alpha", "mid", "zebra"]);
+    }
+
+    // ── discover_joined_rooms_in ──────────────────────────────────────────
+
+    /// Helper: write a subscription file for a room.
+    fn write_sub_file(
+        state_dir: &Path,
+        room_id: &str,
+        subs: &std::collections::HashMap<String, SubscriptionTier>,
+    ) {
+        let path = state_dir.join(format!("{room_id}.subscriptions"));
+        let json = serde_json::to_string(subs).unwrap();
+        std::fs::write(path, json).unwrap();
+    }
+
+    #[test]
+    fn joined_rooms_returns_subscribed_rooms() {
+        let runtime = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+
+        // Create meta files for two rooms.
+        std::fs::write(runtime.path().join("room-alpha.meta"), "{}").unwrap();
+        std::fs::write(runtime.path().join("room-beta.meta"), "{}").unwrap();
+
+        // Alice subscribed to alpha (Full), not in beta's subscription file.
+        let mut subs = std::collections::HashMap::new();
+        subs.insert("alice".to_owned(), SubscriptionTier::Full);
+        write_sub_file(state.path(), "alpha", &subs);
+
+        let rooms = discover_joined_rooms_in(runtime.path(), state.path(), "alice");
+        assert_eq!(rooms, vec!["alpha"]);
+    }
+
+    #[test]
+    fn joined_rooms_includes_mentions_only() {
+        let runtime = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+
+        std::fs::write(runtime.path().join("room-dev.meta"), "{}").unwrap();
+
+        let mut subs = std::collections::HashMap::new();
+        subs.insert("bob".to_owned(), SubscriptionTier::MentionsOnly);
+        write_sub_file(state.path(), "dev", &subs);
+
+        let rooms = discover_joined_rooms_in(runtime.path(), state.path(), "bob");
+        assert_eq!(rooms, vec!["dev"]);
+    }
+
+    #[test]
+    fn joined_rooms_excludes_unsubscribed() {
+        let runtime = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+
+        std::fs::write(runtime.path().join("room-dev.meta"), "{}").unwrap();
+
+        let mut subs = std::collections::HashMap::new();
+        subs.insert("carol".to_owned(), SubscriptionTier::Unsubscribed);
+        write_sub_file(state.path(), "dev", &subs);
+
+        let rooms = discover_joined_rooms_in(runtime.path(), state.path(), "carol");
+        assert!(rooms.is_empty());
+    }
+
+    #[test]
+    fn joined_rooms_excludes_rooms_without_subscription_file() {
+        let runtime = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+
+        std::fs::write(runtime.path().join("room-lonely.meta"), "{}").unwrap();
+        // No subscription file written for "lonely".
+
+        let rooms = discover_joined_rooms_in(runtime.path(), state.path(), "alice");
+        assert!(rooms.is_empty());
+    }
+
+    #[test]
+    fn joined_rooms_multiple_rooms_sorted() {
+        let runtime = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+
+        for name in ["room-zebra.meta", "room-alpha.meta", "room-mid.meta"] {
+            std::fs::write(runtime.path().join(name), "{}").unwrap();
+        }
+
+        // Alice in zebra (Full), alpha (MentionsOnly), unsubscribed from mid.
+        for (room, tier) in [
+            ("zebra", SubscriptionTier::Full),
+            ("alpha", SubscriptionTier::MentionsOnly),
+            ("mid", SubscriptionTier::Unsubscribed),
+        ] {
+            let mut subs = std::collections::HashMap::new();
+            subs.insert("alice".to_owned(), tier);
+            write_sub_file(state.path(), room, &subs);
+        }
+
+        let rooms = discover_joined_rooms_in(runtime.path(), state.path(), "alice");
+        assert_eq!(rooms, vec!["alpha", "zebra"]);
     }
 }
