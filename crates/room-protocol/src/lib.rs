@@ -392,6 +392,35 @@ pub fn parse_mentions(content: &str) -> Vec<String> {
     mentions
 }
 
+/// Format a human-readable message ID from a room ID and sequence number.
+///
+/// The canonical format is `"<room>:<seq>"`, e.g. `"agent-room:42"`. This is a
+/// display-only identifier used by `--from`, `--to`, and `--id` flags. The wire
+/// format keeps `room` and `seq` as separate fields and never stores this string.
+pub fn format_message_id(room: &str, seq: u64) -> String {
+    format!("{room}:{seq}")
+}
+
+/// Parse a human-readable message ID back into `(room_id, seq)`.
+///
+/// Expects the format `"<room>:<seq>"` produced by [`format_message_id`].
+/// Splits on the **last** colon so room IDs that themselves contain colons are
+/// handled correctly (e.g. `"namespace:room:42"` → `("namespace:room", 42)`).
+///
+/// Returns `Err(String)` if the input has no colon or if the part after the
+/// last colon cannot be parsed as a `u64`.
+pub fn parse_message_id(id: &str) -> Result<(String, u64), String> {
+    let colon = id
+        .rfind(':')
+        .ok_or_else(|| format!("no colon in message ID: {id:?}"))?;
+    let room = &id[..colon];
+    let seq_str = &id[colon + 1..];
+    let seq = seq_str
+        .parse::<u64>()
+        .map_err(|_| format!("invalid sequence number in message ID: {id:?}"))?;
+    Ok((room.to_owned(), seq))
+}
+
 /// Parse a raw line from a client socket.
 /// JSON envelope → Message with broker-assigned id/room/ts.
 /// Plain text → Message::Message with broker-assigned metadata.
@@ -903,5 +932,69 @@ mod tests {
         let msg = make_reply("r", "alice", "msg-1", "@bob noted");
         assert_eq!(msg.content(), Some("@bob noted"));
         assert_eq!(msg.mentions(), vec!["bob"]);
+    }
+
+    // ── format_message_id / parse_message_id tests ───────────────────────────
+
+    #[test]
+    fn format_message_id_basic() {
+        assert_eq!(format_message_id("agent-room", 42), "agent-room:42");
+    }
+
+    #[test]
+    fn format_message_id_seq_zero() {
+        assert_eq!(format_message_id("r", 0), "r:0");
+    }
+
+    #[test]
+    fn format_message_id_max_seq() {
+        assert_eq!(format_message_id("r", u64::MAX), format!("r:{}", u64::MAX));
+    }
+
+    #[test]
+    fn parse_message_id_basic() {
+        let (room, seq) = parse_message_id("agent-room:42").unwrap();
+        assert_eq!(room, "agent-room");
+        assert_eq!(seq, 42);
+    }
+
+    #[test]
+    fn parse_message_id_round_trips() {
+        let id = format_message_id("dev-chat", 99);
+        let (room, seq) = parse_message_id(&id).unwrap();
+        assert_eq!(room, "dev-chat");
+        assert_eq!(seq, 99);
+    }
+
+    #[test]
+    fn parse_message_id_room_with_colon() {
+        // Room ID that itself contains a colon — split on last colon.
+        let (room, seq) = parse_message_id("namespace:room:7").unwrap();
+        assert_eq!(room, "namespace:room");
+        assert_eq!(seq, 7);
+    }
+
+    #[test]
+    fn parse_message_id_no_colon_errors() {
+        assert!(parse_message_id("nocolon").is_err());
+    }
+
+    #[test]
+    fn parse_message_id_invalid_seq_errors() {
+        assert!(parse_message_id("room:notanumber").is_err());
+    }
+
+    #[test]
+    fn parse_message_id_negative_seq_errors() {
+        // Negative numbers are not valid u64.
+        assert!(parse_message_id("room:-1").is_err());
+    }
+
+    #[test]
+    fn parse_message_id_empty_room_ok() {
+        // Edge case: empty room component.
+        let (room, seq) = parse_message_id(":5").unwrap();
+        assert_eq!(room, "");
+        assert_eq!(seq, 5);
     }
 }
