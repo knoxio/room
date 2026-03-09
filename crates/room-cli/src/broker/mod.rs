@@ -203,6 +203,7 @@ async fn handle_client(
                 u,
                 write_half,
                 &token_map,
+                &state.subscription_map,
                 state.config.as_ref(),
                 Some(&state.token_map_path),
             )

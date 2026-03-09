@@ -2,13 +2,13 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
-use room_protocol::{RoomConfig, RoomVisibility};
+use room_protocol::{RoomConfig, RoomVisibility, SubscriptionTier};
 use tokio::{io::AsyncWriteExt, net::unix::OwnedWriteHalf, sync::Mutex};
 use uuid::Uuid;
 
 use crate::registry::UserRegistry;
 
-use super::state::TokenMap;
+use super::state::{SubscriptionMap, TokenMap};
 
 // ── Token persistence ────────────────────────────────────────────────────────
 
@@ -138,6 +138,7 @@ pub(crate) async fn handle_oneshot_join(
     username: String,
     mut write_half: OwnedWriteHalf,
     token_map: &TokenMap,
+    subscription_map: &SubscriptionMap,
     config: Option<&RoomConfig>,
     token_map_path: Option<&Path>,
 ) -> anyhow::Result<()> {
@@ -157,6 +158,13 @@ pub(crate) async fn handle_oneshot_join(
         Ok(token) => {
             let resp = serde_json::json!({"type":"token","token": token,"username": username});
             write_half.write_all(format!("{resp}\n").as_bytes()).await?;
+            // Set Full subscription so the joining user receives all messages,
+            // not just @mentions. Without this, auto_subscribe_mentioned would
+            // downgrade them to MentionsOnly on the first @mention.
+            subscription_map
+                .lock()
+                .await
+                .insert(username, SubscriptionTier::Full);
         }
         Err(_) => {
             let err = serde_json::json!({
@@ -218,6 +226,7 @@ pub(crate) async fn handle_oneshot_join_with_registry(
     mut write_half: OwnedWriteHalf,
     registry: &Arc<Mutex<UserRegistry>>,
     token_map: &TokenMap,
+    subscription_map: &SubscriptionMap,
     config: Option<&RoomConfig>,
 ) -> anyhow::Result<()> {
     if let Err(reason) = check_join_permission(&username, config) {
@@ -235,6 +244,13 @@ pub(crate) async fn handle_oneshot_join_with_registry(
         Ok(token) => {
             let resp = serde_json::json!({"type":"token","token": token,"username": username});
             write_half.write_all(format!("{resp}\n").as_bytes()).await?;
+            // Set Full subscription so the joining user receives all messages,
+            // not just @mentions. Without this, auto_subscribe_mentioned would
+            // downgrade them to MentionsOnly on the first @mention.
+            subscription_map
+                .lock()
+                .await
+                .insert(username, SubscriptionTier::Full);
         }
         Err(_) => {
             let err = serde_json::json!({
@@ -672,6 +688,138 @@ mod tests {
         assert_eq!(
             validate_token(&t2, &token_map).await,
             Some("alice".to_owned())
+        );
+    }
+
+    fn make_subscription_map() -> SubscriptionMap {
+        Arc::new(Mutex::new(HashMap::new()))
+    }
+
+    // ── handle_oneshot_join subscription tests ────────────────────────────────
+
+    #[tokio::test]
+    async fn handle_oneshot_join_sets_full_subscription() {
+        let (client, server) = tokio::net::UnixStream::pair().unwrap();
+        let (_, write_half) = server.into_split();
+        let token_map = make_token_map();
+        let sub_map = make_subscription_map();
+
+        handle_oneshot_join(
+            "alice".to_owned(),
+            write_half,
+            &token_map,
+            &sub_map,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        drop(client);
+        let guard = sub_map.lock().await;
+        assert_eq!(
+            guard.get("alice"),
+            Some(&SubscriptionTier::Full),
+            "join must set subscription to Full so auto_subscribe_mentioned cannot downgrade"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_oneshot_join_denied_does_not_set_subscription() {
+        let (client, server) = tokio::net::UnixStream::pair().unwrap();
+        let (_, write_half) = server.into_split();
+        let token_map = make_token_map();
+        let sub_map = make_subscription_map();
+
+        let config = RoomConfig {
+            visibility: RoomVisibility::Private,
+            max_members: None,
+            invite_list: std::collections::HashSet::new(),
+            created_by: "host".to_owned(),
+            created_at: "2026-01-01T00:00:00Z".to_owned(),
+        };
+
+        handle_oneshot_join(
+            "stranger".to_owned(),
+            write_half,
+            &token_map,
+            &sub_map,
+            Some(&config),
+            None,
+        )
+        .await
+        .unwrap();
+
+        drop(client);
+        assert!(
+            sub_map.lock().await.is_empty(),
+            "denied join must not create a subscription entry"
+        );
+    }
+
+    // ── handle_oneshot_join_with_registry subscription tests ─────────────────
+
+    #[tokio::test]
+    async fn handle_oneshot_join_with_registry_sets_full_subscription() {
+        let dir = tempfile::tempdir().unwrap();
+        let (client, server) = tokio::net::UnixStream::pair().unwrap();
+        let (_, write_half) = server.into_split();
+        let registry = make_registry(dir.path());
+        let token_map = make_token_map();
+        let sub_map = make_subscription_map();
+
+        handle_oneshot_join_with_registry(
+            "bob".to_owned(),
+            write_half,
+            &registry,
+            &token_map,
+            &sub_map,
+            None,
+        )
+        .await
+        .unwrap();
+
+        drop(client);
+        let guard = sub_map.lock().await;
+        assert_eq!(
+            guard.get("bob"),
+            Some(&SubscriptionTier::Full),
+            "registry join must set subscription to Full"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_oneshot_join_with_registry_denied_does_not_set_subscription() {
+        let dir = tempfile::tempdir().unwrap();
+        let (client, server) = tokio::net::UnixStream::pair().unwrap();
+        let (_, write_half) = server.into_split();
+        let registry = make_registry(dir.path());
+        let token_map = make_token_map();
+        let sub_map = make_subscription_map();
+
+        let config = RoomConfig {
+            visibility: RoomVisibility::Private,
+            max_members: None,
+            invite_list: std::collections::HashSet::new(),
+            created_by: "host".to_owned(),
+            created_at: "2026-01-01T00:00:00Z".to_owned(),
+        };
+
+        handle_oneshot_join_with_registry(
+            "stranger".to_owned(),
+            write_half,
+            &registry,
+            &token_map,
+            &sub_map,
+            Some(&config),
+        )
+        .await
+        .unwrap();
+
+        drop(client);
+        assert!(
+            sub_map.lock().await.is_empty(),
+            "denied join must not create a subscription entry"
         );
     }
 }

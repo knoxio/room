@@ -968,6 +968,7 @@ async fn dispatch_connection(
                 write_half,
                 user_registry,
                 &state.token_map,
+                &state.subscription_map,
                 state.config.as_ref(),
             )
             .await;
