@@ -1,8 +1,8 @@
 /// End-to-end smoke tests for the `--ws-port` flag.
 ///
-/// These tests spawn the real `room` binary as a child process (broker mode)
-/// and connect via WebSocket and REST from outside the process. This validates
-/// the full CLI → broker → transport path that users will exercise.
+/// These tests spawn the real `room` binary as a daemon process and connect
+/// via WebSocket and REST from outside the process. This validates the full
+/// CLI → daemon → transport path that users will exercise.
 ///
 /// # WARNING — do not run in normal `cargo test`
 ///
@@ -16,7 +16,7 @@
 /// cargo test -p room-cli -- --ignored smoke_
 /// ```
 ///
-/// Tests are serialized via `SMOKE_LOCK` because spawning 5 broker processes
+/// Tests are serialized via `SMOKE_LOCK` because spawning 5 daemon processes
 /// simultaneously causes disk I/O contention on encrypted volumes, preventing
 /// any of them from starting within a reasonable timeout.
 mod common;
@@ -28,12 +28,12 @@ use std::{
 };
 
 use futures_util::{SinkExt, StreamExt};
-use room_cli::paths;
+use tempfile::TempDir;
 use tokio::time::timeout;
 use tokio_tungstenite::{connect_async, tungstenite::Message as TungsteniteMsg};
 
 /// Serialize smoke test execution to prevent disk I/O contention when multiple
-/// broker processes start simultaneously on encrypted volumes.
+/// daemon processes start simultaneously on encrypted volumes.
 static SMOKE_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 /// Find the compiled `room` binary. Works with `cargo test`.
@@ -50,37 +50,37 @@ fn room_binary() -> std::path::PathBuf {
     path
 }
 
-/// Spawn a `room` broker process with a unique room ID and WS port.
-/// Returns (child, ws_port).
-/// The caller must kill the child when done.
-async fn spawn_broker(room_id: &str) -> (tokio::process::Child, u16) {
+/// Spawn a `room daemon` process with a pre-created room and WS port.
+/// Returns (child, ws_port, _temp_dir). The caller must kill the child when done.
+/// The TempDir handle keeps the temp directory alive for the test duration.
+async fn spawn_daemon(room_id: &str) -> (tokio::process::Child, u16, TempDir) {
     let port = common::free_port();
     let bin = room_binary();
-
-    let chat_file = format!("/tmp/ws_smoke_{room_id}.chat");
-    let token_file = format!("/tmp/ws_smoke_{room_id}.tokens");
-    let socket_path = format!("/tmp/room-{room_id}.sock");
-    // Also clean up the durable broker token map (moved to ~/.room/state/ in #285).
-    let durable_token_map = paths::broker_tokens_path(&paths::room_state_dir(), room_id);
-    common::cleanup_stale_files(&[&chat_file, &token_file, &socket_path]);
-    let _ = std::fs::remove_file(&durable_token_map);
+    let dir = TempDir::new().expect("failed to create temp dir for smoke test");
+    let socket = dir.path().join("roomd.sock");
 
     let mut child = tokio::process::Command::new(&bin)
         .args([
-            room_id,
-            "smoke_host",
-            "--agent",
+            "daemon",
+            "--socket",
+            socket.to_str().unwrap(),
+            "--data-dir",
+            dir.path().to_str().unwrap(),
+            "--state-dir",
+            dir.path().to_str().unwrap(),
             "--ws-port",
             &port.to_string(),
-            "-f",
-            &chat_file,
+            "--room",
+            room_id,
+            "--grace-period",
+            "0",
         ])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true)
         .spawn()
-        .unwrap_or_else(|e| panic!("failed to spawn room binary at {}: {e}", bin.display()));
+        .unwrap_or_else(|e| panic!("failed to spawn room daemon at {}: {e}", bin.display()));
 
     // Wait for TCP readiness with early crash detection.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
@@ -92,7 +92,7 @@ async fn spawn_broker(room_id: &str) -> (tokio::process::Child, u16) {
             break;
         }
         if let Ok(Some(status)) = child.try_wait() {
-            panic!("broker exited with {status} before WS server was ready on port {port}");
+            panic!("daemon exited with {status} before WS server was ready on port {port}");
         }
         assert!(
             tokio::time::Instant::now() < deadline,
@@ -101,7 +101,7 @@ async fn spawn_broker(room_id: &str) -> (tokio::process::Child, u16) {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 
-    (child, port)
+    (child, port, dir)
 }
 
 // ── REST smoke tests ────────────────────────────────────────────────────────
@@ -112,7 +112,7 @@ async fn spawn_broker(room_id: &str) -> (tokio::process::Child, u16) {
 #[ignore = "spawns real OS processes; run explicitly with `cargo test -- --ignored`"]
 async fn smoke_rest_health() {
     let _guard = SMOKE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let (mut child, port) = spawn_broker("smoke_health").await;
+    let (mut child, port, _dir) = spawn_daemon("smoke_health").await;
 
     let resp = reqwest::get(format!("http://127.0.0.1:{port}/api/health"))
         .await
@@ -131,7 +131,7 @@ async fn smoke_rest_health() {
 #[ignore = "spawns real OS processes; run explicitly with `cargo test -- --ignored`"]
 async fn smoke_rest_join_send_poll() {
     let _guard = SMOKE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let (mut child, port) = spawn_broker("smoke_rsp").await;
+    let (mut child, port, _dir) = spawn_daemon("smoke_rsp").await;
     let base = format!("http://127.0.0.1:{port}");
     let client = reqwest::Client::new();
 
@@ -203,7 +203,7 @@ async fn smoke_rest_join_send_poll() {
 #[ignore = "spawns real OS processes; run explicitly with `cargo test -- --ignored`"]
 async fn smoke_ws_interactive_session() {
     let _guard = SMOKE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let (mut child, port) = spawn_broker("smoke_wsi").await;
+    let (mut child, port, _dir) = spawn_daemon("smoke_wsi").await;
 
     let url = format!("ws://127.0.0.1:{port}/ws/smoke_wsi");
     let (ws, _) = connect_async(&url).await.expect("WS connect failed");
@@ -214,7 +214,7 @@ async fn smoke_ws_interactive_session() {
         .await
         .unwrap();
 
-    // Should eventually receive join event for ws_smoker (may see smoke_host's join first as history).
+    // Should eventually receive join event for ws_smoker.
     let join = recv_until(&mut rx, |v| v["type"] == "join" && v["user"] == "ws_smoker").await;
     assert_eq!(join["user"], "ws_smoker");
 
@@ -238,7 +238,7 @@ async fn smoke_ws_interactive_session() {
 #[ignore = "spawns real OS processes; run explicitly with `cargo test -- --ignored`"]
 async fn smoke_ws_oneshot_join_and_token_send() {
     let _guard = SMOKE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let (mut child, port) = spawn_broker("smoke_wsos").await;
+    let (mut child, port, _dir) = spawn_daemon("smoke_wsos").await;
 
     // One-shot JOIN via WS.
     let url = format!("ws://127.0.0.1:{port}/ws/smoke_wsos");
@@ -277,7 +277,7 @@ async fn smoke_ws_oneshot_join_and_token_send() {
 #[ignore = "spawns real OS processes; run explicitly with `cargo test -- --ignored`"]
 async fn smoke_ws_and_rest_cross_path() {
     let _guard = SMOKE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let (mut child, port) = spawn_broker("smoke_cross").await;
+    let (mut child, port, _dir) = spawn_daemon("smoke_cross").await;
     let base = format!("http://127.0.0.1:{port}");
     let http = reqwest::Client::new();
 
