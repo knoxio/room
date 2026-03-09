@@ -39,8 +39,6 @@ pub(crate) async fn broadcast_and_persist(
 /// receives their own echo; no error is returned.
 pub(crate) async fn dm_and_persist(
     msg: &Message,
-    sender: &str,
-    recipient: &str,
     host_user: &HostUser,
     clients: &ClientMap,
     chat_path: &Path,
@@ -57,7 +55,7 @@ pub(crate) async fn dm_and_persist(
     let host_name = host.as_deref();
     let map = clients.lock().await;
     for (username, tx) in map.values() {
-        if username == sender || username == recipient || host_name == Some(username.as_str()) {
+        if msg.is_visible_to(username, host_name) {
             let _ = tx.send(line.clone());
         }
     }

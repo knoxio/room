@@ -276,16 +276,9 @@ pub(crate) async fn run_interactive_session(
     // client is not party to (sender, recipient, or host).
     // If the client disconnects mid-replay, treat it as a clean exit.
     let host_name = state.host_user.lock().await.clone();
-    let is_host = host_name.as_deref() == Some(username.as_str());
     let history = history::load(&state.chat_path).await.unwrap_or_default();
     for msg in &history {
-        let visible = match msg {
-            Message::DirectMessage { user, to, .. } => {
-                is_host || user == &username || to == &username
-            }
-            _ => true,
-        };
-        if visible {
+        if msg.is_visible_to(&username, host_name.as_deref()) {
             let line = format!("{}\n", serde_json::to_string(msg)?);
             if write_half.write_all(line.as_bytes()).await.is_err() {
                 return Ok(());
@@ -397,11 +390,9 @@ pub(crate) async fn run_interactive_session(
                                 }
                                 let is_broadcast = !matches!(&msg, Message::DirectMessage { .. });
                                 let result = match &msg {
-                                    Message::DirectMessage { to, .. } => {
+                                    Message::DirectMessage { .. } => {
                                         dm_and_persist(
                                             &msg,
-                                            &username_in,
-                                            to,
                                             &state_in.host_user,
                                             &state_in.clients,
                                             &state_in.chat_path,
@@ -492,11 +483,9 @@ pub(crate) async fn handle_oneshot_send(
             }
             let is_broadcast = !matches!(&msg, Message::DirectMessage { .. });
             let seq_msg = match &msg {
-                Message::DirectMessage { to, .. } => {
+                Message::DirectMessage { .. } => {
                     dm_and_persist(
                         &msg,
-                        &username,
-                        to,
                         &state.host_user,
                         &state.clients,
                         &state.chat_path,

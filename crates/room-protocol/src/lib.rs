@@ -320,6 +320,20 @@ impl Message {
         }
     }
 
+    /// Returns `true` if `viewer` is allowed to see this message.
+    ///
+    /// All non-DM variants are visible to everyone. A [`Message::DirectMessage`]
+    /// is visible only to the sender (`user`), the recipient (`to`), and the
+    /// room host (when `host == Some(viewer)`).
+    pub fn is_visible_to(&self, viewer: &str, host: Option<&str>) -> bool {
+        match self {
+            Self::DirectMessage { user, to, .. } => {
+                viewer == user || viewer == to.as_str() || host == Some(viewer)
+            }
+            _ => true,
+        }
+    }
+
     /// Assign a broker-issued sequence number to this message.
     pub fn set_seq(&mut self, seq: u64) {
         let n = Some(seq);
@@ -783,6 +797,63 @@ mod tests {
         assert_eq!(v["type"], "dm");
         assert_eq!(v["to"], "bob");
         assert_eq!(v["content"], "hi");
+    }
+
+    // ── is_visible_to tests ───────────────────────────────────────────────────
+
+    fn make_test_dm(from: &str, to: &str) -> Message {
+        Message::DirectMessage {
+            id: fixed_id(),
+            room: "r".into(),
+            user: from.into(),
+            ts: fixed_ts(),
+            seq: None,
+            to: to.into(),
+            content: "secret".into(),
+        }
+    }
+
+    #[test]
+    fn dm_visible_to_sender() {
+        let msg = make_test_dm("alice", "bob");
+        assert!(msg.is_visible_to("alice", None));
+    }
+
+    #[test]
+    fn dm_visible_to_recipient() {
+        let msg = make_test_dm("alice", "bob");
+        assert!(msg.is_visible_to("bob", None));
+    }
+
+    #[test]
+    fn dm_visible_to_host() {
+        let msg = make_test_dm("alice", "bob");
+        assert!(msg.is_visible_to("carol", Some("carol")));
+    }
+
+    #[test]
+    fn dm_hidden_from_non_participant() {
+        let msg = make_test_dm("alice", "bob");
+        assert!(!msg.is_visible_to("carol", None));
+    }
+
+    #[test]
+    fn dm_non_participant_not_elevated_by_different_host() {
+        let msg = make_test_dm("alice", "bob");
+        assert!(!msg.is_visible_to("carol", Some("dave")));
+    }
+
+    #[test]
+    fn non_dm_always_visible() {
+        let msg = make_message("r", "alice", "hello");
+        assert!(msg.is_visible_to("bob", None));
+        assert!(msg.is_visible_to("carol", Some("dave")));
+    }
+
+    #[test]
+    fn join_always_visible() {
+        let msg = make_join("r", "alice");
+        assert!(msg.is_visible_to("bob", None));
     }
 
     // ── Accessor tests ────────────────────────────────────────────────────────

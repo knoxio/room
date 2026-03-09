@@ -167,16 +167,9 @@ async fn run_ws_session(
 
     // Send chat history, filtering DMs the client is not party to.
     let host_name = state.host_user.lock().await.clone();
-    let is_host = host_name.as_deref() == Some(username.as_str());
     let history = history::load(&state.chat_path).await.unwrap_or_default();
     for msg in &history {
-        let visible = match msg {
-            Message::DirectMessage { user, to, .. } => {
-                is_host || user == &username || to == &username
-            }
-            _ => true,
-        };
-        if visible {
+        if msg.is_visible_to(&username, host_name.as_deref()) {
             let line = serde_json::to_string(msg)?;
             if ws_tx.send(WsMessage::Text(line.into())).await.is_err() {
                 return Ok(());
@@ -275,11 +268,9 @@ async fn run_ws_session(
                                     continue;
                                 }
                                 let result = match &msg {
-                                    Message::DirectMessage { to, .. } => {
+                                    Message::DirectMessage { .. } => {
                                         dm_and_persist(
                                             &msg,
-                                            &username_in,
-                                            to,
                                             &state_in.host_user,
                                             &state_in.clients,
                                             &state_in.chat_path,
@@ -404,11 +395,9 @@ async fn ws_oneshot_send(
                 return Ok(());
             }
             let seq_msg = match &msg {
-                Message::DirectMessage { to, .. } => {
+                Message::DirectMessage { .. } => {
                     dm_and_persist(
                         &msg,
-                        &username,
-                        to,
                         &state.host_user,
                         &state.clients,
                         &state.chat_path,
@@ -563,11 +552,9 @@ async fn api_send(
                     .into_response();
             }
             let result = match &msg {
-                Message::DirectMessage { to, .. } => {
+                Message::DirectMessage { .. } => {
                     dm_and_persist(
                         &msg,
-                        &username,
-                        to,
                         &rs.host_user,
                         &rs.clients,
                         &rs.chat_path,
@@ -641,7 +628,6 @@ async fn api_poll(
     let rs = &state.room_state;
     let history = history::load(&rs.chat_path).await.unwrap_or_default();
     let host_name = rs.host_user.lock().await.clone();
-    let is_host = host_name.as_deref() == Some(username.as_str());
 
     // Filter messages after the `since` ID (stateless — no server-side cursor).
     let mut found_since = query.since.is_none();
@@ -654,12 +640,7 @@ async fn api_poll(
                 }
                 return false;
             }
-            match msg {
-                Message::DirectMessage { user, to, .. } => {
-                    is_host || user == &username || to == &username
-                }
-                _ => true,
-            }
+            msg.is_visible_to(&username, host_name.as_deref())
         })
         .filter_map(|msg| serde_json::to_value(&msg).ok())
         .collect();
@@ -730,16 +711,14 @@ fn apply_query_filter(
     filter: &QueryFilter,
     room_id: &str,
     username: &str,
-    is_host: bool,
+    host: Option<&str>,
 ) -> Vec<serde_json::Value> {
     let mut messages: Vec<serde_json::Value> = history
         .into_iter()
         .filter(|msg| {
             // Enforce DM privacy before running QueryFilter.
-            if let Message::DirectMessage { user, to, .. } = msg {
-                if !is_host && user != username && to != username {
-                    return false;
-                }
+            if !msg.is_visible_to(username, host) {
+                return false;
             }
             filter.matches(msg, room_id)
         })
@@ -811,8 +790,7 @@ async fn api_query(
     let rs = &state.room_state;
     let history = history::load(&rs.chat_path).await.unwrap_or_default();
     let host_name = rs.host_user.lock().await.clone();
-    let is_host = host_name.as_deref() == Some(username.as_str());
-    let messages = apply_query_filter(history, &filter, &room_id, &username, is_host);
+    let messages = apply_query_filter(history, &filter, &room_id, &username, host_name.as_deref());
 
     (
         StatusCode::OK,
@@ -997,11 +975,9 @@ async fn daemon_api_send(
                     .into_response();
             }
             let result = match &msg {
-                Message::DirectMessage { to, .. } => {
+                Message::DirectMessage { .. } => {
                     dm_and_persist(
                         &msg,
-                        &username,
-                        to,
                         &room.host_user,
                         &room.clients,
                         &room.chat_path,
@@ -1075,7 +1051,6 @@ async fn daemon_api_poll(
 
     let history = history::load(&room.chat_path).await.unwrap_or_default();
     let host_name = room.host_user.lock().await.clone();
-    let is_host = host_name.as_deref() == Some(username.as_str());
 
     let mut found_since = query.since.is_none();
     let messages: Vec<serde_json::Value> = history
@@ -1087,12 +1062,7 @@ async fn daemon_api_poll(
                 }
                 return false;
             }
-            match msg {
-                Message::DirectMessage { user, to, .. } => {
-                    is_host || user == &username || to == &username
-                }
-                _ => true,
-            }
+            msg.is_visible_to(&username, host_name.as_deref())
         })
         .filter_map(|msg| serde_json::to_value(&msg).ok())
         .collect();
@@ -1293,8 +1263,7 @@ async fn daemon_api_query(
 
     let history = history::load(&room.chat_path).await.unwrap_or_default();
     let host_name = room.host_user.lock().await.clone();
-    let is_host = host_name.as_deref() == Some(username.as_str());
-    let messages = apply_query_filter(history, &filter, &room_id, &username, is_host);
+    let messages = apply_query_filter(history, &filter, &room_id, &username, host_name.as_deref());
 
     (
         StatusCode::OK,
