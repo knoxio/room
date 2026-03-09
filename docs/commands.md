@@ -92,6 +92,21 @@ re-delivered. Useful for agents that need to wake on incoming messages.
 
 ---
 
+### `room who`
+
+```
+room who <room-id> --token <token>
+```
+
+Query online members and their statuses. Returns a system message listing
+all connected users. The response format matches `/who` from the TUI.
+
+| Flag | Description |
+|------|-------------|
+| `--token`, `-t` | Session token from `room join` (required) |
+
+---
+
 ### `room <room-id> <username>` (TUI mode)
 
 ```
@@ -138,11 +153,35 @@ a `reply_to` reference so clients can thread it visually.
 
 ### `/claim <task>`
 
-Announce that you are claiming a task. Broadcasts a system-style message so
-other users know the task is taken.
+Register a task claim. The broker stores the claim in memory and broadcasts
+a system message to all users. Each user can hold at most one claim at a
+time — a new `/claim` replaces any existing claim.
 
 ```
 /claim implement the /dm command
+```
+
+---
+
+### `/unclaim`
+
+Release your current task claim. Broadcasts a system message confirming the
+release. No-op message if you have no active claim.
+
+```
+/unclaim
+```
+
+---
+
+### `/claimed`
+
+List all active task claims across all users. The response is sent privately
+(only you see it). Useful for checking what tasks are taken before starting
+work.
+
+```
+/claimed
 ```
 
 ---

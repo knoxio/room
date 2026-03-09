@@ -25,7 +25,11 @@ To get a specific message ID, look at the `id` field in any previous poll output
 
 ## Recovering from a broker crash
 
-If the broker process dies and restarts, all session tokens are invalidated. Re-join to get a new token:
+Tokens are persisted to disk (`.tokens` file alongside the chat file) and
+survive broker restarts. If the broker crashes and restarts, existing tokens
+remain valid — no re-join is needed.
+
+If your token is rejected after a restart, re-join:
 
 ```bash
 room join <room-id> <username>

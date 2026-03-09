@@ -8,7 +8,7 @@ This crate defines the `Message` enum and constructor functions shared by all ro
 
 ```toml
 [dependencies]
-room-protocol = "2.0.0"
+room-protocol = "2"
 ```
 
 ## Message types
@@ -48,8 +48,13 @@ let msg = parse_client_line("hello", "myroom", "bob").unwrap();
 ## Public API
 
 - `Message` — enum with variants for all wire format types
+  - `content()` — returns the content/text of any message variant
+  - `mentions()` — extracts `@username` mentions from message content
 - `make_join`, `make_leave`, `make_message`, `make_reply`, `make_command`, `make_system`, `make_dm` — constructors
 - `parse_client_line` — parse raw client input (plain text becomes a `Message`, JSON envelopes are deserialized)
+- `parse_mentions` — extract `@username` mentions from arbitrary text
+- `RoomConfig`, `RoomVisibility` — room access control types
+- `dm_room_id` — deterministic room ID for DM pairs
 
 ## Design constraints
 

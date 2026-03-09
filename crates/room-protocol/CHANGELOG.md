@@ -9,7 +9,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [2.1.0-rc.2] - 2026-03-08
 
-Version bump to stay in sync with room-cli 2.1.0-rc.2. No functional changes.
+### Added
+
+- `parse_mentions()` — extract `@username` mentions from text. (#256)
+- `Message::content()` and `Message::mentions()` accessors. (#256)
+- `RoomConfig` and `RoomVisibility` types for room access control. (#253)
+- `dm_room_id()` — deterministic room ID for DM pairs.
 
 ## [2.1.0-rc.1] - 2026-03-07
 

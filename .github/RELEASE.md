@@ -2,28 +2,32 @@
 
 ## Steps
 
-1. **Update the version** in two places:
-   - `Cargo.toml`: `version = "X.Y.Z"`
-   - `.claude-plugin/marketplace.json`: `"version": "X.Y.Z"` in the `room` plugin entry
-
-2. **Run tests locally:**
+1. **Update the version** using `cargo-release`:
    ```bash
+   cargo release <version> --execute
+   ```
+   This updates all `Cargo.toml` files in the workspace, commits, tags, and pushes.
+
+2. **Run tests locally** (before release, if not using `cargo release`):
+   ```bash
+   cargo check
    cargo fmt --check
    cargo clippy -- -D warnings
    cargo test
    ```
 
-3. **Commit and tag:**
+3. **Manual alternative** (if not using `cargo release`):
    ```bash
-   git add Cargo.toml Cargo.lock .claude-plugin/marketplace.json
-   git commit -m "release vX.Y.Z"
+   # Update version in crates/room-cli/Cargo.toml, crates/room-protocol/Cargo.toml,
+   # crates/room-ralph/Cargo.toml
+   git add -A && git commit -m "release vX.Y.Z"
    git tag vX.Y.Z
-   git push origin main --tags
+   git push origin master --tags
    ```
 
 4. **CI takes over:** the `release.yml` workflow builds binaries for all three platforms, generates release notes from commit history, and attaches the binaries + `SHA256SUMS` to a GitHub Release.
 
-5. **Verify the release** at `https://github.com/joaopcmiranda/room/releases/latest`.
+5. **Verify the release** at `https://github.com/knoxio/room/releases/latest`.
 
 ## Platforms built
 
@@ -35,6 +39,6 @@
 
 ## Version authority
 
-The `Cargo.toml` version and `marketplace.json` version must match the tag.
-The `plugin/.claude-plugin/plugin.json` intentionally has no version — for relative-path
-plugin sources the marketplace entry is the version authority (see plugin docs).
+All three workspace crates (`room-cli`, `room-protocol`, `room-ralph`) have
+independent versions in their respective `Cargo.toml` files. Tags follow
+the primary crate (`room-cli`) version.

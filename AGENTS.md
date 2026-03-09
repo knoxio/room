@@ -4,7 +4,18 @@ This file documents how AI agents should use `room` to coordinate with each othe
 
 ## What is `room`?
 
-`room` is a CLI tool that provides a shared group chat over Unix domain sockets. One process acts as the broker; all others connect as clients. The full message history is persisted to an NDJSON file on disk and replayed to new participants on join.
+`room` is a CLI tool that provides a shared group chat over Unix domain sockets (and optionally WebSocket/REST). One process acts as the broker; all others connect as clients. The full message history is persisted to an NDJSON file on disk and replayed to new participants on join.
+
+## Session setup
+
+All one-shot commands require a session token. Join the room once per broker lifetime:
+
+```bash
+room join <room-id> <username>
+# {"type":"token","token":"<uuid>","username":"<username>"}
+```
+
+Pass the token explicitly with `-t` on every subsequent command — it is not auto-read from disk. Tokens persist across broker restarts.
 
 ## Sending and receiving messages
 
@@ -12,13 +23,22 @@ Use the one-shot subcommands. They connect, act, and exit immediately — no per
 
 ```bash
 # Send a message
-room send <room-id> <username> your message here
+room send <room-id> -t <token> your message here
+
+# Send a direct message
+room send <room-id> -t <token> --to <recipient> your message here
 
 # Check for new messages since last poll
-room poll <room-id> <username>
+room poll <room-id> -t <token>
 
 # Check messages since a specific message ID
-room poll <room-id> <username> --since <id>
+room poll <room-id> -t <token> --since <id>
+
+# Block until a foreign message arrives
+room watch <room-id> -t <token> --interval 5
+
+# Query online members and statuses
+room who <room-id> -t <token>
 ```
 
 The `room poll` cursor is stored at `/tmp/room-<id>-<username>.cursor`. Subsequent calls with no `--since` return only messages that arrived after the previous poll.
@@ -27,21 +47,23 @@ The `room poll` cursor is stored at `/tmp/room-<id>-<username>.cursor`. Subseque
 
 ### On starting work
 
-1. Poll for context: `room poll <room-id> <username>`
-2. Announce intent: `room send <room-id> <username> "starting work on <task>"`
-3. Wait for acknowledgement or objections before proceeding.
+1. Join the room if you don't have a token: `room join <room-id> <username>`
+2. Poll for context: `room poll <room-id> -t <token>`
+3. Announce intent: `room send <room-id> -t <token> "starting work on <task>"`
+4. Wait for acknowledgement or objections before proceeding.
 
 ### During work
 
-- **Poll before touching shared files**: `room poll <room-id> <username>`
-- **Claim work before starting it**: `room send <room-id> <username> "/claim <description>"`
+- **Claim tasks before starting**: `room send <room-id> -t <token> /claim <description>`
+- **Poll before touching shared files**: `room poll <room-id> -t <token>`
 - **Announce blockers immediately.** Do not silently stall.
 - **Broadcast progress at natural milestones** — silence is harder to coordinate around than noise.
+- **Set status at every milestone**: `room send <room-id> -t <token> /set_status <what you are doing>`
 
 ### On completion
 
 ```bash
-room send <room-id> <username> "done. changed: <file list>. <summary of decisions/tradeoffs>"
+room send <room-id> -t <token> "done. changed: <file list>. <summary of decisions/tradeoffs>"
 ```
 
 ### Coordination rules
@@ -65,11 +87,11 @@ Every message is a JSON object with a `type` field. Key types:
 | `system` | Broker-generated notice |
 | `dm` | Private message to one user |
 
-All events carry `id` (UUID), `room`, `user`, and `ts` (ISO 8601 UTC).
+All events carry `id` (UUID), `room`, `user`, `ts` (ISO 8601 UTC), and `seq` (monotonic sequence number).
 
 ## Environment
 
 - Socket: `/tmp/room-<id>.sock`
 - Chat history: `/tmp/<id>.chat` (NDJSON, broker is sole writer)
-- Meta (chat path for broker recovery): `/tmp/room-<id>.meta`
+- Token persistence: `/tmp/<id>.tokens` (survives broker restarts)
 - Poll cursor: `/tmp/room-<id>-<username>.cursor`

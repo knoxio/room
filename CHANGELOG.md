@@ -7,6 +7,47 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+> Post-monorepo changes are tracked per-crate. See:
+> - [room-cli CHANGELOG](crates/room-cli/CHANGELOG.md)
+> - [room-protocol CHANGELOG](crates/room-protocol/CHANGELOG.md)
+> - [room-ralph CHANGELOG](crates/room-ralph/CHANGELOG.md)
+
+### Changed
+
+- Restructured into a cargo workspace with four crates: `room-protocol` (wire types),
+  `room-cli` (broker + TUI + oneshot), `room-ralph` (agent wrapper), `agentroom`
+  (deprecation shim). (#197, #198, #199, #204, #205, #206)
+
+### Added (room-cli 2.x)
+
+- **Multi-room daemon** (`room daemon`) — manages multiple rooms from a single process
+  with shared socket and optional WebSocket. (#251, #261)
+- **Room visibility and ACLs** — public, private, unlisted, and DM room types with
+  invite lists and join permission checks. (#253, #263)
+- **Token persistence** — session tokens survive broker restarts via `.tokens` files. (#183)
+- **Built-in commands** — `/claim`, `/unclaim`, `/claimed` for task coordination;
+  `/room-info` for room metadata. (#182)
+- **Parameter validation** — built-in commands validate params against schemas before
+  dispatch. (#265)
+- **Room ID sanitization** — rejects invalid characters in room IDs. (#264)
+- **Multiplexed poll** — `room poll --rooms r1,r2,r3` polls multiple rooms at once. (#255)
+- **@mention parsing** — `parse_mentions()` in room-protocol, `--mentions-only` filter
+  on poll. (#256)
+- **Oneshot `/who`** — `room who <room-id> -t <token>` queries members without TUI. (#226)
+- **TUI member panel** — floating status panel showing online users. (#225)
+- **Kicked user cleanup** — kicked users removed from member panel and autocomplete. (#236)
+- **Reusable test harness** — shared `tests/common/mod.rs` with lifecycle helpers. (#181)
+- **Pre-scripted test scenarios** — multi-agent coordination test sequences. (#180)
+
+### Added (room-ralph 0.2–0.3)
+
+- `--allow-tools` and `--disallow-tools` flags for tool permissions. (#213, #242)
+- `--personality` flag for per-agent personality files. (#215)
+- `--profile` flag for tool profiles. (#241)
+- Environment variable configuration (`RALPH_ROOM`, `RALPH_USERNAME`, etc.). (#222)
+- Safe default tool set. (#221)
+- Automatic `/set_status` updates at loop milestones. (#243)
+
 ## [1.0.2] - 2026-03-06
 
 ### Changed
@@ -267,7 +308,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `--agent` mode for long-lived processes with JSON stdin/stdout.
 - Claude Code plugin with `room-coordination` skill and `/room:check`, `/room:send` commands.
 
-[Unreleased]: https://github.com/knoxio/room/compare/v1.0.2...HEAD
+[Unreleased]: https://github.com/knoxio/room/compare/v2.0.1...HEAD
 [1.0.2]: https://github.com/knoxio/room/compare/v1.0.1...v1.0.2
 [1.0.1]: https://github.com/knoxio/room/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/knoxio/room/compare/v0.8.0...v1.0.0

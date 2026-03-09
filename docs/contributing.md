@@ -84,7 +84,7 @@ The project room is the coordination layer. Use it.
 New behaviour must have tests. The test split:
 
 - **Unit tests** (`src/*.rs` via `#[cfg(test)]`): test individual functions and logic in isolation.
-- **Integration tests** (`tests/integration.rs`): test the full broker stack with a live `UnixListener`. Use the helpers already in that file (`start_broker`, `connect`, `send_text`, `send_json`, `recv_line`, `send_message_with_token`, etc.) to keep tests concise.
+- **Integration tests** (`tests/integration.rs`): test the full broker stack with a live `UnixListener`. Use the helpers already in that file (`TestBroker::start`, `TestClient::connect`, `send_text`, `send_json`, `recv`, `recv_until`, etc.) to keep tests concise. Shared lifecycle helpers are in `tests/common/mod.rs`.
 
 When writing integration tests:
 

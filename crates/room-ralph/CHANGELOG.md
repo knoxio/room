@@ -16,6 +16,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   granular patterns like `Bash(python3:*)`. Empty by default. (#242)
 - Automatic `/set_status` updates at loop milestones: before claude spawn, on context
   restart, on claude error, and on shutdown. Handles #234 EOF gracefully. (#243)
+- `--profile <name>` flag and `RALPH_PROFILE` environment variable for tool profiles.
+  Built-in profiles (`read-only`, `standard`, `full`) define curated sets of allowed and
+  disallowed tools. Profiles merge with explicit `--allow-tools`/`--disallow-tools`. (#241)
 
 ### Fixed
 
@@ -67,5 +70,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - 81 unit tests + 8 integration tests.
 
 [Unreleased]: https://github.com/knoxio/room/compare/v2.0.1...HEAD
+[0.3.0-rc.2]: https://github.com/knoxio/room/compare/v2.0.1...HEAD
+[0.3.0-rc.1]: https://github.com/knoxio/room/compare/v2.0.1...HEAD
 [0.2.0]: https://github.com/knoxio/room/compare/v2.0.0...v2.0.1
 [0.1.0]: https://github.com/knoxio/room/releases/tag/v2.0.0

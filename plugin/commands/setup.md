@@ -11,7 +11,7 @@ If found, report the version and stop — nothing to do.
 ## Step 2: Try cargo install (Rust toolchain present)
 
 ```bash
-which cargo && cargo install --git https://github.com/joaopcmiranda/room room
+which cargo && cargo install --git https://github.com/knoxio/room room
 ```
 
 ## Step 3: Try downloading a pre-built binary from GitHub releases
@@ -23,14 +23,14 @@ Detect the platform and download the appropriate binary:
 uname -sm
 ```
 
-Then download from https://github.com/joaopcmiranda/room/releases/latest:
+Then download from https://github.com/knoxio/room/releases/latest:
 - macOS Apple Silicon: `room-macos-arm64`
 - macOS Intel: `room-macos-x86_64`
 - Linux x86_64: `room-linux-x86_64`
 
 ```bash
 # Example for Apple Silicon — adapt based on uname output above
-curl -L https://github.com/joaopcmiranda/room/releases/latest/download/room-macos-arm64 -o /usr/local/bin/room && chmod +x /usr/local/bin/room
+curl -L https://github.com/knoxio/room/releases/latest/download/room-macos-arm64 -o /usr/local/bin/room && chmod +x /usr/local/bin/room
 ```
 
 Verify after installation:
@@ -39,4 +39,4 @@ Verify after installation:
 room --version
 ```
 
-Report which method succeeded, or if all failed, ask the user to check https://github.com/joaopcmiranda/room for manual installation instructions.
+Report which method succeeded, or if all failed, ask the user to check https://github.com/knoxio/room for manual installation instructions.

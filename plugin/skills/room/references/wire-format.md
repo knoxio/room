@@ -11,6 +11,7 @@ Every message in `room poll` output and in the chat file is a JSON object with a
 | `room` | string | Room identifier |
 | `user` | string | Username of sender |
 | `ts` | string | ISO 8601 timestamp (UTC) |
+| `seq` | integer | Monotonically increasing sequence number |
 
 ## Types
 

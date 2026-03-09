@@ -10,6 +10,22 @@ For changes prior to the workspace restructure (v0.1.2 through v1.0.2), see the
 
 ## [Unreleased]
 
+### Added
+
+- `/claim`, `/unclaim`, `/claimed` built-in commands for task coordination. (#182)
+- Parameter validation for built-in commands against `CommandInfo` schemas. (#265)
+- Token persistence across broker restarts via `.tokens` files. (#183)
+- Room ID sanitization — rejects invalid characters. (#264)
+- Multiplexed poll: `room poll --rooms r1,r2,r3` polls multiple rooms. (#255)
+- `--mentions-only` filter on `room poll`. (#256)
+- Reusable test harness in `tests/common/mod.rs`. (#181)
+- Pre-scripted multi-agent test scenarios in integration tests. (#180)
+
+### Fixed
+
+- WS smoke tests clean up stale `.tokens` files from previous runs. (#184)
+- Serialized WS smoke test execution to prevent disk I/O contention. (#184)
+
 ## [2.1.0-rc.2] - 2026-03-08
 
 ### Fixed

@@ -41,21 +41,41 @@ cargo test broadcast
 ## Test structure
 
 ```
-src/
-  message.rs       — unit tests for Message serde round-trips
-  history.rs       — unit tests for NDJSON load/append
-  tui/input.rs     — unit tests for handle_key, cursor, key bindings
-  tui/render.rs    — unit tests for wrap_words, format_message
-  tui/widgets.rs   — unit tests for CommandPalette, MentionPicker
-  oneshot/token.rs — unit tests for token file I/O, cursor read/write
-  oneshot/poll.rs  — unit tests for DM filter, cursor advancement
-tests/
-  integration.rs   — integration tests against a live broker
+crates/room-protocol/src/
+  lib.rs                — unit tests for Message serde, parse_client_line, parse_mentions
+
+crates/room-cli/src/
+  history.rs            — unit tests for NDJSON load/append
+  broker/auth.rs        — unit tests for token issuance, persistence, join permissions
+  broker/commands.rs    — unit tests for route_command, validate_params, built-in commands
+  broker/fanout.rs      — unit tests for broadcast_and_persist, dm_and_persist
+  plugin/mod.rs         — unit tests for PluginRegistry, builtin_command_infos
+  plugin/help.rs        — unit tests for /help output
+  plugin/stats.rs       — unit tests for /stats output
+  tui/input.rs          — unit tests for handle_key, cursor, key bindings
+  tui/render.rs         — unit tests for wrap_words, format_message
+  tui/widgets.rs        — unit tests for CommandPalette, MentionPicker
+  oneshot/token.rs      — unit tests for token file I/O, cursor read/write
+  oneshot/poll.rs       — unit tests for DM filter, cursor advancement, multiplexed poll
+crates/room-cli/tests/
+  common/mod.rs         — shared test helpers (free_port, wait_for_socket, wait_for_tcp)
+  integration.rs        — integration tests against a live broker (UDS + WS + daemon)
+  ws_smoke.rs           — end-to-end smoke tests spawning the real binary with --ws-port
+
+crates/room-ralph/src/
+  claude.rs             — unit tests for tool resolution, profile merging
+  lib.rs                — unit tests for CLI parsing, env var handling
+  monitor.rs            — unit tests for context monitoring
+  progress.rs           — unit tests for progress file I/O
+  prompt.rs             — unit tests for prompt building
+  room.rs               — unit tests for room CLI wrapper
+crates/room-ralph/tests/
+  integration.rs        — integration tests with mock binaries
 ```
 
 Unit tests live in `#[cfg(test)]` modules at the bottom of each source file.
-Integration tests import the `room` crate via `room::` and spin up real broker
-instances.
+Integration tests import crates via `room_cli::` or `room_ralph::` and spin
+up real broker instances or mock binaries.
 
 ---
 
@@ -103,12 +123,12 @@ client.send_json(r#"{"type":"message","content":"hello"}"#).await;
 For tests that require authentication (send/poll via oneshot):
 
 ```rust
-let (username, token) = room::oneshot::join_session(&broker.socket_path, "bot")
+let (username, token) = room_cli::oneshot::join_session(&broker.socket_path, "bot")
     .await
     .expect("join_session failed");
 
 let wire = serde_json::json!({"type":"message","content":"hi"}).to_string();
-let msg = room::oneshot::send_message_with_token(&broker.socket_path, &token, &wire)
+let msg = room_cli::oneshot::send_message_with_token(&broker.socket_path, &token, &wire)
     .await
     .expect("send failed");
 ```

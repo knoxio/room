@@ -89,7 +89,7 @@ For each interactive connection, the broker spawns two concurrent tasks:
 Reads lines from the client's socket. For each line:
 
 - Parses it via `parse_client_line` into a `Message` enum variant
-- Routes commands: `set_status` and `who` are handled privately; admin commands go to `handle_admin_cmd`; all others are broadcast
+- Routes commands via `route_command`: `set_status`, `who`, `claim`, `unclaim`, `claimed`, and `room-info` are handled as built-in commands; admin commands go to `handle_admin_cmd`; plugin commands are dispatched via `PluginRegistry`; all others pass through to broadcast
 - DMs (`Message::DirectMessage`) are delivered only to sender, recipient, and host via `dm_and_persist`
 - Everything else goes to `broadcast_and_persist`
 
@@ -167,11 +167,14 @@ All writes go through `history::append`, which opens the file in append mode. To
 | `clients` | `Arc<Mutex<HashMap<u64, (String, broadcast::Sender<String>)>>>` | Maps client ID to username + broadcast sender |
 | `status_map` | `Arc<Mutex<HashMap<String, String>>>` | Maps username to status string (ephemeral) |
 | `host_user` | `Arc<Mutex<Option<String>>>` | Username of the first connected client |
-| `token_map` | `Arc<Mutex<HashMap<String, String>>>` | Maps token UUID to username |
+| `token_map` | `Arc<Mutex<HashMap<String, String>>>` | Maps token UUID to username (persisted to `.tokens` file) |
+| `claim_map` | `Arc<Mutex<HashMap<String, String>>>` | Maps username to claimed task (ephemeral) |
 | `chat_path` | `Arc<PathBuf>` | Path to the NDJSON chat file |
 | `room_id` | `Arc<String>` | Room identifier |
 | `shutdown` | `Arc<watch::Sender<bool>>` | Shutdown signal |
 | `seq_counter` | `Arc<AtomicU64>` | Monotonic sequence counter |
+| `plugin_registry` | `Arc<PluginRegistry>` | Compiled-in plugin dispatch (`/help`, `/stats`) |
+| `config` | `Option<RoomConfig>` | Room visibility and access control (daemon mode) |
 
 ## Admin commands
 
