@@ -4,5 +4,6 @@ pub mod history;
 pub mod message;
 pub mod oneshot;
 pub mod plugin;
+pub mod query;
 pub mod registry;
 pub mod tui;
