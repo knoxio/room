@@ -16,12 +16,13 @@ use std::{
 
 use crate::{
     history,
-    message::{make_join, make_leave, parse_client_line, Message},
+    message::{make_join, make_leave, make_system, parse_client_line, Message},
     plugin::{self, PluginRegistry},
 };
 use auth::{handle_oneshot_join, validate_token};
 use commands::{route_command, CommandResult};
 use fanout::{broadcast_and_persist, dm_and_persist};
+use room_protocol::SubscriptionTier;
 use state::RoomState;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
@@ -378,6 +379,7 @@ pub(crate) async fn run_interactive_session(
                                         .await;
                                     continue;
                                 }
+                                let is_broadcast = !matches!(&msg, Message::DirectMessage { .. });
                                 let result = match &msg {
                                     Message::DirectMessage { to, .. } => {
                                         dm_and_persist(
@@ -401,8 +403,11 @@ pub(crate) async fn run_interactive_session(
                                         .await
                                     }
                                 };
-                                if let Err(e) = result {
+                                if let Err(e) = &result {
                                     eprintln!("[broker] persist error: {e:#}");
+                                }
+                                if is_broadcast && result.is_ok() {
+                                    auto_subscribe_mentioned(&msg, &state_in).await;
                                 }
                             }
                             Err(e) => eprintln!("[broker] route error: {e:#}"),
@@ -469,6 +474,7 @@ pub(crate) async fn handle_oneshot_send(
                 write_half.write_all(format!("{err}\n").as_bytes()).await?;
                 return Ok(());
             }
+            let is_broadcast = !matches!(&msg, Message::DirectMessage { .. });
             let seq_msg = match &msg {
                 Message::DirectMessage { to, .. } => {
                     dm_and_persist(
@@ -492,9 +498,236 @@ pub(crate) async fn handle_oneshot_send(
                     .await?
                 }
             };
+            if is_broadcast {
+                auto_subscribe_mentioned(&msg, state).await;
+            }
             let echo = format!("{}\n", serde_json::to_string(&seq_msg)?);
             write_half.write_all(echo.as_bytes()).await?;
         }
     }
     Ok(())
+}
+
+/// Check a broadcast message for @mentions and auto-subscribe any mentioned
+/// registered users who are not already subscribed (or are `Unsubscribed`).
+///
+/// Sets the tier to `MentionsOnly` and broadcasts a system notice for each
+/// newly subscribed user so the room is aware.
+async fn auto_subscribe_mentioned(msg: &Message, state: &RoomState) {
+    let mentioned = msg.mentions();
+    if mentioned.is_empty() {
+        return;
+    }
+
+    // Phase 1: collect users to auto-subscribe (brief lock hold).
+    let auto_subscribed = {
+        let token_map = state.token_map.lock().await;
+        let registered: std::collections::HashSet<&str> =
+            token_map.values().map(String::as_str).collect();
+
+        let mut sub_map = state.subscription_map.lock().await;
+        let mut newly_subscribed = Vec::new();
+
+        for username in &mentioned {
+            if !registered.contains(username.as_str()) {
+                continue;
+            }
+            let dominated = match sub_map.get(username.as_str()) {
+                None | Some(SubscriptionTier::Unsubscribed) => true,
+                Some(_) => false,
+            };
+            if dominated {
+                sub_map.insert(username.clone(), SubscriptionTier::MentionsOnly);
+                newly_subscribed.push(username.clone());
+            }
+        }
+        newly_subscribed
+    };
+
+    // Phase 2: broadcast notices (no locks held).
+    for username in &auto_subscribed {
+        let notice = format!(
+            "{username} auto-subscribed at mentions_only (mentioned in {})",
+            state.room_id
+        );
+        let sys = make_system(&state.room_id, "broker", notice);
+        let _ =
+            broadcast_and_persist(&sys, &state.clients, &state.chat_path, &state.seq_counter).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::message::make_message;
+    use std::collections::HashMap;
+    use tokio::sync::watch;
+
+    fn make_test_state(chat_path: std::path::PathBuf) -> Arc<RoomState> {
+        let (shutdown_tx, _) = watch::channel(false);
+        Arc::new(RoomState {
+            clients: Arc::new(Mutex::new(HashMap::new())),
+            status_map: Arc::new(Mutex::new(HashMap::new())),
+            host_user: Arc::new(Mutex::new(None)),
+            token_map: Arc::new(Mutex::new(HashMap::new())),
+            claim_map: Arc::new(Mutex::new(HashMap::new())),
+            subscription_map: Arc::new(Mutex::new(HashMap::new())),
+            chat_path: Arc::new(chat_path),
+            room_id: Arc::new("test-room".to_owned()),
+            shutdown: Arc::new(shutdown_tx),
+            seq_counter: Arc::new(AtomicU64::new(0)),
+            plugin_registry: Arc::new(PluginRegistry::new()),
+            config: None,
+        })
+    }
+
+    #[tokio::test]
+    async fn auto_subscribe_skips_unregistered_users() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let state = make_test_state(tmp.path().to_path_buf());
+        // Message mentions @alice but alice has no token — should not auto-subscribe.
+        let msg = make_message("test-room", "bob", "hey @alice check this");
+        auto_subscribe_mentioned(&msg, &state).await;
+        assert!(state.subscription_map.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn auto_subscribe_registers_mentions_only_for_unsubscribed() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let state = make_test_state(tmp.path().to_path_buf());
+        // Register alice in token map.
+        state
+            .token_map
+            .lock()
+            .await
+            .insert("tok-alice".to_owned(), "alice".to_owned());
+        let msg = make_message("test-room", "bob", "hey @alice check this");
+        auto_subscribe_mentioned(&msg, &state).await;
+        assert_eq!(
+            *state.subscription_map.lock().await.get("alice").unwrap(),
+            SubscriptionTier::MentionsOnly
+        );
+    }
+
+    #[tokio::test]
+    async fn auto_subscribe_skips_already_subscribed_full() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let state = make_test_state(tmp.path().to_path_buf());
+        state
+            .token_map
+            .lock()
+            .await
+            .insert("tok-alice".to_owned(), "alice".to_owned());
+        state
+            .subscription_map
+            .lock()
+            .await
+            .insert("alice".to_owned(), SubscriptionTier::Full);
+        let msg = make_message("test-room", "bob", "hey @alice check this");
+        auto_subscribe_mentioned(&msg, &state).await;
+        // Should remain Full, not downgraded to MentionsOnly.
+        assert_eq!(
+            *state.subscription_map.lock().await.get("alice").unwrap(),
+            SubscriptionTier::Full
+        );
+    }
+
+    #[tokio::test]
+    async fn auto_subscribe_skips_already_subscribed_mentions_only() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let state = make_test_state(tmp.path().to_path_buf());
+        state
+            .token_map
+            .lock()
+            .await
+            .insert("tok-alice".to_owned(), "alice".to_owned());
+        state
+            .subscription_map
+            .lock()
+            .await
+            .insert("alice".to_owned(), SubscriptionTier::MentionsOnly);
+        let msg = make_message("test-room", "bob", "@alice ping");
+        auto_subscribe_mentioned(&msg, &state).await;
+        assert_eq!(
+            *state.subscription_map.lock().await.get("alice").unwrap(),
+            SubscriptionTier::MentionsOnly
+        );
+    }
+
+    #[tokio::test]
+    async fn auto_subscribe_upgrades_unsubscribed_to_mentions_only() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let state = make_test_state(tmp.path().to_path_buf());
+        state
+            .token_map
+            .lock()
+            .await
+            .insert("tok-alice".to_owned(), "alice".to_owned());
+        state
+            .subscription_map
+            .lock()
+            .await
+            .insert("alice".to_owned(), SubscriptionTier::Unsubscribed);
+        let msg = make_message("test-room", "bob", "@alice come back");
+        auto_subscribe_mentioned(&msg, &state).await;
+        assert_eq!(
+            *state.subscription_map.lock().await.get("alice").unwrap(),
+            SubscriptionTier::MentionsOnly
+        );
+    }
+
+    #[tokio::test]
+    async fn auto_subscribe_handles_multiple_mentions() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let state = make_test_state(tmp.path().to_path_buf());
+        {
+            let mut tokens = state.token_map.lock().await;
+            tokens.insert("tok-alice".to_owned(), "alice".to_owned());
+            tokens.insert("tok-carol".to_owned(), "carol".to_owned());
+        }
+        let msg = make_message("test-room", "bob", "@alice @carol @unknown review this");
+        auto_subscribe_mentioned(&msg, &state).await;
+        let sub_map = state.subscription_map.lock().await;
+        assert_eq!(
+            *sub_map.get("alice").unwrap(),
+            SubscriptionTier::MentionsOnly
+        );
+        assert_eq!(
+            *sub_map.get("carol").unwrap(),
+            SubscriptionTier::MentionsOnly
+        );
+        assert!(sub_map.get("unknown").is_none());
+    }
+
+    #[tokio::test]
+    async fn auto_subscribe_no_op_for_message_without_mentions() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let state = make_test_state(tmp.path().to_path_buf());
+        state
+            .token_map
+            .lock()
+            .await
+            .insert("tok-alice".to_owned(), "alice".to_owned());
+        let msg = make_message("test-room", "bob", "hello everyone");
+        auto_subscribe_mentioned(&msg, &state).await;
+        assert!(state.subscription_map.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn auto_subscribe_broadcasts_notice() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let state = make_test_state(tmp.path().to_path_buf());
+        state
+            .token_map
+            .lock()
+            .await
+            .insert("tok-alice".to_owned(), "alice".to_owned());
+        let msg = make_message("test-room", "bob", "hey @alice");
+        auto_subscribe_mentioned(&msg, &state).await;
+        // Verify the auto-subscribe notice was persisted to chat history.
+        let history = std::fs::read_to_string(tmp.path()).unwrap();
+        assert!(history.contains("auto-subscribed"));
+        assert!(history.contains("alice"));
+        assert!(history.contains("mentions_only"));
+    }
 }
