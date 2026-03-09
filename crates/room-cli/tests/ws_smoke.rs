@@ -29,6 +29,7 @@ use std::{
 
 use futures_util::{SinkExt, StreamExt};
 use tempfile::TempDir;
+use tokio::io::AsyncBufReadExt;
 use tokio::time::timeout;
 use tokio_tungstenite::{connect_async, tungstenite::Message as TungsteniteMsg};
 
@@ -389,4 +390,136 @@ async fn recv_json(rx: &mut WsRx) -> serde_json::Value {
         Ok(None) => panic!("WS stream ended"),
         Err(_) => panic!("timed out waiting for WS frame"),
     }
+}
+
+// ── Isolated daemon smoke tests ─────────────────────────────────────────────
+
+/// Verify that `room daemon --isolated` prints a valid JSON connection object
+/// to stdout and starts an accessible UDS socket at the reported path.
+///
+/// Ignored by default — spawns a real OS process. Run with:
+/// ```
+/// cargo test -p room-cli -- --ignored smoke_isolated_
+/// ```
+#[tokio::test]
+#[ignore = "spawns real OS processes; run explicitly with `cargo test -- --ignored`"]
+async fn smoke_isolated_daemon_prints_socket_json_and_is_reachable() {
+    let _guard = SMOKE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let bin = room_binary();
+
+    let mut child = tokio::process::Command::new(&bin)
+        .args([
+            "daemon",
+            "--isolated",
+            "--room",
+            "test-isolated",
+            "--grace-period",
+            "0",
+        ])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap_or_else(|e| panic!("failed to spawn room daemon at {}: {e}", bin.display()));
+
+    // Read the first stdout line — it must be the connection JSON.
+    let stdout = child.stdout.take().expect("stdout not piped");
+    let mut reader = tokio::io::BufReader::new(stdout);
+    let mut line = String::new();
+    timeout(Duration::from_secs(10), reader.read_line(&mut line))
+        .await
+        .expect("timed out waiting for isolated daemon stdout")
+        .expect("I/O error reading stdout");
+
+    let info: serde_json::Value =
+        serde_json::from_str(line.trim()).expect("isolated daemon stdout is not valid JSON");
+
+    let socket_path = info["socket"]
+        .as_str()
+        .expect("connection JSON missing 'socket' field");
+    let pid = info["pid"]
+        .as_u64()
+        .expect("connection JSON missing 'pid' field");
+
+    assert!(!socket_path.is_empty(), "socket path must not be empty");
+    assert!(pid > 0, "pid must be a positive integer");
+
+    // The socket must appear on disk.
+    let sock = std::path::PathBuf::from(socket_path);
+    common::wait_for_socket(&sock, Duration::from_secs(10)).await;
+
+    // Connect to the isolated daemon and create a room — verifies the socket is functional.
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+    let mut stream = tokio::net::UnixStream::connect(&sock)
+        .await
+        .expect("failed to connect to isolated daemon socket");
+    stream
+        .write_all(b"CREATE:test-isolated\n{\"visibility\":\"public\"}\n")
+        .await
+        .expect("failed to write CREATE command");
+    let mut reader2 = tokio::io::BufReader::new(&mut stream);
+    let mut resp = String::new();
+    timeout(Duration::from_secs(5), reader2.read_line(&mut resp))
+        .await
+        .expect("timed out reading daemon response")
+        .expect("I/O error reading daemon response");
+    // Accept either "already exists" (room was pre-created via --room) or "created".
+    assert!(
+        resp.contains("created") || resp.contains("exists") || resp.contains("ok"),
+        "unexpected daemon response: {resp:?}"
+    );
+
+    child.kill().await.ok();
+}
+
+/// Verify that `room daemon --isolated` does not write to the shared PID file
+/// or well-known socket path.
+#[tokio::test]
+#[ignore = "spawns real OS processes; run explicitly with `cargo test -- --ignored`"]
+async fn smoke_isolated_daemon_does_not_touch_shared_paths() {
+    let _guard = SMOKE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let bin = room_binary();
+
+    let shared_socket = room_cli::paths::room_socket_path();
+    let shared_pid = room_cli::paths::room_pid_path();
+
+    // Record pre-test state.
+    let socket_existed_before = shared_socket.exists();
+    let pid_existed_before = shared_pid.exists();
+
+    let mut child = tokio::process::Command::new(&bin)
+        .args(["daemon", "--isolated", "--grace-period", "0"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap_or_else(|e| panic!("failed to spawn room daemon at {}: {e}", bin.display()));
+
+    // Read the JSON line to confirm daemon started.
+    let stdout = child.stdout.take().unwrap();
+    let mut reader = tokio::io::BufReader::new(stdout);
+    let mut line = String::new();
+    timeout(Duration::from_secs(10), reader.read_line(&mut line))
+        .await
+        .expect("timed out")
+        .unwrap();
+    let info: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+    let sock = std::path::PathBuf::from(info["socket"].as_str().unwrap());
+    common::wait_for_socket(&sock, Duration::from_secs(10)).await;
+
+    // Shared socket and PID file must not have been created by the isolated daemon.
+    assert_eq!(
+        shared_socket.exists(),
+        socket_existed_before,
+        "isolated daemon must not create/modify the shared socket"
+    );
+    assert_eq!(
+        shared_pid.exists(),
+        pid_existed_before,
+        "isolated daemon must not create/modify the shared PID file"
+    );
+
+    child.kill().await.ok();
 }

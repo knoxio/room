@@ -290,6 +290,19 @@ enum Cmd {
         /// Mutually exclusive with --grace-period.
         #[arg(long, conflicts_with = "grace_period")]
         persistent: bool,
+        /// Start an isolated daemon in a private temp directory for testing.
+        ///
+        /// When set, the daemon:
+        /// - Creates a temporary directory and uses it for all state (socket, data, tokens).
+        /// - Does NOT touch the shared PID file or well-known socket path.
+        /// - Prints connection info to stdout before starting:
+        ///   `{"socket":"/tmp/.room-isolated-XXXX/roomd.sock","pid":12345}`
+        /// - Cleans up the temp directory on exit.
+        ///
+        /// Callers pass the printed socket path via `--socket` or `ROOM_SOCKET=<path>`
+        /// to subsequent commands to target the isolated instance.
+        #[arg(long)]
+        isolated: bool,
     },
 }
 
@@ -639,14 +652,49 @@ async fn main() -> anyhow::Result<()> {
             rooms,
             grace_period,
             persistent,
+            isolated,
         }) => {
             let effective_grace = if persistent { u64::MAX } else { grace_period };
-            // Resolution order: --socket flag > ROOM_SOCKET env > platform default.
-            let effective_socket = paths::effective_socket_path(socket.as_deref());
+
+            // When --isolated: create a private temp dir for all state.
+            // `_isolated_tmp` is kept alive until run_daemon returns, then dropped
+            // (which deletes the temp directory and the socket inside it).
+            let _isolated_tmp: Option<tempfile::TempDir>;
+            let (effective_socket, effective_data, effective_state) = if isolated {
+                let tmp = tempfile::Builder::new()
+                    .prefix(".room-isolated-")
+                    .tempdir()
+                    .map_err(|e| anyhow::anyhow!("--isolated: failed to create temp dir: {e}"))?;
+                let sock = tmp.path().join("roomd.sock");
+                let data = tmp.path().join("data");
+                let state_d = tmp.path().join("state");
+                std::fs::create_dir_all(&data)?;
+                std::fs::create_dir_all(&state_d)?;
+                // Print connection info before blocking in run_daemon so the caller
+                // can read the socket path from stdout.
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "socket": sock.to_string_lossy(),
+                        "pid": std::process::id()
+                    })
+                );
+                _isolated_tmp = Some(tmp);
+                (sock, data, state_d)
+            } else {
+                _isolated_tmp = None;
+                // Resolution order: --socket flag > ROOM_SOCKET env > platform default.
+                (
+                    paths::effective_socket_path(socket.as_deref()),
+                    data_dir.unwrap_or_else(paths::room_data_dir),
+                    state_dir.unwrap_or_else(paths::room_state_dir),
+                )
+            };
+
             run_daemon(
                 effective_socket,
-                data_dir.unwrap_or_else(paths::room_data_dir),
-                state_dir.unwrap_or_else(paths::room_state_dir),
+                effective_data,
+                effective_state,
                 ws_port,
                 rooms,
                 effective_grace,
