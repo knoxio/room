@@ -62,3 +62,352 @@ pub(crate) struct RoomState {
     /// `None` for rooms created without explicit config (backward compat).
     pub(crate) config: Option<RoomConfig>,
 }
+
+impl RoomState {
+    // ── Factory ───────────────────────────────────────────────────────────────
+
+    /// Construct a fully wired `Arc<RoomState>` with default empty collections.
+    ///
+    /// Creates fresh empty maps for `clients`, `status_map`, `host_user`, `claim_map`,
+    /// a fresh `seq_counter`, and a new `watch::channel` for `shutdown`. Callers that
+    /// need a `watch::Receiver` should call `state.shutdown.subscribe()` after construction.
+    ///
+    /// The built-in `/help` and `/stats` plugins are registered automatically.
+    ///
+    /// # Parameters
+    ///
+    /// - `token_map` — pre-populated token map; pass `Arc::new(Mutex::new(HashMap::new()))`
+    ///   for a fresh map or supply an existing shared map (daemon mode uses one map per daemon).
+    /// - `subscription_map` — pre-populated subscription map loaded from disk (or empty).
+    /// - `config` — room visibility/ACL config; `None` for legacy configless rooms.
+    pub(crate) fn new(
+        room_id: String,
+        chat_path: PathBuf,
+        token_map_path: PathBuf,
+        subscription_map_path: PathBuf,
+        token_map: TokenMap,
+        subscription_map: SubscriptionMap,
+        config: Option<RoomConfig>,
+    ) -> Result<Arc<Self>, String> {
+        let mut registry = crate::plugin::PluginRegistry::new();
+        registry
+            .register(Box::new(crate::plugin::help::HelpPlugin))
+            .map_err(|e| format!("plugin error: {e}"))?;
+        registry
+            .register(Box::new(crate::plugin::stats::StatsPlugin))
+            .map_err(|e| format!("plugin error: {e}"))?;
+
+        let (shutdown_tx, _) = watch::channel(false);
+
+        Ok(Arc::new(Self {
+            clients: Arc::new(Mutex::new(HashMap::new())),
+            status_map: Arc::new(Mutex::new(HashMap::new())),
+            host_user: Arc::new(Mutex::new(None)),
+            token_map,
+            claim_map: Arc::new(Mutex::new(HashMap::new())),
+            subscription_map,
+            chat_path: Arc::new(chat_path),
+            token_map_path: Arc::new(token_map_path),
+            subscription_map_path: Arc::new(subscription_map_path),
+            room_id: Arc::new(room_id),
+            shutdown: Arc::new(shutdown_tx),
+            seq_counter: Arc::new(AtomicU64::new(0)),
+            plugin_registry: Arc::new(registry),
+            config,
+        }))
+    }
+
+    // ── status_map accessors ──────────────────────────────────────────────────
+
+    /// Set (or clear) a user's status string.
+    pub(crate) async fn set_status(&self, user: &str, status: String) {
+        self.status_map.lock().await.insert(user.to_owned(), status);
+    }
+
+    /// Remove a user's status entry (e.g. on kick or disconnect).
+    pub(crate) async fn remove_status(&self, user: &str) {
+        self.status_map.lock().await.remove(user);
+    }
+
+    /// Return all (username, status) pairs, sorted by username.
+    pub(crate) async fn status_entries(&self) -> Vec<(String, String)> {
+        let mut entries: Vec<(String, String)> = self
+            .status_map
+            .lock()
+            .await
+            .iter()
+            .map(|(u, s)| (u.clone(), s.clone()))
+            .collect();
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        entries
+    }
+
+    /// Number of users currently in the status map (i.e. online).
+    pub(crate) async fn status_count(&self) -> usize {
+        self.status_map.lock().await.len()
+    }
+
+    // ── claim_map accessors ───────────────────────────────────────────────────
+
+    /// Record a task claim for `user`. Replaces any existing claim.
+    pub(crate) async fn set_claim(&self, user: &str, task: String) {
+        self.claim_map.lock().await.insert(user.to_owned(), task);
+    }
+
+    /// Remove and return a user's active claim, if any.
+    pub(crate) async fn remove_claim(&self, user: &str) -> Option<String> {
+        self.claim_map.lock().await.remove(user)
+    }
+
+    /// Return all (username, task) claim pairs, sorted by username.
+    pub(crate) async fn claim_entries(&self) -> Vec<(String, String)> {
+        let mut entries: Vec<(String, String)> = self
+            .claim_map
+            .lock()
+            .await
+            .iter()
+            .map(|(u, t)| (u.clone(), t.clone()))
+            .collect();
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        entries
+    }
+
+    // ── subscription_map accessors ────────────────────────────────────────────
+
+    /// Set a user's subscription tier.
+    pub(crate) async fn set_subscription(&self, user: &str, tier: SubscriptionTier) {
+        self.subscription_map
+            .lock()
+            .await
+            .insert(user.to_owned(), tier);
+    }
+
+    /// Return all (username, tier) subscription pairs, sorted by username.
+    pub(crate) async fn subscription_entries(&self) -> Vec<(String, SubscriptionTier)> {
+        let mut entries: Vec<(String, SubscriptionTier)> = self
+            .subscription_map
+            .lock()
+            .await
+            .iter()
+            .map(|(u, t)| (u.clone(), *t))
+            .collect();
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        entries
+    }
+
+    /// Return a cloned snapshot of the full subscription map (for persistence).
+    pub(crate) async fn subscription_snapshot(&self) -> HashMap<String, SubscriptionTier> {
+        self.subscription_map.lock().await.clone()
+    }
+
+    /// Number of subscribed users.
+    pub(crate) async fn subscription_count(&self) -> usize {
+        self.subscription_map.lock().await.len()
+    }
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use room_protocol::SubscriptionTier;
+    use std::{collections::HashMap, sync::Arc};
+    use tempfile::TempDir;
+    use tokio::sync::Mutex;
+
+    fn make_state(dir: &TempDir) -> Arc<RoomState> {
+        let chat = dir.path().join("chat.ndjson");
+        let token_map_path = dir.path().join("room.tokens");
+        let sub_map_path = dir.path().join("room.subscriptions");
+        RoomState::new(
+            "test-room".to_owned(),
+            chat,
+            token_map_path,
+            sub_map_path,
+            Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(Mutex::new(HashMap::new())),
+            None,
+        )
+        .unwrap()
+    }
+
+    // ── factory ───────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn new_creates_state_with_correct_room_id() {
+        let dir = TempDir::new().unwrap();
+        let state = make_state(&dir);
+        assert_eq!(state.room_id.as_str(), "test-room");
+    }
+
+    #[tokio::test]
+    async fn new_registers_builtin_plugins() {
+        let dir = TempDir::new().unwrap();
+        let state = make_state(&dir);
+        assert!(
+            state.plugin_registry.resolve("help").is_some(),
+            "help plugin should be registered"
+        );
+        assert!(
+            state.plugin_registry.resolve("stats").is_some(),
+            "stats plugin should be registered"
+        );
+    }
+
+    #[tokio::test]
+    async fn new_starts_with_empty_collections() {
+        let dir = TempDir::new().unwrap();
+        let state = make_state(&dir);
+        assert_eq!(state.status_count().await, 0);
+        assert!(state.claim_entries().await.is_empty());
+        assert_eq!(state.subscription_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn new_uses_provided_token_map() {
+        let dir = TempDir::new().unwrap();
+        let chat = dir.path().join("chat.ndjson");
+        let token_map = Arc::new(Mutex::new({
+            let mut m = HashMap::new();
+            m.insert("tok-1".to_owned(), "alice".to_owned());
+            m
+        }));
+        let state = RoomState::new(
+            "r".to_owned(),
+            chat,
+            dir.path().join("r.tokens"),
+            dir.path().join("r.subscriptions"),
+            token_map,
+            Arc::new(Mutex::new(HashMap::new())),
+            None,
+        )
+        .unwrap();
+        assert!(state.token_map.lock().await.contains_key("tok-1"));
+    }
+
+    // ── status_map accessors ──────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn set_status_inserts_entry() {
+        let dir = TempDir::new().unwrap();
+        let state = make_state(&dir);
+        state.set_status("alice", "busy".to_owned()).await;
+        assert_eq!(state.status_count().await, 1);
+    }
+
+    #[tokio::test]
+    async fn set_status_empty_string_clears_display() {
+        let dir = TempDir::new().unwrap();
+        let state = make_state(&dir);
+        state.set_status("alice", "busy".to_owned()).await;
+        state.set_status("alice", String::new()).await;
+        // Entry still present but empty
+        let entries = state.status_entries().await;
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].1, "");
+    }
+
+    #[tokio::test]
+    async fn remove_status_deletes_entry() {
+        let dir = TempDir::new().unwrap();
+        let state = make_state(&dir);
+        state.set_status("alice", "busy".to_owned()).await;
+        state.remove_status("alice").await;
+        assert_eq!(state.status_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn status_entries_returns_sorted() {
+        let dir = TempDir::new().unwrap();
+        let state = make_state(&dir);
+        state.set_status("carol", "c".to_owned()).await;
+        state.set_status("alice", "a".to_owned()).await;
+        state.set_status("bob", "b".to_owned()).await;
+        let entries = state.status_entries().await;
+        assert_eq!(entries[0].0, "alice");
+        assert_eq!(entries[1].0, "bob");
+        assert_eq!(entries[2].0, "carol");
+    }
+
+    // ── claim_map accessors ───────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn set_claim_and_claim_entries() {
+        let dir = TempDir::new().unwrap();
+        let state = make_state(&dir);
+        state.set_claim("alice", "fix #42".to_owned()).await;
+        let entries = state.claim_entries().await;
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0], ("alice".to_owned(), "fix #42".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn remove_claim_returns_task_and_deletes() {
+        let dir = TempDir::new().unwrap();
+        let state = make_state(&dir);
+        state.set_claim("alice", "task".to_owned()).await;
+        let removed = state.remove_claim("alice").await;
+        assert_eq!(removed, Some("task".to_owned()));
+        assert!(state.claim_entries().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn remove_claim_missing_returns_none() {
+        let dir = TempDir::new().unwrap();
+        let state = make_state(&dir);
+        assert_eq!(state.remove_claim("nobody").await, None);
+    }
+
+    #[tokio::test]
+    async fn claim_entries_sorted_by_username() {
+        let dir = TempDir::new().unwrap();
+        let state = make_state(&dir);
+        state.set_claim("bob", "b".to_owned()).await;
+        state.set_claim("alice", "a".to_owned()).await;
+        let entries = state.claim_entries().await;
+        assert_eq!(entries[0].0, "alice");
+        assert_eq!(entries[1].0, "bob");
+    }
+
+    // ── subscription_map accessors ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn set_subscription_and_count() {
+        let dir = TempDir::new().unwrap();
+        let state = make_state(&dir);
+        state
+            .set_subscription("alice", SubscriptionTier::Full)
+            .await;
+        assert_eq!(state.subscription_count().await, 1);
+    }
+
+    #[tokio::test]
+    async fn subscription_entries_sorted() {
+        let dir = TempDir::new().unwrap();
+        let state = make_state(&dir);
+        state
+            .set_subscription("bob", SubscriptionTier::MentionsOnly)
+            .await;
+        state
+            .set_subscription("alice", SubscriptionTier::Full)
+            .await;
+        let entries = state.subscription_entries().await;
+        assert_eq!(entries[0].0, "alice");
+        assert_eq!(entries[1].0, "bob");
+    }
+
+    #[tokio::test]
+    async fn subscription_snapshot_clones_map() {
+        let dir = TempDir::new().unwrap();
+        let state = make_state(&dir);
+        state
+            .set_subscription("alice", SubscriptionTier::Full)
+            .await;
+        let snap = state.subscription_snapshot().await;
+        assert_eq!(snap.get("alice"), Some(&SubscriptionTier::Full));
+        // Snapshot is a clone — mutations don't affect the original.
+        drop(snap);
+        assert_eq!(state.subscription_count().await, 1);
+    }
+}
