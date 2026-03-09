@@ -4271,3 +4271,117 @@ async fn create_room_unknown_visibility_returns_error() {
     assert_eq!(resp["type"], "error");
     assert_eq!(resp["code"], "invalid_config");
 }
+
+// ── DESTROY: protocol tests ─────────────────────────────────────────────────
+
+/// Send a DESTROY:<room_id> request to the daemon socket.
+async fn daemon_destroy(socket_path: &PathBuf, room_id: &str) -> serde_json::Value {
+    let stream = UnixStream::connect(socket_path).await.unwrap();
+    let (r, mut w) = stream.into_split();
+    w.write_all(format!("DESTROY:{room_id}\n").as_bytes())
+        .await
+        .unwrap();
+
+    let mut reader = BufReader::new(r);
+    let mut line = String::new();
+    reader.read_line(&mut line).await.unwrap();
+    serde_json::from_str(line.trim()).unwrap()
+}
+
+#[tokio::test]
+async fn destroy_room_removes_from_daemon() {
+    let td = TestDaemon::start(&["doomed-room"]).await;
+
+    // Room exists — join works.
+    let token = daemon_join(&td.socket_path, "doomed-room", "alice").await;
+    assert!(!token.is_empty());
+
+    // Destroy it.
+    let resp = daemon_destroy(&td.socket_path, "doomed-room").await;
+    assert_eq!(resp["type"], "room_destroyed");
+    assert_eq!(resp["room"], "doomed-room");
+
+    // Room is gone — join should fail with room_not_found.
+    let stream = UnixStream::connect(&td.socket_path).await.unwrap();
+    let (r, mut w) = stream.into_split();
+    w.write_all(b"ROOM:doomed-room:JOIN:bob\n").await.unwrap();
+    let mut reader = BufReader::new(r);
+    let mut line = String::new();
+    reader.read_line(&mut line).await.unwrap();
+    let v: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+    assert_eq!(v["type"], "error");
+    assert_eq!(v["code"], "room_not_found");
+}
+
+#[tokio::test]
+async fn destroy_nonexistent_room_returns_error() {
+    let td = TestDaemon::start(&[]).await;
+
+    let resp = daemon_destroy(&td.socket_path, "ghost-room").await;
+    assert_eq!(resp["type"], "error");
+    assert_eq!(resp["code"], "room_not_found");
+}
+
+#[tokio::test]
+async fn destroy_room_preserves_chat_file() {
+    let td = TestDaemon::start(&["chat-room"]).await;
+
+    // Join and send a message so the chat file has content.
+    let token = daemon_join(&td.socket_path, "chat-room", "alice").await;
+    daemon_send(&td.socket_path, "chat-room", &token, "hello before destroy").await;
+
+    // Verify chat file exists (data_dir is the TempDir root in tests).
+    let chat_path = td._dir.path().join("chat-room.chat");
+    assert!(chat_path.exists(), "chat file should exist before destroy");
+
+    // Destroy the room.
+    let resp = daemon_destroy(&td.socket_path, "chat-room").await;
+    assert_eq!(resp["type"], "room_destroyed");
+
+    // Chat file should still exist.
+    assert!(
+        chat_path.exists(),
+        "chat file should be preserved after destroy"
+    );
+    let content = std::fs::read_to_string(&chat_path).unwrap();
+    assert!(
+        content.contains("hello before destroy"),
+        "chat file should still contain messages"
+    );
+}
+
+#[tokio::test]
+async fn destroy_empty_room_id_returns_error() {
+    let td = TestDaemon::start(&[]).await;
+
+    let resp = daemon_destroy(&td.socket_path, "").await;
+    assert_eq!(resp["type"], "error");
+    assert_eq!(resp["code"], "invalid_room_id");
+}
+
+#[tokio::test]
+async fn create_then_destroy_then_recreate() {
+    let td = TestDaemon::start(&[]).await;
+
+    // Create a room.
+    let create_resp =
+        daemon_create(&td.socket_path, "ephemeral", r#"{"visibility":"public"}"#).await;
+    assert_eq!(create_resp["type"], "room_created");
+
+    // Use it.
+    let token = daemon_join(&td.socket_path, "ephemeral", "alice").await;
+    assert!(!token.is_empty());
+
+    // Destroy it.
+    let destroy_resp = daemon_destroy(&td.socket_path, "ephemeral").await;
+    assert_eq!(destroy_resp["type"], "room_destroyed");
+
+    // Recreate it.
+    let recreate_resp =
+        daemon_create(&td.socket_path, "ephemeral", r#"{"visibility":"public"}"#).await;
+    assert_eq!(recreate_resp["type"], "room_created");
+
+    // Can join again (token is system-level, should still work).
+    let token2 = daemon_join(&td.socket_path, "ephemeral", "bob").await;
+    assert!(!token2.is_empty());
+}

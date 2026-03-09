@@ -15,8 +15,10 @@
 //!   or plain username).
 //! - `CREATE:<room_id>` — create a new room. A second line carries the
 //!   room configuration as JSON (`{"visibility":"public","invite":[]}`).
+//! - `DESTROY:<room_id>` — destroy a room. Signals shutdown to connected
+//!   clients and removes the room from the daemon's map.
 //!
-//! If neither prefix is present, the connection is rejected with an error.
+//! If no recognised prefix is present, the connection is rejected with an error.
 //!
 //! Examples:
 //! ```text
@@ -25,6 +27,7 @@
 //! ROOM:myroom:SEND:bob         → legacy unauthenticated send to "myroom"
 //! ROOM:myroom:alice            → interactive join to "myroom" as "alice"
 //! CREATE:newroom               → create room "newroom" (config on next line)
+//! DESTROY:myroom               → destroy room "myroom"
 //! ```
 
 use std::{
@@ -567,6 +570,60 @@ pub(crate) fn parse_room_prefix(line: &str) -> Option<(&str, &str)> {
     Some((room_id, rest))
 }
 
+/// Handle a `DESTROY:<room_id>` request: remove the room from the daemon.
+///
+/// Protocol:
+/// 1. Client sends `DESTROY:<room_id>\n`
+/// 2. Daemon responds with `{"type":"room_destroyed","room":"<id>"}\n` or an error.
+///
+/// Connected clients receive EOF when the room's shutdown signal fires.
+/// Chat files are preserved on disk.
+async fn handle_destroy(
+    room_id: &str,
+    write_half: &mut tokio::net::unix::OwnedWriteHalf,
+    rooms: &RoomMap,
+) -> anyhow::Result<()> {
+    use tokio::io::AsyncWriteExt;
+
+    if room_id.is_empty() {
+        let err = serde_json::json!({
+            "type": "error",
+            "code": "invalid_room_id",
+            "message": "room ID is empty"
+        });
+        write_half.write_all(format!("{err}\n").as_bytes()).await?;
+        return Ok(());
+    }
+
+    // Remove the room and signal shutdown.
+    let state = {
+        let mut map = rooms.lock().await;
+        map.remove(room_id)
+    };
+
+    match state {
+        Some(s) => {
+            // Signal shutdown so connected clients receive EOF.
+            let _ = s.shutdown.send(true);
+            let ok = serde_json::json!({
+                "type": "room_destroyed",
+                "room": room_id
+            });
+            write_half.write_all(format!("{ok}\n").as_bytes()).await?;
+        }
+        None => {
+            let err = serde_json::json!({
+                "type": "error",
+                "code": "room_not_found",
+                "room": room_id
+            });
+            write_half.write_all(format!("{err}\n").as_bytes()).await?;
+        }
+    }
+
+    Ok(())
+}
+
 /// Handle a `CREATE:<room_id>` request: validate, read config, create the room.
 ///
 /// Protocol:
@@ -761,6 +818,11 @@ async fn dispatch_connection(
 
     if first_line.is_empty() {
         return Ok(());
+    }
+
+    // Handle DESTROY:<room_id> — daemon-level room destruction.
+    if let Some(room_id) = first_line.strip_prefix("DESTROY:") {
+        return handle_destroy(room_id, &mut write_half, rooms).await;
     }
 
     // Handle CREATE:<room_id> — daemon-level room creation.

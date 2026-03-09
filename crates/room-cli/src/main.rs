@@ -215,6 +215,17 @@ enum Cmd {
         #[arg(long, value_delimiter = ',')]
         invite: Vec<String>,
     },
+    /// Destroy a room in a running daemon.
+    ///
+    /// Signals shutdown to all connected clients and removes the room from the
+    /// daemon's map. Chat files are preserved on disk.
+    Destroy {
+        /// Room ID to destroy
+        room_id: String,
+        /// Override the daemon socket path (default: auto-discover)
+        #[arg(long)]
+        socket: Option<PathBuf>,
+    },
     /// List active rooms with running brokers.
     ///
     /// Scans `/tmp` for `room-*.sock` files and probes each to verify the broker
@@ -535,6 +546,9 @@ async fn main() -> anyhow::Result<()> {
             invite,
         }) => {
             oneshot::cmd_create(&room_id, socket.as_deref(), &visibility, &invite).await?;
+        }
+        Some(Cmd::Destroy { room_id, socket }) => {
+            oneshot::cmd_destroy(&room_id, socket.as_deref()).await?;
         }
         Some(Cmd::List) => {
             oneshot::cmd_list().await?;

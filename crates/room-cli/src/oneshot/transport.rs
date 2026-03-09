@@ -316,6 +316,33 @@ pub async fn create_room(
     Ok(v)
 }
 
+// ── Room destruction ─────────────────────────────────────────────────────────
+
+/// Connect to a daemon socket and destroy a room via `DESTROY:<room_id>`.
+///
+/// Returns the daemon's response JSON on success (`{"type":"room_destroyed",...}`).
+pub async fn destroy_room(socket_path: &Path, room_id: &str) -> anyhow::Result<serde_json::Value> {
+    let stream = UnixStream::connect(socket_path).await.map_err(|e| {
+        anyhow::anyhow!("cannot connect to daemon at {}: {e}", socket_path.display())
+    })?;
+    let (r, mut w) = stream.into_split();
+    w.write_all(format!("DESTROY:{room_id}\n").as_bytes())
+        .await?;
+
+    let mut reader = BufReader::new(r);
+    let mut line = String::new();
+    reader.read_line(&mut line).await?;
+    let v: serde_json::Value = serde_json::from_str(line.trim())
+        .map_err(|e| anyhow::anyhow!("daemon returned invalid JSON: {e}: {:?}", line.trim()))?;
+    if v["type"] == "error" {
+        let message = v["message"]
+            .as_str()
+            .unwrap_or(v["code"].as_str().unwrap_or("unknown error"));
+        anyhow::bail!("{message}");
+    }
+    Ok(v)
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
