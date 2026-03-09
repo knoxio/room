@@ -108,6 +108,11 @@ impl DaemonConfig {
     pub fn system_tokens_path(&self) -> PathBuf {
         self.state_dir.join("tokens.json")
     }
+
+    /// Resolve the subscription-map persistence path for a given room.
+    pub fn subscription_map_path(&self, room_id: &str) -> PathBuf {
+        crate::paths::broker_subscriptions_path(&self.state_dir, room_id)
+    }
 }
 
 impl Default for DaemonConfig {
@@ -165,6 +170,7 @@ impl DaemonState {
         }
 
         let chat_path = self.config.chat_path(room_id);
+        let subscription_map_path = self.config.subscription_map_path(room_id);
         let (shutdown_tx, _) = watch::channel(false);
 
         let mut registry = PluginRegistry::new();
@@ -175,6 +181,9 @@ impl DaemonState {
             .register(Box::new(plugin::stats::StatsPlugin))
             .map_err(|e| format!("plugin error: {e}"))?;
 
+        // Load persisted subscriptions from previous session (if any).
+        let persisted_subs = super::commands::load_subscription_map(&subscription_map_path);
+
         let state = Arc::new(RoomState {
             clients: Arc::new(Mutex::new(HashMap::new())),
             status_map: Arc::new(Mutex::new(HashMap::new())),
@@ -183,9 +192,10 @@ impl DaemonState {
             // issued in any room is valid in all rooms.
             token_map: Arc::clone(&self.system_token_map),
             claim_map: Arc::new(Mutex::new(HashMap::new())),
-            subscription_map: Arc::new(Mutex::new(HashMap::new())),
+            subscription_map: Arc::new(Mutex::new(persisted_subs)),
             chat_path: Arc::new(chat_path),
             token_map_path: Arc::new(self.config.system_tokens_path()),
+            subscription_map_path: Arc::new(subscription_map_path),
             room_id: Arc::new(room_id.to_owned()),
             shutdown: Arc::new(shutdown_tx),
             seq_counter: Arc::new(AtomicU64::new(0)),
@@ -211,6 +221,7 @@ impl DaemonState {
         }
 
         let chat_path = self.config.chat_path(room_id);
+        let subscription_map_path = self.config.subscription_map_path(room_id);
         let (shutdown_tx, _) = watch::channel(false);
 
         let mut registry = PluginRegistry::new();
@@ -221,8 +232,12 @@ impl DaemonState {
             .register(Box::new(plugin::stats::StatsPlugin))
             .map_err(|e| format!("plugin error: {e}"))?;
 
-        // Auto-subscribe DM participants at Full tier.
-        let initial_subs = build_initial_subscriptions(&config);
+        // Merge persisted subscriptions with config defaults (DM auto-subscribe).
+        // Config defaults seed any missing entries; persisted values take precedence
+        // because a user may have explicitly changed their tier after room creation.
+        let mut merged_subs = build_initial_subscriptions(&config);
+        let persisted_subs = super::commands::load_subscription_map(&subscription_map_path);
+        merged_subs.extend(persisted_subs);
 
         let state = Arc::new(RoomState {
             clients: Arc::new(Mutex::new(HashMap::new())),
@@ -232,9 +247,10 @@ impl DaemonState {
             // issued in any room is valid in all rooms.
             token_map: Arc::clone(&self.system_token_map),
             claim_map: Arc::new(Mutex::new(HashMap::new())),
-            subscription_map: Arc::new(Mutex::new(initial_subs)),
+            subscription_map: Arc::new(Mutex::new(merged_subs)),
             chat_path: Arc::new(chat_path),
             token_map_path: Arc::new(self.config.system_tokens_path()),
+            subscription_map_path: Arc::new(subscription_map_path),
             room_id: Arc::new(room_id.to_owned()),
             shutdown: Arc::new(shutdown_tx),
             seq_counter: Arc::new(AtomicU64::new(0)),

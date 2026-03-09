@@ -38,6 +38,8 @@ pub struct Broker {
     chat_path: PathBuf,
     /// Path to the persisted token-map file (e.g. `~/.room/state/<room_id>.tokens`).
     token_map_path: PathBuf,
+    /// Path to the persisted subscription-map file (e.g. `~/.room/state/<room_id>.subscriptions`).
+    subscription_map_path: PathBuf,
     socket_path: PathBuf,
     ws_port: Option<u16>,
 }
@@ -47,6 +49,7 @@ impl Broker {
         room_id: &str,
         chat_path: PathBuf,
         token_map_path: PathBuf,
+        subscription_map_path: PathBuf,
         socket_path: PathBuf,
         ws_port: Option<u16>,
     ) -> Self {
@@ -54,6 +57,7 @@ impl Broker {
             room_id: room_id.to_owned(),
             chat_path,
             token_map_path,
+            subscription_map_path,
             socket_path,
             ws_port,
         }
@@ -76,12 +80,19 @@ impl Broker {
         registry.register(Box::new(plugin::help::HelpPlugin))?;
         registry.register(Box::new(plugin::stats::StatsPlugin))?;
 
-        // Load persisted tokens from a previous broker session (if any).
+        // Load persisted state from a previous broker session (if any).
         let persisted_tokens = auth::load_token_map(&self.token_map_path);
         if !persisted_tokens.is_empty() {
             eprintln!(
                 "[broker] loaded {} persisted token(s)",
                 persisted_tokens.len()
+            );
+        }
+        let persisted_subs = commands::load_subscription_map(&self.subscription_map_path);
+        if !persisted_subs.is_empty() {
+            eprintln!(
+                "[broker] loaded {} persisted subscription(s)",
+                persisted_subs.len()
             );
         }
 
@@ -91,9 +102,10 @@ impl Broker {
             host_user: Arc::new(Mutex::new(None)),
             token_map: Arc::new(Mutex::new(persisted_tokens)),
             claim_map: Arc::new(Mutex::new(HashMap::new())),
-            subscription_map: Arc::new(Mutex::new(HashMap::new())),
+            subscription_map: Arc::new(Mutex::new(persisted_subs)),
             chat_path: Arc::new(self.chat_path.clone()),
             token_map_path: Arc::new(self.token_map_path.clone()),
+            subscription_map_path: Arc::new(self.subscription_map_path.clone()),
             room_id: Arc::new(self.room_id.clone()),
             shutdown: Arc::new(shutdown_tx),
             seq_counter: Arc::new(AtomicU64::new(0)),
@@ -549,6 +561,13 @@ async fn auto_subscribe_mentioned(msg: &Message, state: &RoomState) {
         newly_subscribed
     };
 
+    if auto_subscribed.is_empty() {
+        return;
+    }
+
+    // Persist the updated subscription map to disk.
+    commands::persist_subscriptions(state).await;
+
     // Phase 2: broadcast notices (no locks held).
     for username in &auto_subscribed {
         let notice = format!(
@@ -579,6 +598,7 @@ mod tests {
             subscription_map: Arc::new(Mutex::new(HashMap::new())),
             chat_path: Arc::new(chat_path.clone()),
             token_map_path: Arc::new(chat_path.with_extension("tokens")),
+            subscription_map_path: Arc::new(chat_path.with_extension("subscriptions")),
             room_id: Arc::new("test-room".to_owned()),
             shutdown: Arc::new(shutdown_tx),
             seq_counter: Arc::new(AtomicU64::new(0)),
@@ -735,5 +755,21 @@ mod tests {
         assert!(history.contains("auto-subscribed"));
         assert!(history.contains("alice"));
         assert!(history.contains("mentions_only"));
+    }
+
+    #[tokio::test]
+    async fn auto_subscribe_persists_to_disk() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let state = make_test_state(tmp.path().to_path_buf());
+        state
+            .token_map
+            .lock()
+            .await
+            .insert("tok-alice".to_owned(), "alice".to_owned());
+        let msg = make_message("test-room", "bob", "hey @alice");
+        auto_subscribe_mentioned(&msg, &state).await;
+        // Verify subscriptions were persisted to the .subscriptions file.
+        let loaded = commands::load_subscription_map(&state.subscription_map_path);
+        assert_eq!(loaded.get("alice"), Some(&SubscriptionTier::MentionsOnly));
     }
 }

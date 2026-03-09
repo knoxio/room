@@ -1,3 +1,7 @@
+use std::{collections::HashMap, path::Path};
+
+use room_protocol::SubscriptionTier;
+
 use crate::{
     message::{make_system, Message},
     plugin::{
@@ -7,6 +11,46 @@ use crate::{
 };
 
 use super::{fanout::broadcast_and_persist, state::RoomState};
+
+// ── Subscription persistence ─────────────────────────────────────────────────
+
+/// Write a subscription map to disk as JSON.
+pub(crate) fn save_subscription_map(
+    map: &HashMap<String, SubscriptionTier>,
+    path: &Path,
+) -> Result<(), String> {
+    let json =
+        serde_json::to_string_pretty(map).map_err(|e| format!("serialize subscriptions: {e}"))?;
+    std::fs::write(path, json).map_err(|e| format!("write {}: {e}", path.display()))
+}
+
+/// Load a subscription map from disk. Returns an empty map if the file does
+/// not exist or contains invalid JSON.
+pub(crate) fn load_subscription_map(path: &Path) -> HashMap<String, SubscriptionTier> {
+    let contents = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return HashMap::new(),
+    };
+    serde_json::from_str(&contents).unwrap_or_else(|e| {
+        eprintln!(
+            "[broker] corrupt subscription file {}: {e} — starting empty",
+            path.display()
+        );
+        HashMap::new()
+    })
+}
+
+/// Persist the current subscription map to disk (fire-and-forget logging).
+///
+/// Called after every mutation to the in-memory map. Uses synchronous I/O
+/// because the file is tiny (a few KB at most) and consistency matters more
+/// than shaving microseconds.
+pub(crate) async fn persist_subscriptions(state: &RoomState) {
+    let snapshot = state.subscription_map.lock().await.clone();
+    if let Err(e) = save_subscription_map(&snapshot, &state.subscription_map_path) {
+        eprintln!("[broker] subscription persist failed: {e}");
+    }
+}
 
 /// Admin command names — routed through `handle_admin_cmd` when received as
 /// a `Message::Command` with one of these cmd values.
@@ -156,7 +200,7 @@ pub(crate) async fn route_command(
         // Subscription commands.
         if cmd == "subscribe" {
             let tier_str = params.first().map(String::as_str).unwrap_or("full");
-            let tier: room_protocol::SubscriptionTier = match tier_str.parse() {
+            let tier: SubscriptionTier = match tier_str.parse() {
                 Ok(t) => t,
                 Err(e) => {
                     let sys = make_system(&state.room_id, "broker", e);
@@ -169,6 +213,7 @@ pub(crate) async fn route_command(
                 .lock()
                 .await
                 .insert(username.to_owned(), tier);
+            persist_subscriptions(state).await;
             let display = format!("{username} subscribed to {} (tier: {tier})", state.room_id);
             let sys = make_system(&state.room_id, "broker", display);
             broadcast_and_persist(&sys, &state.clients, &state.chat_path, &state.seq_counter)
@@ -178,10 +223,12 @@ pub(crate) async fn route_command(
         }
 
         if cmd == "unsubscribe" {
-            state.subscription_map.lock().await.insert(
-                username.to_owned(),
-                room_protocol::SubscriptionTier::Unsubscribed,
-            );
+            state
+                .subscription_map
+                .lock()
+                .await
+                .insert(username.to_owned(), SubscriptionTier::Unsubscribed);
+            persist_subscriptions(state).await;
             let display = format!("{username} unsubscribed from {}", state.room_id);
             let sys = make_system(&state.room_id, "broker", display);
             broadcast_and_persist(&sys, &state.clients, &state.chat_path, &state.seq_counter)
@@ -548,6 +595,7 @@ mod tests {
         broker::state::RoomState,
         message::{make_command, make_dm, make_message},
     };
+    use room_protocol::SubscriptionTier;
     use std::{
         collections::HashMap,
         sync::{atomic::AtomicU64, Arc},
@@ -558,6 +606,7 @@ mod tests {
     fn make_state(chat_path: std::path::PathBuf) -> Arc<RoomState> {
         let (shutdown_tx, _) = watch::channel(false);
         let token_map_path = chat_path.with_extension("tokens");
+        let subscription_map_path = chat_path.with_extension("subscriptions");
         Arc::new(RoomState {
             clients: Arc::new(Mutex::new(HashMap::new())),
             status_map: Arc::new(Mutex::new(HashMap::new())),
@@ -567,6 +616,7 @@ mod tests {
             subscription_map: Arc::new(Mutex::new(HashMap::new())),
             chat_path: Arc::new(chat_path),
             token_map_path: Arc::new(token_map_path),
+            subscription_map_path: Arc::new(subscription_map_path),
             room_id: Arc::new("test-room".to_owned()),
             shutdown: Arc::new(shutdown_tx),
             seq_counter: Arc::new(AtomicU64::new(0)),
@@ -1134,6 +1184,7 @@ mod tests {
     ) -> Arc<RoomState> {
         let (shutdown_tx, _) = watch::channel(false);
         let token_map_path = chat_path.with_extension("tokens");
+        let subscription_map_path = chat_path.with_extension("subscriptions");
         Arc::new(RoomState {
             clients: Arc::new(Mutex::new(HashMap::new())),
             status_map: Arc::new(Mutex::new(HashMap::new())),
@@ -1143,6 +1194,7 @@ mod tests {
             subscription_map: Arc::new(Mutex::new(HashMap::new())),
             chat_path: Arc::new(chat_path),
             token_map_path: Arc::new(token_map_path),
+            subscription_map_path: Arc::new(subscription_map_path),
             room_id: Arc::new("test-room".to_owned()),
             shutdown: Arc::new(shutdown_tx),
             seq_counter: Arc::new(AtomicU64::new(0)),
@@ -1323,7 +1375,7 @@ mod tests {
         assert!(json.contains("full"));
         assert_eq!(
             *state.subscription_map.lock().await.get("alice").unwrap(),
-            room_protocol::SubscriptionTier::Full
+            SubscriptionTier::Full
         );
     }
 
@@ -1344,7 +1396,7 @@ mod tests {
         assert!(json.contains("mentions_only"));
         assert_eq!(
             *state.subscription_map.lock().await.get("bob").unwrap(),
-            room_protocol::SubscriptionTier::MentionsOnly
+            SubscriptionTier::MentionsOnly
         );
     }
 
@@ -1363,7 +1415,7 @@ mod tests {
         route_command(msg2, "alice", &state).await.unwrap();
         assert_eq!(
             *state.subscription_map.lock().await.get("alice").unwrap(),
-            room_protocol::SubscriptionTier::MentionsOnly,
+            SubscriptionTier::MentionsOnly,
             "second subscribe should overwrite the first"
         );
     }
@@ -1384,7 +1436,7 @@ mod tests {
         assert!(json.contains("unsubscribed"));
         assert_eq!(
             *state.subscription_map.lock().await.get("alice").unwrap(),
-            room_protocol::SubscriptionTier::Unsubscribed
+            SubscriptionTier::Unsubscribed
         );
     }
 
@@ -1398,7 +1450,7 @@ mod tests {
         assert!(matches!(result, CommandResult::HandledWithReply(_)));
         assert_eq!(
             *state.subscription_map.lock().await.get("alice").unwrap(),
-            room_protocol::SubscriptionTier::Unsubscribed
+            SubscriptionTier::Unsubscribed
         );
     }
 
@@ -1419,11 +1471,8 @@ mod tests {
         let state = make_state(tmp.path().to_path_buf());
         {
             let mut map = state.subscription_map.lock().await;
-            map.insert("zara".to_owned(), room_protocol::SubscriptionTier::Full);
-            map.insert(
-                "alice".to_owned(),
-                room_protocol::SubscriptionTier::MentionsOnly,
-            );
+            map.insert("zara".to_owned(), SubscriptionTier::Full);
+            map.insert("alice".to_owned(), SubscriptionTier::MentionsOnly);
         }
         let msg = make_command("test-room", "alice", "subscriptions", vec![]);
         let CommandResult::Reply(json) = route_command(msg, "alice", &state).await.unwrap() else {
@@ -1475,5 +1524,143 @@ mod tests {
         let history = std::fs::read_to_string(tmp.path()).unwrap();
         assert!(history.contains("unsubscribed"));
         assert!(history.contains("alice"));
+    }
+
+    // ── subscription persistence ─────────────────────────────────────────
+
+    #[test]
+    fn load_subscription_map_missing_file_returns_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nonexistent.subscriptions");
+        let map = super::load_subscription_map(&path);
+        assert!(map.is_empty());
+    }
+
+    #[test]
+    fn save_and_load_subscription_map_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.subscriptions");
+
+        let mut original = HashMap::new();
+        original.insert("alice".to_owned(), SubscriptionTier::Full);
+        original.insert("bob".to_owned(), SubscriptionTier::MentionsOnly);
+        original.insert("carol".to_owned(), SubscriptionTier::Unsubscribed);
+
+        super::save_subscription_map(&original, &path).unwrap();
+        let loaded = super::load_subscription_map(&path);
+        assert_eq!(loaded, original);
+    }
+
+    #[test]
+    fn load_subscription_map_corrupt_file_returns_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("corrupt.subscriptions");
+        std::fs::write(&path, "not json{{{").unwrap();
+        let map = super::load_subscription_map(&path);
+        assert!(map.is_empty());
+    }
+
+    #[tokio::test]
+    async fn subscribe_persists_to_disk() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+        let msg = make_command("test-room", "alice", "subscribe", vec![]);
+        route_command(msg, "alice", &state).await.unwrap();
+
+        let loaded = super::load_subscription_map(&state.subscription_map_path);
+        assert_eq!(loaded.get("alice"), Some(&SubscriptionTier::Full));
+    }
+
+    #[tokio::test]
+    async fn unsubscribe_persists_to_disk() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+
+        // Subscribe first, then unsubscribe.
+        let msg = make_command("test-room", "alice", "subscribe", vec![]);
+        route_command(msg, "alice", &state).await.unwrap();
+        let msg = make_command("test-room", "alice", "unsubscribe", vec![]);
+        route_command(msg, "alice", &state).await.unwrap();
+
+        let loaded = super::load_subscription_map(&state.subscription_map_path);
+        assert_eq!(loaded.get("alice"), Some(&SubscriptionTier::Unsubscribed));
+    }
+
+    #[tokio::test]
+    async fn subscribe_accumulates_on_disk() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+
+        let msg = make_command("test-room", "alice", "subscribe", vec![]);
+        route_command(msg, "alice", &state).await.unwrap();
+        let msg = make_command(
+            "test-room",
+            "bob",
+            "subscribe",
+            vec!["mentions_only".to_owned()],
+        );
+        route_command(msg, "bob", &state).await.unwrap();
+
+        let loaded = super::load_subscription_map(&state.subscription_map_path);
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded.get("alice"), Some(&SubscriptionTier::Full));
+        assert_eq!(loaded.get("bob"), Some(&SubscriptionTier::MentionsOnly));
+    }
+
+    #[tokio::test]
+    async fn subscribe_survives_simulated_restart() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+
+        let msg = make_command("test-room", "alice", "subscribe", vec![]);
+        route_command(msg, "alice", &state).await.unwrap();
+
+        // Simulate restart: new state, load from disk.
+        let loaded = super::load_subscription_map(&state.subscription_map_path);
+        assert_eq!(loaded.get("alice"), Some(&SubscriptionTier::Full));
+
+        // Verify it can be populated into a new RoomState.
+        let state2 = {
+            let (shutdown_tx, _) = watch::channel(false);
+            Arc::new(RoomState {
+                clients: Arc::new(Mutex::new(HashMap::new())),
+                status_map: Arc::new(Mutex::new(HashMap::new())),
+                host_user: Arc::new(Mutex::new(None)),
+                token_map: Arc::new(Mutex::new(HashMap::new())),
+                claim_map: Arc::new(Mutex::new(HashMap::new())),
+                subscription_map: Arc::new(Mutex::new(loaded)),
+                chat_path: state.chat_path.clone(),
+                token_map_path: state.token_map_path.clone(),
+                subscription_map_path: state.subscription_map_path.clone(),
+                room_id: state.room_id.clone(),
+                shutdown: Arc::new(shutdown_tx),
+                seq_counter: Arc::new(AtomicU64::new(0)),
+                plugin_registry: Arc::new(crate::plugin::PluginRegistry::new()),
+                config: None,
+            })
+        };
+        assert_eq!(
+            *state2.subscription_map.lock().await.get("alice").unwrap(),
+            SubscriptionTier::Full
+        );
+    }
+
+    #[tokio::test]
+    async fn subscribe_overwrite_persists_latest_tier() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+
+        let msg = make_command("test-room", "alice", "subscribe", vec![]);
+        route_command(msg, "alice", &state).await.unwrap();
+        let msg = make_command(
+            "test-room",
+            "alice",
+            "subscribe",
+            vec!["mentions_only".to_owned()],
+        );
+        route_command(msg, "alice", &state).await.unwrap();
+
+        let loaded = super::load_subscription_map(&state.subscription_map_path);
+        assert_eq!(loaded.get("alice"), Some(&SubscriptionTier::MentionsOnly));
     }
 }

@@ -54,6 +54,7 @@ impl TestBroker {
             room_id,
             chat_path.clone(),
             chat_path.with_extension("tokens"),
+            chat_path.with_extension("subscriptions"),
             socket_path.clone(),
             ws_port,
         );
@@ -462,6 +463,7 @@ async fn pre_existing_history_is_replayed() {
         "pre",
         chat_path.clone(),
         chat_path.with_extension("tokens"),
+        chat_path.with_extension("subscriptions"),
         socket_path.clone(),
         None,
     );
@@ -509,6 +511,7 @@ async fn stale_socket_is_cleaned_up() {
         "stale",
         chat_path.clone(),
         chat_path.with_extension("tokens"),
+        chat_path.with_extension("subscriptions"),
         socket_path.clone(),
         None,
     );
@@ -1174,6 +1177,7 @@ async fn history_replay_filters_dm_for_non_party() {
         "replay_dm",
         chat_path.clone(),
         chat_path.with_extension("tokens"),
+        chat_path.with_extension("subscriptions"),
         socket_path.clone(),
         None,
     );

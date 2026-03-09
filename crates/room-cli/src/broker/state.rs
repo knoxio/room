@@ -28,8 +28,9 @@ pub(crate) type TokenMap = Arc<Mutex<HashMap<String, String>>>;
 /// Users can hold at most one claim at a time (new claim replaces old).
 pub(crate) type ClaimMap = Arc<Mutex<HashMap<String, String>>>;
 
-/// Maps username → subscription tier for this room. Ephemeral; persistence
-/// is handled by E3-2 (#311) once the durable state directory lands.
+/// Maps username → subscription tier for this room. Persisted as JSON at
+/// `~/.room/state/<room_id>.subscriptions` on every mutation; loaded on
+/// broker/daemon startup.
 /// DM rooms auto-subscribe both participants at `Full` on creation.
 pub(crate) type SubscriptionMap = Arc<Mutex<HashMap<String, SubscriptionTier>>>;
 
@@ -44,6 +45,8 @@ pub(crate) struct RoomState {
     pub(crate) chat_path: Arc<PathBuf>,
     /// Path to the persisted token-map file (e.g. `~/.room/state/<room_id>.tokens`).
     pub(crate) token_map_path: Arc<PathBuf>,
+    /// Path to the persisted subscription-map file (e.g. `~/.room/state/<room_id>.subscriptions`).
+    pub(crate) subscription_map_path: Arc<PathBuf>,
     pub(crate) room_id: Arc<String>,
     /// Set to `true` by the `/exit` admin command to shut down the broker.
     /// Using watch so receivers that check after the fact see `true` immediately

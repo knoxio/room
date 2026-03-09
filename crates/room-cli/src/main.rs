@@ -570,11 +570,14 @@ async fn run_join(
             resolved_chat_path.display()
         );
 
-        let token_map_path = paths::broker_tokens_path(&paths::room_state_dir(), &room_id);
+        let state_dir = paths::room_state_dir();
+        let token_map_path = paths::broker_tokens_path(&state_dir, &room_id);
+        let subscription_map_path = paths::broker_subscriptions_path(&state_dir, &room_id);
         let broker = Broker::new(
             &room_id,
             resolved_chat_path,
             token_map_path,
+            subscription_map_path,
             socket_path.clone(),
             ws_port,
         );
