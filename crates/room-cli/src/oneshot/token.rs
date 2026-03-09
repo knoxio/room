@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use super::transport::join_session;
+use super::transport::{join_session_target, resolve_socket_target};
 use crate::paths;
 
 /// Returns the canonical token file path for a given room/user pair.
@@ -18,10 +18,16 @@ pub fn token_file_path(room_id: &str, username: &str) -> PathBuf {
 /// a machine do not clobber each other. Subsequent `send`, `poll`, and `watch`
 /// calls find the file automatically (single-agent) or via `--user <username>`
 /// (multi-agent).
-pub async fn cmd_join(room_id: &str, username: &str) -> anyhow::Result<()> {
+///
+/// `socket` overrides the default socket path (auto-discovered if `None`).
+pub async fn cmd_join(
+    room_id: &str,
+    username: &str,
+    socket: Option<&std::path::Path>,
+) -> anyhow::Result<()> {
     paths::ensure_room_dirs().map_err(|e| anyhow::anyhow!("cannot create ~/.room: {e}"))?;
-    let socket_path = paths::room_single_socket_path(room_id);
-    let (returned_user, token) = join_session(&socket_path, username).await?;
+    let target = resolve_socket_target(room_id, socket);
+    let (returned_user, token) = join_session_target(&target, username).await?;
     let token_data = serde_json::json!({"username": returned_user, "token": token});
     let token_path = token_file_path(room_id, &returned_user);
     std::fs::write(&token_path, format!("{token_data}\n"))?;

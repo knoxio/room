@@ -10,11 +10,14 @@ pub use poll::{
     pull_messages, QueryOptions,
 };
 pub use token::{cmd_join, token_file_path, username_from_token, username_from_token_any_room};
-pub use transport::{join_session, send_message, send_message_with_token};
+pub use transport::{
+    join_session, join_session_target, resolve_socket_target, send_message,
+    send_message_with_token, send_message_with_token_target, SocketTarget,
+};
 pub use who::cmd_who;
 
 use room_protocol::dm_room_id;
-use transport::send_message_with_token as transport_send;
+use transport::send_message_with_token_target as transport_send_target;
 
 /// One-shot send subcommand: connect, send, print echo JSON to stdout, exit.
 ///
@@ -24,20 +27,23 @@ use transport::send_message_with_token as transport_send;
 ///
 /// Slash commands (e.g. `/who`, `/dm user msg`) are automatically converted to the
 /// appropriate JSON envelope, matching TUI behaviour.
+///
+/// `socket` overrides the default socket path (auto-discovered if `None`).
 pub async fn cmd_send(
     room_id: &str,
     token: &str,
     to: Option<&str>,
     content: &str,
+    socket: Option<&std::path::Path>,
 ) -> anyhow::Result<()> {
-    let socket_path = crate::paths::room_single_socket_path(room_id);
+    let target = resolve_socket_target(room_id, socket);
     let wire = match to {
         Some(recipient) => {
             serde_json::json!({"type": "dm", "to": recipient, "content": content}).to_string()
         }
         None => build_wire_payload(content),
     };
-    let msg = transport_send(&socket_path, token, &wire)
+    let msg = transport_send_target(&target, token, &wire)
         .await
         .map_err(|e| {
             if e.to_string().contains("invalid token") {
@@ -59,7 +65,14 @@ pub async fn cmd_send(
 ///
 /// Returns an error if the caller tries to DM themselves or if the DM room
 /// broker is not running.
-pub async fn cmd_dm(recipient: &str, token: &str, content: &str) -> anyhow::Result<()> {
+///
+/// `socket` overrides the default socket path (auto-discovered if `None`).
+pub async fn cmd_dm(
+    recipient: &str,
+    token: &str,
+    content: &str,
+    socket: Option<&std::path::Path>,
+) -> anyhow::Result<()> {
     // Resolve the caller's username from the token
     let caller = username_from_token_any_room(token)?;
 
@@ -69,9 +82,9 @@ pub async fn cmd_dm(recipient: &str, token: &str, content: &str) -> anyhow::Resu
     // Build the wire payload as a DM message
     let wire = serde_json::json!({"type": "dm", "to": recipient, "content": content}).to_string();
 
-    // Send via the DM room's socket
-    let socket_path = crate::paths::room_single_socket_path(&dm_id);
-    let msg = transport_send(&socket_path, token, &wire)
+    // Resolve socket target for the DM room.
+    let target = resolve_socket_target(&dm_id, socket);
+    let msg = transport_send_target(&target, token, &wire)
         .await
         .map_err(|e| {
             if e.to_string().contains("No such file")

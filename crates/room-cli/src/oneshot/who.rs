@@ -1,22 +1,27 @@
-use super::transport::send_message_with_token as transport_send;
+use super::transport::{resolve_socket_target, send_message_with_token_target as transport_send};
 use crate::message::Message;
 
 /// One-shot who subcommand: send `/who` to the broker, print the response, exit.
 ///
 /// By default prints just the human-readable content line. With `json = true`,
 /// prints the full JSON response for machine consumption.
-pub async fn cmd_who(room_id: &str, token: &str, json: bool) -> anyhow::Result<()> {
-    let socket_path = crate::paths::room_single_socket_path(room_id);
+///
+/// `socket` overrides the default socket path (auto-discovered if `None`).
+pub async fn cmd_who(
+    room_id: &str,
+    token: &str,
+    json: bool,
+    socket: Option<&std::path::Path>,
+) -> anyhow::Result<()> {
+    let target = resolve_socket_target(room_id, socket);
     let wire = serde_json::json!({"type": "command", "cmd": "who", "params": []}).to_string();
-    let msg = transport_send(&socket_path, token, &wire)
-        .await
-        .map_err(|e| {
-            if e.to_string().contains("invalid token") {
-                anyhow::anyhow!("invalid token — run: room join {room_id} <username>")
-            } else {
-                e
-            }
-        })?;
+    let msg = transport_send(&target, token, &wire).await.map_err(|e| {
+        if e.to_string().contains("invalid token") {
+            anyhow::anyhow!("invalid token — run: room join {room_id} <username>")
+        } else {
+            e
+        }
+    })?;
 
     if json {
         println!("{}", serde_json::to_string(&msg)?);

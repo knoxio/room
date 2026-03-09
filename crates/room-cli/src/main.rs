@@ -20,11 +20,16 @@ use tokio::net::UnixStream;
 enum Cmd {
     /// Register a username with the broker and receive a session token.
     ///
-    /// Writes the token to `/tmp/room-<room_id>-<username>.token`. Subsequent `send`,
-    /// `poll`, and `watch` calls read the username and token from that file —
-    /// no username argument required. Returns an error if the username is
-    /// already in use in the room.
-    Join { room_id: String, username: String },
+    /// Writes the token to `~/.room/state/room-<room_id>-<username>.token`. Subsequent
+    /// `send`, `poll`, and `watch` calls read the username and token from that file —
+    /// no username argument required. Returns an error if the username is already in use.
+    Join {
+        room_id: String,
+        username: String,
+        /// Override the broker socket path (default: auto-discover daemon or per-room socket)
+        #[arg(long)]
+        socket: Option<PathBuf>,
+    },
     /// One-shot send a message to a room (requires a running broker).
     ///
     /// The broker resolves the sender's identity from the token issued by `room join`.
@@ -37,6 +42,9 @@ enum Cmd {
         /// Recipient username for a direct message
         #[arg(long)]
         to: Option<String>,
+        /// Override the broker socket path (default: auto-discover daemon or per-room socket)
+        #[arg(long)]
+        socket: Option<PathBuf>,
         /// Message content; all remaining tokens are joined with spaces
         #[arg(trailing_var_arg = true, num_args = 1..)]
         message: Vec<String>,
@@ -167,6 +175,9 @@ enum Cmd {
         /// Print raw JSON instead of human-readable text
         #[arg(long)]
         json: bool,
+        /// Override the broker socket path (default: auto-discover daemon or per-room socket)
+        #[arg(long)]
+        socket: Option<PathBuf>,
     },
     /// Send a direct message to a user, creating the DM room if needed.
     ///
@@ -179,6 +190,9 @@ enum Cmd {
         /// Session token from `room join` (required)
         #[arg(short = 't', long)]
         token: String,
+        /// Override the broker socket path (default: auto-discover daemon or per-room socket)
+        #[arg(long)]
+        socket: Option<PathBuf>,
         /// Message content; all remaining tokens are joined with spaces
         #[arg(trailing_var_arg = true, num_args = 1..)]
         message: Vec<String>,
@@ -256,17 +270,22 @@ async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
     match args.command {
-        Some(Cmd::Join { room_id, username }) => {
-            oneshot::cmd_join(&room_id, &username).await?;
+        Some(Cmd::Join {
+            room_id,
+            username,
+            socket,
+        }) => {
+            oneshot::cmd_join(&room_id, &username, socket.as_deref()).await?;
         }
         Some(Cmd::Send {
             room_id,
             token,
             to,
+            socket,
             message,
         }) => {
             let content = message.join(" ");
-            oneshot::cmd_send(&room_id, &token, to.as_deref(), &content).await?;
+            oneshot::cmd_send(&room_id, &token, to.as_deref(), &content, socket.as_deref()).await?;
         }
         Some(Cmd::Query {
             room_id,
@@ -458,16 +477,18 @@ async fn main() -> anyhow::Result<()> {
             room_id,
             token,
             json,
+            socket,
         }) => {
-            oneshot::cmd_who(&room_id, &token, json).await?;
+            oneshot::cmd_who(&room_id, &token, json, socket.as_deref()).await?;
         }
         Some(Cmd::Dm {
             user,
             token,
+            socket,
             message,
         }) => {
             let content = message.join(" ");
-            oneshot::cmd_dm(&user, &token, &content).await?;
+            oneshot::cmd_dm(&user, &token, &content, socket.as_deref()).await?;
         }
         Some(Cmd::List) => {
             oneshot::cmd_list().await?;
