@@ -556,7 +556,6 @@ async fn pull_messages_returns_all_when_fewer_than_n() {
         .recv_until(|m| matches!(m, Message::Message { content, .. } if content == "only message"))
         .await;
 
-
     let msgs = room_cli::oneshot::pull_messages(&broker.chat_path, 100, None)
         .await
         .unwrap();
@@ -694,7 +693,6 @@ async fn pull_messages_filters_dms_for_viewer() {
     bob.send_json(&dm).await;
     bob.recv_until(|m| matches!(m, Message::DirectMessage { content, .. } if content == "secret"))
         .await;
-
 
     // carol (a third party) pulls history — should not see the DM
     let carol_msgs = room_cli::oneshot::pull_messages(&broker.chat_path, 50, Some("carol"))

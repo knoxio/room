@@ -85,7 +85,7 @@ pub fn resolve_socket_target(room_id: &str, explicit: Option<&Path>) -> SocketTa
 // ── Daemon auto-start ─────────────────────────────────────────────────────────
 
 const DAEMON_POLL_INTERVAL_MS: u64 = 50;
-const DAEMON_START_TIMEOUT_MS: u64 = 15_000;
+const DAEMON_START_TIMEOUT_MS: u64 = 5_000;
 
 /// Ensure the multi-room daemon is running.
 ///
