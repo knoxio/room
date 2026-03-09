@@ -538,3 +538,20 @@ async fn global_join_empty_username_rejected() {
     let v: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
     assert_eq!(v["type"], "error", "empty username should be rejected: {v}");
 }
+
+#[tokio::test]
+async fn global_join_token_works_for_room_send() {
+    let td = TestDaemon::start(&["lobby"]).await;
+
+    // Global join — no room specified.
+    let token = daemon_global_join(&td.socket_path, "gj-sender").await;
+
+    // Use that global token to send to "lobby" via ROOM:lobby:TOKEN:<token>.
+    let echo = daemon_send(&td.socket_path, "lobby", &token, "hello from global join").await;
+    assert_eq!(
+        echo["type"], "message",
+        "global token should work for room send: {echo}"
+    );
+    assert_eq!(echo["content"], "hello from global join");
+    assert_eq!(echo["user"], "gj-sender");
+}

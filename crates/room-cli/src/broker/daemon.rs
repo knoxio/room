@@ -1018,7 +1018,15 @@ async fn dispatch_connection(
             return handle_oneshot_send(u, reader, write_half, &state).await;
         }
         ClientHandshake::Token(token) => {
-            return match super::auth::validate_token(&token, &state.token_map).await {
+            // Try room-level token map first, then fall back to global UserRegistry.
+            let resolved = match super::auth::validate_token(&token, &state.token_map).await {
+                Some(u) => Some(u),
+                None => {
+                    let reg = user_registry.lock().await;
+                    reg.validate_token(&token).map(|u| u.to_owned())
+                }
+            };
+            return match resolved {
                 Some(u) => handle_oneshot_send(u, reader, write_half, &state).await,
                 None => {
                     let err = serde_json::json!({"type":"error","code":"invalid_token"});
