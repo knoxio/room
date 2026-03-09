@@ -694,21 +694,6 @@ pub(crate) async fn create_room_entry(
     Ok(())
 }
 
-/// Parse the `ROOM:<room_id>:` prefix from a handshake line.
-///
-/// Returns `(room_id, rest)` on success. `rest` is the remainder after the
-/// second colon (e.g. `JOIN:alice`, `TOKEN:uuid`, `SEND:bob`, or `username`).
-pub(crate) fn parse_room_prefix(line: &str) -> Option<(&str, &str)> {
-    let stripped = line.strip_prefix("ROOM:")?;
-    let colon = stripped.find(':')?;
-    let room_id = &stripped[..colon];
-    let rest = &stripped[colon + 1..];
-    if room_id.is_empty() {
-        return None;
-    }
-    Some((room_id, rest))
-}
-
 /// Handle a `DESTROY:<room_id>` request: remove the room from the daemon.
 ///
 /// Protocol:
@@ -928,28 +913,26 @@ async fn dispatch_connection(
         return Ok(());
     }
 
-    // Handle DESTROY:<room_id> — daemon-level room destruction.
-    if let Some(room_id) = first_line.strip_prefix("DESTROY:") {
-        return handle_destroy(room_id, &mut write_half, rooms).await;
-    }
-
-    // Handle CREATE:<room_id> — daemon-level room creation.
-    if let Some(room_id) = first_line.strip_prefix("CREATE:") {
-        return handle_create(
-            room_id,
-            &mut reader,
-            &mut write_half,
-            rooms,
-            daemon_config,
-            system_token_map,
-        )
-        .await;
-    }
-
-    // Parse ROOM:<room_id>:<rest>
-    let (room_id, rest) = match parse_room_prefix(first_line) {
-        Some(pair) => pair,
-        None => {
+    use super::handshake::{
+        parse_client_handshake, parse_daemon_prefix, ClientHandshake, DaemonPrefix,
+    };
+    let (room_id, rest) = match parse_daemon_prefix(first_line) {
+        DaemonPrefix::Destroy(room_id) => {
+            return handle_destroy(&room_id, &mut write_half, rooms).await;
+        }
+        DaemonPrefix::Create(room_id) => {
+            return handle_create(
+                &room_id,
+                &mut reader,
+                &mut write_half,
+                rooms,
+                daemon_config,
+                system_token_map,
+            )
+            .await;
+        }
+        DaemonPrefix::Room { room_id, rest } => (room_id, rest),
+        DaemonPrefix::Unknown => {
             let err = serde_json::json!({
                 "type": "error",
                 "code": "missing_room_prefix",
@@ -963,7 +946,7 @@ async fn dispatch_connection(
     // Look up the room.
     let state = {
         let map = rooms.lock().await;
-        map.get(room_id).cloned()
+        map.get(room_id.as_str()).cloned()
     };
 
     let state = match state {
@@ -981,43 +964,43 @@ async fn dispatch_connection(
 
     let cid = next_client_id.fetch_add(1, Ordering::SeqCst) + 1;
 
-    // Dispatch based on the handshake after the ROOM: prefix.
-    if let Some(send_user) = rest.strip_prefix("SEND:") {
-        return handle_oneshot_send(send_user.to_owned(), reader, write_half, &state).await;
-    }
+    // Dispatch based on the per-room handshake after the ROOM: prefix.
+    let username = match parse_client_handshake(&rest) {
+        ClientHandshake::Send(u) => {
+            return handle_oneshot_send(u, reader, write_half, &state).await;
+        }
+        ClientHandshake::Token(token) => {
+            return match super::auth::validate_token(&token, &state.token_map).await {
+                Some(u) => handle_oneshot_send(u, reader, write_half, &state).await,
+                None => {
+                    let err = serde_json::json!({"type":"error","code":"invalid_token"});
+                    write_half
+                        .write_all(format!("{err}\n").as_bytes())
+                        .await
+                        .map_err(Into::into)
+                }
+            };
+        }
+        ClientHandshake::Join(u) => {
+            return super::auth::handle_oneshot_join_with_registry(
+                u,
+                write_half,
+                user_registry,
+                &state.token_map,
+                state.config.as_ref(),
+            )
+            .await;
+        }
+        ClientHandshake::Interactive(u) => u,
+    };
 
-    if let Some(token) = rest.strip_prefix("TOKEN:") {
-        return match super::auth::validate_token(token, &state.token_map).await {
-            Some(u) => handle_oneshot_send(u, reader, write_half, &state).await,
-            None => {
-                let err = serde_json::json!({"type":"error","code":"invalid_token"});
-                write_half
-                    .write_all(format!("{err}\n").as_bytes())
-                    .await
-                    .map_err(Into::into)
-            }
-        };
-    }
-
-    if let Some(join_user) = rest.strip_prefix("JOIN:") {
-        return super::auth::handle_oneshot_join_with_registry(
-            join_user.to_owned(),
-            write_half,
-            user_registry,
-            &state.token_map,
-            state.config.as_ref(),
-        )
-        .await;
-    }
-
-    // Interactive join: rest is the username.
-    let username = rest;
+    // Interactive join.
     if username.is_empty() {
         return Ok(());
     }
 
     // Check join permission before entering interactive session.
-    if let Err(reason) = super::auth::check_join_permission(username, state.config.as_ref()) {
+    if let Err(reason) = super::auth::check_join_permission(&username, state.config.as_ref()) {
         let err = serde_json::json!({
             "type": "error",
             "code": "join_denied",
@@ -1037,7 +1020,7 @@ async fn dispatch_connection(
         .insert(cid, (String::new(), tx.clone()));
 
     let result =
-        super::run_interactive_session(cid, username, reader, write_half, tx, &state).await;
+        super::run_interactive_session(cid, &username, reader, write_half, tx, &state).await;
 
     state.clients.lock().await.remove(&cid);
     result
@@ -1090,63 +1073,6 @@ mod tests {
         // Should not panic if the file is already gone.
         let path = std::path::Path::new("/tmp/gone-99999999.pid");
         remove_pid_file(path); // must not panic
-    }
-
-    // ── parse_room_prefix ─────────────────────────────────────────────────
-
-    #[test]
-    fn parse_room_prefix_join() {
-        let (room, rest) = parse_room_prefix("ROOM:myroom:JOIN:alice").unwrap();
-        assert_eq!(room, "myroom");
-        assert_eq!(rest, "JOIN:alice");
-    }
-
-    #[test]
-    fn parse_room_prefix_token() {
-        let (room, rest) = parse_room_prefix("ROOM:myroom:TOKEN:abc-123").unwrap();
-        assert_eq!(room, "myroom");
-        assert_eq!(rest, "TOKEN:abc-123");
-    }
-
-    #[test]
-    fn parse_room_prefix_send() {
-        let (room, rest) = parse_room_prefix("ROOM:myroom:SEND:bob").unwrap();
-        assert_eq!(room, "myroom");
-        assert_eq!(rest, "SEND:bob");
-    }
-
-    #[test]
-    fn parse_room_prefix_interactive() {
-        let (room, rest) = parse_room_prefix("ROOM:chat:alice").unwrap();
-        assert_eq!(room, "chat");
-        assert_eq!(rest, "alice");
-    }
-
-    #[test]
-    fn parse_room_prefix_room_id_with_hyphens() {
-        let (room, rest) = parse_room_prefix("ROOM:agent-room-2:JOIN:r2d2").unwrap();
-        assert_eq!(room, "agent-room-2");
-        assert_eq!(rest, "JOIN:r2d2");
-    }
-
-    #[test]
-    fn parse_room_prefix_missing_prefix() {
-        assert!(parse_room_prefix("JOIN:alice").is_none());
-        assert!(parse_room_prefix("alice").is_none());
-        assert!(parse_room_prefix("TOKEN:abc").is_none());
-    }
-
-    #[test]
-    fn parse_room_prefix_empty_room_id() {
-        assert!(parse_room_prefix("ROOM::JOIN:alice").is_none());
-    }
-
-    #[test]
-    fn parse_room_prefix_no_rest() {
-        // "ROOM:myroom:" — rest is empty string, valid (treated as empty username)
-        let (room, rest) = parse_room_prefix("ROOM:myroom:").unwrap();
-        assert_eq!(room, "myroom");
-        assert_eq!(rest, "");
     }
 
     // ── DaemonState lifecycle ─────────────────────────────────────────────

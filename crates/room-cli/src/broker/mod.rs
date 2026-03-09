@@ -2,6 +2,7 @@ pub(crate) mod auth;
 pub(crate) mod commands;
 pub mod daemon;
 pub(crate) mod fanout;
+pub(crate) mod handshake;
 pub(crate) mod state;
 pub(crate) mod ws;
 
@@ -173,44 +174,42 @@ async fn handle_client(
     let (read_half, mut write_half) = stream.into_split();
     let mut reader = BufReader::new(read_half);
 
-    // First line: username handshake, or one of the one-shot prefixes:
-    //   SEND:<username>  — legacy one-shot send
-    //   TOKEN:<uuid>     — token-authenticated one-shot send
-    //   JOIN:<username>  — register username, receive a session token
+    // First line: username handshake, or one of the one-shot prefixes.
     let mut first = String::new();
     reader.read_line(&mut first).await?;
     let first_line = first.trim();
 
-    if let Some(send_user) = first_line.strip_prefix("SEND:") {
-        return handle_oneshot_send(send_user.to_owned(), reader, write_half, state).await;
-    }
+    use handshake::{parse_client_handshake, ClientHandshake};
+    let username = match parse_client_handshake(first_line) {
+        ClientHandshake::Send(u) => {
+            return handle_oneshot_send(u, reader, write_half, state).await;
+        }
+        ClientHandshake::Token(token) => {
+            return match validate_token(&token, &token_map).await {
+                Some(u) => handle_oneshot_send(u, reader, write_half, state).await,
+                None => {
+                    let err = serde_json::json!({"type":"error","code":"invalid_token"});
+                    write_half
+                        .write_all(format!("{err}\n").as_bytes())
+                        .await
+                        .map_err(Into::into)
+                }
+            };
+        }
+        ClientHandshake::Join(u) => {
+            return handle_oneshot_join(
+                u,
+                write_half,
+                &token_map,
+                state.config.as_ref(),
+                Some(&state.token_map_path),
+            )
+            .await;
+        }
+        ClientHandshake::Interactive(u) => u,
+    };
 
-    if let Some(token) = first_line.strip_prefix("TOKEN:") {
-        return match validate_token(token, &token_map).await {
-            Some(u) => handle_oneshot_send(u, reader, write_half, state).await,
-            None => {
-                let err = serde_json::json!({"type":"error","code":"invalid_token"});
-                write_half
-                    .write_all(format!("{err}\n").as_bytes())
-                    .await
-                    .map_err(Into::into)
-            }
-        };
-    }
-
-    if let Some(join_user) = first_line.strip_prefix("JOIN:") {
-        return handle_oneshot_join(
-            join_user.to_owned(),
-            write_half,
-            &token_map,
-            state.config.as_ref(),
-            Some(&state.token_map_path),
-        )
-        .await;
-    }
-
-    // Remaining path: full interactive join — first_line is the username.
-    let username = first_line.to_owned();
+    // Remaining path: full interactive join.
     if username.is_empty() {
         return Ok(());
     }

@@ -100,30 +100,28 @@ async fn run_ws_session(
         Some(Err(e)) => return Err(e.into()),
     };
 
-    // One-shot: JOIN — register username, return token, close.
-    if let Some(join_user) = first_frame.strip_prefix("JOIN:") {
-        return ws_oneshot_join(join_user, &mut ws_tx, state).await;
-    }
+    use super::handshake::{parse_client_handshake, ClientHandshake};
+    let username = match parse_client_handshake(&first_frame) {
+        ClientHandshake::Join(u) => {
+            return ws_oneshot_join(&u, &mut ws_tx, state).await;
+        }
+        ClientHandshake::Send(u) => {
+            return ws_oneshot_send(u, &mut ws_rx, &mut ws_tx, state).await;
+        }
+        ClientHandshake::Token(token) => {
+            return match validate_token(&token, &state.token_map).await {
+                Some(u) => ws_oneshot_send(u, &mut ws_rx, &mut ws_tx, state).await,
+                None => {
+                    let err = serde_json::json!({"type":"error","code":"invalid_token"});
+                    let _ = ws_tx.send(WsMessage::Text(err.to_string().into())).await;
+                    Ok(())
+                }
+            };
+        }
+        ClientHandshake::Interactive(u) => u,
+    };
 
-    // One-shot: SEND — legacy unauthenticated send.
-    if let Some(send_user) = first_frame.strip_prefix("SEND:") {
-        return ws_oneshot_send(send_user.to_owned(), &mut ws_rx, &mut ws_tx, state).await;
-    }
-
-    // One-shot: TOKEN — authenticated send.
-    if let Some(token) = first_frame.strip_prefix("TOKEN:") {
-        return match validate_token(token, &state.token_map).await {
-            Some(u) => ws_oneshot_send(u, &mut ws_rx, &mut ws_tx, state).await,
-            None => {
-                let err = serde_json::json!({"type":"error","code":"invalid_token"});
-                let _ = ws_tx.send(WsMessage::Text(err.to_string().into())).await;
-                Ok(())
-            }
-        };
-    }
-
-    // Interactive join — first_frame is the username.
-    let username = first_frame;
+    // Interactive join.
     if username.is_empty() {
         return Ok(());
     }
