@@ -153,6 +153,61 @@ pub(crate) async fn route_command(
             return Ok(CommandResult::Reply(json));
         }
 
+        // Subscription commands.
+        if cmd == "subscribe" {
+            let tier_str = params.first().map(String::as_str).unwrap_or("full");
+            let tier: room_protocol::SubscriptionTier = match tier_str.parse() {
+                Ok(t) => t,
+                Err(e) => {
+                    let sys = make_system(&state.room_id, "broker", e);
+                    let json = serde_json::to_string(&sys)?;
+                    return Ok(CommandResult::Reply(json));
+                }
+            };
+            state
+                .subscription_map
+                .lock()
+                .await
+                .insert(username.to_owned(), tier);
+            let display = format!("{username} subscribed to {} (tier: {tier})", state.room_id);
+            let sys = make_system(&state.room_id, "broker", display);
+            broadcast_and_persist(&sys, &state.clients, &state.chat_path, &state.seq_counter)
+                .await?;
+            let json = serde_json::to_string(&sys)?;
+            return Ok(CommandResult::HandledWithReply(json));
+        }
+
+        if cmd == "unsubscribe" {
+            state.subscription_map.lock().await.insert(
+                username.to_owned(),
+                room_protocol::SubscriptionTier::Unsubscribed,
+            );
+            let display = format!("{username} unsubscribed from {}", state.room_id);
+            let sys = make_system(&state.room_id, "broker", display);
+            broadcast_and_persist(&sys, &state.clients, &state.chat_path, &state.seq_counter)
+                .await?;
+            let json = serde_json::to_string(&sys)?;
+            return Ok(CommandResult::HandledWithReply(json));
+        }
+
+        if cmd == "subscriptions" {
+            let map = state.subscription_map.lock().await;
+            let content = if map.is_empty() {
+                "no subscriptions".to_owned()
+            } else {
+                let mut entries: Vec<String> = map
+                    .iter()
+                    .map(|(user, tier)| format!("{user}: {tier}"))
+                    .collect();
+                entries.sort();
+                format!("subscriptions — {}", entries.join(", "))
+            };
+            drop(map);
+            let sys = make_system(&state.room_id, "broker", content);
+            let json = serde_json::to_string(&sys)?;
+            return Ok(CommandResult::Reply(json));
+        }
+
         // Room management commands.
         if cmd == "room-info" {
             let result = handle_room_info(state).await;
@@ -507,6 +562,7 @@ mod tests {
             host_user: Arc::new(Mutex::new(None)),
             token_map: Arc::new(Mutex::new(HashMap::new())),
             claim_map: Arc::new(Mutex::new(HashMap::new())),
+            subscription_map: Arc::new(Mutex::new(HashMap::new())),
             chat_path: Arc::new(chat_path),
             room_id: Arc::new("test-room".to_owned()),
             shutdown: Arc::new(shutdown_tx),
@@ -1080,6 +1136,7 @@ mod tests {
             host_user: Arc::new(Mutex::new(None)),
             token_map: Arc::new(Mutex::new(HashMap::new())),
             claim_map: Arc::new(Mutex::new(HashMap::new())),
+            subscription_map: Arc::new(Mutex::new(HashMap::new())),
             chat_path: Arc::new(chat_path),
             room_id: Arc::new("test-room".to_owned()),
             shutdown: Arc::new(shutdown_tx),
@@ -1244,5 +1301,174 @@ mod tests {
         let alice_pos = json.find("alice: a-task").unwrap();
         let zara_pos = json.find("zara: z-task").unwrap();
         assert!(alice_pos < zara_pos, "claims should be sorted by username");
+    }
+
+    // ── subscription commands ──────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn subscribe_default_tier_is_full() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+        let msg = make_command("test-room", "alice", "subscribe", vec![]);
+        let result = route_command(msg, "alice", &state).await.unwrap();
+        let CommandResult::HandledWithReply(json) = result else {
+            panic!("expected HandledWithReply");
+        };
+        assert!(json.contains("subscribed"));
+        assert!(json.contains("full"));
+        assert_eq!(
+            *state.subscription_map.lock().await.get("alice").unwrap(),
+            room_protocol::SubscriptionTier::Full
+        );
+    }
+
+    #[tokio::test]
+    async fn subscribe_explicit_mentions_only() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+        let msg = make_command(
+            "test-room",
+            "bob",
+            "subscribe",
+            vec!["mentions_only".to_owned()],
+        );
+        let result = route_command(msg, "bob", &state).await.unwrap();
+        let CommandResult::HandledWithReply(json) = result else {
+            panic!("expected HandledWithReply");
+        };
+        assert!(json.contains("mentions_only"));
+        assert_eq!(
+            *state.subscription_map.lock().await.get("bob").unwrap(),
+            room_protocol::SubscriptionTier::MentionsOnly
+        );
+    }
+
+    #[tokio::test]
+    async fn subscribe_overwrites_previous_tier() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+        let msg1 = make_command("test-room", "alice", "subscribe", vec!["full".to_owned()]);
+        route_command(msg1, "alice", &state).await.unwrap();
+        let msg2 = make_command(
+            "test-room",
+            "alice",
+            "subscribe",
+            vec!["mentions_only".to_owned()],
+        );
+        route_command(msg2, "alice", &state).await.unwrap();
+        assert_eq!(
+            *state.subscription_map.lock().await.get("alice").unwrap(),
+            room_protocol::SubscriptionTier::MentionsOnly,
+            "second subscribe should overwrite the first"
+        );
+    }
+
+    #[tokio::test]
+    async fn unsubscribe_sets_tier_to_unsubscribed() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+        // Subscribe first
+        let msg = make_command("test-room", "alice", "subscribe", vec!["full".to_owned()]);
+        route_command(msg, "alice", &state).await.unwrap();
+        // Then unsubscribe
+        let msg = make_command("test-room", "alice", "unsubscribe", vec![]);
+        let result = route_command(msg, "alice", &state).await.unwrap();
+        let CommandResult::HandledWithReply(json) = result else {
+            panic!("expected HandledWithReply");
+        };
+        assert!(json.contains("unsubscribed"));
+        assert_eq!(
+            *state.subscription_map.lock().await.get("alice").unwrap(),
+            room_protocol::SubscriptionTier::Unsubscribed
+        );
+    }
+
+    #[tokio::test]
+    async fn unsubscribe_without_prior_subscription() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+        let msg = make_command("test-room", "alice", "unsubscribe", vec![]);
+        let result = route_command(msg, "alice", &state).await.unwrap();
+        // Should still work — sets to Unsubscribed even without prior entry
+        assert!(matches!(result, CommandResult::HandledWithReply(_)));
+        assert_eq!(
+            *state.subscription_map.lock().await.get("alice").unwrap(),
+            room_protocol::SubscriptionTier::Unsubscribed
+        );
+    }
+
+    #[tokio::test]
+    async fn subscriptions_empty() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+        let msg = make_command("test-room", "alice", "subscriptions", vec![]);
+        let CommandResult::Reply(json) = route_command(msg, "alice", &state).await.unwrap() else {
+            panic!("expected Reply");
+        };
+        assert!(json.contains("no subscriptions"));
+    }
+
+    #[tokio::test]
+    async fn subscriptions_lists_all_sorted() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+        {
+            let mut map = state.subscription_map.lock().await;
+            map.insert("zara".to_owned(), room_protocol::SubscriptionTier::Full);
+            map.insert(
+                "alice".to_owned(),
+                room_protocol::SubscriptionTier::MentionsOnly,
+            );
+        }
+        let msg = make_command("test-room", "alice", "subscriptions", vec![]);
+        let CommandResult::Reply(json) = route_command(msg, "alice", &state).await.unwrap() else {
+            panic!("expected Reply");
+        };
+        assert!(json.contains("alice: mentions_only"));
+        assert!(json.contains("zara: full"));
+        // Verify sorted order
+        let alice_pos = json.find("alice: mentions_only").unwrap();
+        let zara_pos = json.find("zara: full").unwrap();
+        assert!(
+            alice_pos < zara_pos,
+            "subscriptions should be sorted by username"
+        );
+    }
+
+    #[tokio::test]
+    async fn subscribe_invalid_tier_returns_error() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+        let msg = make_command("test-room", "alice", "subscribe", vec!["banana".to_owned()]);
+        let result = route_command(msg, "alice", &state).await.unwrap();
+        let CommandResult::Reply(json) = result else {
+            panic!("expected Reply for invalid tier");
+        };
+        assert!(json.contains("must be one of"));
+        // Should not have stored anything
+        assert!(state.subscription_map.lock().await.get("alice").is_none());
+    }
+
+    #[tokio::test]
+    async fn subscribe_broadcasts_system_message() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+        let msg = make_command("test-room", "alice", "subscribe", vec![]);
+        route_command(msg, "alice", &state).await.unwrap();
+        // Verify the broadcast was persisted to chat history
+        let history = std::fs::read_to_string(tmp.path()).unwrap();
+        assert!(history.contains("subscribed"));
+        assert!(history.contains("alice"));
+    }
+
+    #[tokio::test]
+    async fn unsubscribe_broadcasts_system_message() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+        let msg = make_command("test-room", "alice", "unsubscribe", vec![]);
+        route_command(msg, "alice", &state).await.unwrap();
+        let history = std::fs::read_to_string(tmp.path()).unwrap();
+        assert!(history.contains("unsubscribed"));
+        assert!(history.contains("alice"));
     }
 }

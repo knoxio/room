@@ -4,7 +4,7 @@ use std::{
     sync::{atomic::AtomicU64, Arc},
 };
 
-use room_protocol::RoomConfig;
+use room_protocol::{RoomConfig, SubscriptionTier};
 use tokio::sync::{broadcast, watch, Mutex};
 
 use crate::plugin::PluginRegistry;
@@ -28,6 +28,10 @@ pub(crate) type TokenMap = Arc<Mutex<HashMap<String, String>>>;
 /// Users can hold at most one claim at a time (new claim replaces old).
 pub(crate) type ClaimMap = Arc<Mutex<HashMap<String, String>>>;
 
+/// Maps username → subscription tier for this room. Ephemeral; persistence
+/// is handled by E3-2 (#311) once the durable state directory lands.
+pub(crate) type SubscriptionMap = Arc<Mutex<HashMap<String, SubscriptionTier>>>;
+
 /// Shared broker state passed to every client handler.
 pub(crate) struct RoomState {
     pub(crate) clients: ClientMap,
@@ -35,6 +39,7 @@ pub(crate) struct RoomState {
     pub(crate) host_user: HostUser,
     pub(crate) token_map: TokenMap,
     pub(crate) claim_map: ClaimMap,
+    pub(crate) subscription_map: SubscriptionMap,
     pub(crate) chat_path: Arc<PathBuf>,
     pub(crate) room_id: Arc<String>,
     /// Set to `true` by the `/exit` admin command to shut down the broker.

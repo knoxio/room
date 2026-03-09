@@ -317,6 +317,9 @@ const RESERVED_COMMANDS: &[&str] = &[
     "room-info",
     "exit",
     "clear",
+    "subscribe",
+    "unsubscribe",
+    "subscriptions",
 ];
 
 /// Central registry of plugins. The broker uses this to dispatch `/` commands.
@@ -525,6 +528,29 @@ pub fn builtin_command_infos() -> Vec<CommandInfo> {
             name: "room-info".to_owned(),
             description: "Show room visibility, config, and member count".to_owned(),
             usage: "/room-info".to_owned(),
+            params: vec![],
+        },
+        CommandInfo {
+            name: "subscribe".to_owned(),
+            description: "Subscribe to this room".to_owned(),
+            usage: "/subscribe [tier]".to_owned(),
+            params: vec![ParamSchema {
+                name: "tier".to_owned(),
+                param_type: ParamType::Choice(vec!["full".to_owned(), "mentions_only".to_owned()]),
+                required: false,
+                description: "Subscription tier (default: full)".to_owned(),
+            }],
+        },
+        CommandInfo {
+            name: "unsubscribe".to_owned(),
+            description: "Unsubscribe from this room".to_owned(),
+            usage: "/unsubscribe".to_owned(),
+            params: vec![],
+        },
+        CommandInfo {
+            name: "subscriptions".to_owned(),
+            description: "List subscription tiers for this room".to_owned(),
+            usage: "/subscriptions".to_owned(),
             params: vec![],
         },
     ]
@@ -783,6 +809,9 @@ mod tests {
             "exit",
             "clear",
             "room-info",
+            "subscribe",
+            "unsubscribe",
+            "subscriptions",
         ] {
             assert!(
                 names.contains(expected),
