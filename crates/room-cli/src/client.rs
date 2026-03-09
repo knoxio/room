@@ -45,19 +45,15 @@ impl Client {
         }
     }
 
-    /// Ensure a session token file exists for this room/user pair.
+    /// Ensure a valid session token exists for this room/user pair.
     ///
-    /// If a valid token file already exists at `~/.room/state/room-<room>-<user>.token`,
-    /// this is a no-op. Otherwise, performs a `JOIN:` handshake to acquire a new token
-    /// and writes it to disk. Errors are logged but not propagated — the interactive
-    /// session can proceed even if token acquisition fails (oneshot commands just
-    /// won't work until the user runs `room join` manually).
+    /// Always attempts a `JOIN:` handshake to acquire a fresh token. This handles
+    /// broker restarts (which invalidate old tokens) transparently. If the join
+    /// succeeds, the new token is written to `~/.room/state/`. If it fails with
+    /// "username_taken", the existing token file is assumed valid (the user is
+    /// already registered with the broker). Other errors are logged but not
+    /// propagated — the interactive session can proceed regardless.
     async fn ensure_token(&self) {
-        let token_path = paths::token_path(&self.room_id, &self.username);
-        if has_valid_token_file(&token_path) {
-            return;
-        }
-
         if let Err(e) = paths::ensure_room_dirs() {
             eprintln!("[tui] cannot create ~/.room dirs: {e}");
             return;
@@ -72,7 +68,22 @@ impl Client {
                 }
             }
             Err(e) => {
-                eprintln!("[tui] auto-join failed: {e} (run `room join` manually)");
+                let msg = e.to_string();
+                if msg.contains("already in use") {
+                    // Username is registered — existing token should be valid.
+                    let token_path = paths::token_path(&self.room_id, &self.username);
+                    if !has_valid_token_file(&token_path) {
+                        eprintln!(
+                            "[tui] username registered but no token file found — \
+                             run `room join {} {}` to recover",
+                            self.room_id, self.username
+                        );
+                    }
+                } else if msg.contains("cannot connect") {
+                    // Broker not running — token will be acquired on next session.
+                } else {
+                    eprintln!("[tui] auto-join failed: {e}");
+                }
             }
         }
     }
@@ -146,6 +157,25 @@ mod tests {
             "$USER should be set in the test environment"
         );
         assert!(!result.unwrap().is_empty(), "$USER should not be empty");
+    }
+
+    /// has_valid_token_file returns false for empty file.
+    #[test]
+    fn has_valid_token_file_returns_false_for_empty_file() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("empty.token");
+        std::fs::write(&path, "").unwrap();
+        assert!(!has_valid_token_file(&path));
+    }
+
+    /// has_valid_token_file returns false when token field is null.
+    #[test]
+    fn has_valid_token_file_returns_false_for_null_token() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("null-token.token");
+        let data = serde_json::json!({"username": "alice", "token": null});
+        std::fs::write(&path, format!("{data}\n")).unwrap();
+        assert!(!has_valid_token_file(&path));
     }
 }
 
