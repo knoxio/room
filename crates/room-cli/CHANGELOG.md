@@ -10,6 +10,51 @@ For changes prior to the workspace restructure (v0.1.2 through v1.0.2), see the
 
 ## [Unreleased]
 
+## [3.0.0-rc.6] - 2026-03-09
+
+### Fixed
+
+- Admin `/kick` and `/reauth` now revoke `UserRegistry` tokens in daemon mode,
+  unblocking the user for `room join` after a kick/reauth. (#402)
+- `discover_joined_rooms` now checks subscription state instead of stale
+  per-room token files. (#412, #413)
+- Global join tokens (from `room join <username>`) now validate correctly for
+  room-level `TOKEN:` sends. (#414, #415)
+- WS/REST `Bearer` token validation falls back to `UserRegistry` for global
+  tokens. (#416, #418)
+
+### Added
+
+- `room daemon --isolated` flag: spawns a daemon with a private temp dir for
+  tests, prints socket path to stdout, and cleans up on exit. (#398, #417)
+
+## [3.0.0-rc.5] - 2026-03-09
+
+### Changed
+
+- `room join` no longer takes a room-id argument. It now issues a **global**
+  token (`room join <username>`) tied to the user, not to a specific room.
+  Use `room subscribe <room-id>` to subscribe to rooms after joining. (#388)
+
+### Fixed
+
+- Per-room token file cleanup: removed stale `token_file_path` and related
+  functions from the oneshot code path. (#411)
+
+### Added
+
+- TUI: inline markdown rendering — `**bold**`, `*italic*`, `` `code` ``, and
+  `- list items` rendered with terminal attributes. (#405, #410)
+- TUI: subscription tier indicators in the member status panel. (#399, #404)
+
+## [3.0.0-rc.3] - 2026-03-09
+
+### Fixed
+
+- Ralph username crash when joining rooms with long or special-character names. (#400, #403)
+- DM host visibility — `is_visible_to()` now checks host membership for DM
+  rooms so the host can see all DMs in their room. (#394, #407)
+
 ### Added
 
 - `/claim`, `/unclaim`, `/claimed` built-in commands for task coordination. (#182)
@@ -25,6 +70,25 @@ For changes prior to the workspace restructure (v0.1.2 through v1.0.2), see the
 
 - WS smoke tests clean up stale `.tokens` files from previous runs. (#184)
 - Serialized WS smoke test execution to prevent disk I/O contention. (#184)
+
+## [3.0.0-rc.1] - 2026-03-08
+
+### Added
+
+- Multi-room daemon (`room daemon`) with shared UDS socket and optional
+  WebSocket. (#251, #261)
+- Room visibility and ACLs — public, private, unlisted, and DM types with
+  invite lists and `is_visible_to()` checks. (#253, #263)
+- WebSocket + REST transport (`--ws-port`): `JOIN`, `TOKEN`, `SEND` handshakes,
+  full REST API (`/api/<room>/join`, `/send`, `/poll`, `/query`). (#254)
+- `room create` / `room destroy` subcommands for daemon room lifecycle. (#264)
+- `room list` subcommand — lists known rooms and their metadata. (#264)
+- `--socket` flag on `join`, `send`, `who`, `poll`, `watch`, `dm`. (#308)
+- `RoomService` trait for dependency-injected REST handlers. (#363)
+- Comprehensive integration test split: auth, broker, daemon, oneshot,
+  rest\_query, room\_lifecycle, scripted, ws. (#355)
+- `clippy.toml` enforcing cognitive-complexity ≤ 30, too-many-lines ≤ 600,
+  too-many-arguments ≤ 7. (#364)
 
 ## [2.1.0-rc.2] - 2026-03-08
 
@@ -65,6 +129,12 @@ For changes prior to the workspace restructure (v0.1.2 through v1.0.2), see the
   plugin system (`/help`, `/stats`), admin commands, DMs, agent mode.
 - 312 tests (236 unit + 71 integration + 5 smoke).
 
-[Unreleased]: https://github.com/knoxio/room/compare/v2.0.1...HEAD
+[Unreleased]: https://github.com/knoxio/room/compare/v3.0.0-rc.6...HEAD
+[3.0.0-rc.6]: https://github.com/knoxio/room/compare/v3.0.0-rc.5...v3.0.0-rc.6
+[3.0.0-rc.5]: https://github.com/knoxio/room/compare/v3.0.0-rc.3...v3.0.0-rc.5
+[3.0.0-rc.3]: https://github.com/knoxio/room/compare/v3.0.0-rc.1...v3.0.0-rc.3
+[3.0.0-rc.1]: https://github.com/knoxio/room/compare/v2.1.0-rc.2...v3.0.0-rc.1
+[2.1.0-rc.2]: https://github.com/knoxio/room/compare/v2.1.0-rc.1...v2.1.0-rc.2
+[2.1.0-rc.1]: https://github.com/knoxio/room/compare/v2.0.1...v2.1.0-rc.1
 [2.0.1]: https://github.com/knoxio/room/compare/v2.0.0...v2.0.1
 [2.0.0]: https://github.com/knoxio/room/releases/tag/v2.0.0

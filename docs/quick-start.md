@@ -68,24 +68,30 @@ For scripts or AI agents that need to send and poll without a persistent connect
 ### 1. Register a session token (once per broker lifetime)
 
 ```bash
-room join myroom bot
+room join bot
 # {"type":"token","token":"<uuid>","username":"bot"}
 ```
 
-The token is written to `/tmp/room-myroom-bot.token` for reference. Save it to a variable — you must pass it explicitly with `-t` on every subsequent command:
+The token is also written to `~/.room/state/room-bot.token`. Save it to a variable — you must pass it explicitly with `-t` on every subsequent command:
 
 ```bash
-TOKEN=$(room join myroom bot | python3 -c 'import sys,json; print(json.load(sys.stdin)["token"])')
+TOKEN=$(room join bot | python3 -c 'import sys,json; print(json.load(sys.stdin)["token"])')
 ```
 
-### 2. Send a message
+### 2. Subscribe to a room
 
 ```bash
-room send myroom -t "$TOKEN" hello from a script
+room subscribe myroom -t "$TOKEN"
+```
+
+### 3. Send a message
+
+```bash
+room send myroom -t "$TOKEN" "hello from a script"
 # {"type":"message","id":"...","room":"myroom","user":"bot","ts":"...","content":"hello from a script","seq":1}
 ```
 
-### 3. Poll for new messages
+### 4. Poll for new messages
 
 ```bash
 # Poll a specific room
@@ -97,7 +103,7 @@ room poll -t "$TOKEN"
 
 A cursor file at `~/.room/state/room-myroom-bot.cursor` tracks your position. Each `poll` call returns only messages since the last cursor. Delete the file to reset to the beginning of history.
 
-### 4. Watch (block until a message arrives)
+### 5. Watch (block until a message arrives)
 
 ```bash
 # Watch all subscribed rooms
@@ -107,7 +113,7 @@ room watch -t "$TOKEN"
 room watch myroom -t "$TOKEN"
 ```
 
-### 5. Query with filters
+### 6. Query with filters
 
 ```bash
 # Search messages containing "bug" from alice

@@ -30,7 +30,7 @@ The `"` character inside a Bash tool call triggers the check. Use single-quoted 
 
 ```bash
 # Triggers a prompt
-TOKEN=$(cat /tmp/room-myroom-ba.token | grep ...)
+TOKEN=$(cat ~/.room/state/room-ba.token | grep ...)
 gh pr merge $(gh pr list ...)
 ```
 
@@ -122,7 +122,7 @@ This keeps all dynamic content, quoting, and redirections inside the script file
 ```bash
 #!/usr/bin/env bash
 set -euo pipefail
-TOKEN=$(python3 -c "import json; print(json.load(open('/tmp/room-myroom-ba.token'))['token'])")
+TOKEN=$(python3 -c "import json; print(json.load(open('/Users/me/.room/state/room-ba.token'))['token'])")
 room poll -t "$TOKEN" myroom > /tmp/msgs.txt
 grep -v '"user":"ba"' /tmp/msgs.txt | grep '"type":"message"'
 ```
@@ -138,7 +138,7 @@ Reading a token from the JSON file written by `room join`:
 ```bash
 # Write tool → /tmp/read_token.py
 import json, sys
-print(json.load(open('/tmp/room-myroom-ba.token'))['token'])
+print(json.load(open('/Users/me/.room/state/room-ba.token'))['token'])
 ```
 
 Then in Bash: `python3 /tmp/read_token.py`
@@ -146,7 +146,7 @@ Then in Bash: `python3 /tmp/read_token.py`
 Or use the grep approach inside a script (not inline):
 
 ```bash
-grep -o '"token":"[^"]*"' /tmp/room-myroom-ba.token | cut -d'"' -f4
+grep -o '"token":"[^"]*"' ~/.room/state/room-ba.token | cut -d'"' -f4
 ```
 
 ---

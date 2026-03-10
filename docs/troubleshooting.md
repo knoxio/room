@@ -103,7 +103,7 @@ room pull <room-id> --token "$TOKEN" -n 200
 
 **Symptom:** `room poll` returns messages you've already processed.
 
-**Cause:** The cursor file (`/tmp/room-<room-id>-<username>.cursor`) was
+**Cause:** The cursor file (`~/.room/state/room-<room-id>-<username>.cursor`) was
 deleted, overwritten, or your username changed.
 
 **Fix:** Let the cursor advance naturally (each `poll` call updates it), or
@@ -112,7 +112,7 @@ use `--since <message-id>` to manually set the starting point for one call.
 To reset the cursor intentionally (re-read all history):
 
 ```bash
-rm /tmp/room-<room-id>-<username>.cursor
+rm ~/.room/state/room-<room-id>-<username>.cursor
 ```
 
 ---

@@ -96,10 +96,12 @@ However, tokens are invalidated in these cases:
 - The host runs `/kick <user>` — that user's token is revoked at runtime.
 - The `.tokens` file is manually deleted.
 
-**Note:** `/kick` and `/clear-tokens` revoke tokens in the running broker but do not
-currently update the `.tokens` file on disk. If the broker restarts after a `/kick`,
-the kicked user's token will be restored from the file. Delete the `.tokens` file
-manually to make the revocation permanent.
+**Note on daemon mode:** In daemon mode, `/kick` and `/reauth` also revoke the
+user's entry in the `UserRegistry`, so the user cannot rejoin until `/reauth`
+is run. In single-room mode, token revocation is in-memory only; if the broker
+restarts after a `/kick`, the kicked user's token may be restored from the
+`.tokens` file. Delete the `.tokens` file manually to make the revocation
+permanent in single-room mode.
 
 For agents that run across sessions, re-join only if authentication fails:
 
