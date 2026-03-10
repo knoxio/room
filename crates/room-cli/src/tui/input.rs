@@ -227,6 +227,10 @@ fn handle_down(state: &mut InputState, online_users: &[String], input_width: usi
             state.cursor_pos =
                 byte_offset_at_display_pos(&state.input, cur_row + 1, cur_col, input_width);
             sync_mention_after_cursor_move(state, online_users);
+        } else if state.cursor_pos < state.input.len() {
+            // On the last row but not at end of line — move to end first.
+            state.cursor_pos = state.input.len();
+            sync_mention_after_cursor_move(state, online_users);
         } else {
             state.scroll_offset = state.scroll_offset.saturating_sub(1);
         }
@@ -1385,16 +1389,40 @@ mod tests {
         assert_eq!(state.cursor_pos, 2); // unchanged
     }
 
-    /// Down on the last row of a multiline input scrolls history.
+    /// Down on the last row mid-line moves cursor to end of input first.
     #[test]
-    fn down_arrow_on_last_row_of_multiline_scrolls_history() {
+    fn down_arrow_on_last_row_mid_line_moves_to_end() {
         let mut state = InputState::new();
         state.input = "hello\nworld".to_owned();
-        state.cursor_pos = 8; // row 1 (last)
+        state.cursor_pos = 8; // row 1 (last), mid-line
+        state.scroll_offset = 4;
+        handle_key(make_key(KeyCode::Down), &mut state, &[], 10, 80);
+        assert_eq!(state.cursor_pos, 11); // moved to end of input
+        assert_eq!(state.scroll_offset, 4); // unchanged — no scroll yet
+    }
+
+    /// Down on the last row at end of input scrolls chat history.
+    #[test]
+    fn down_arrow_on_last_row_at_end_scrolls_history() {
+        let mut state = InputState::new();
+        state.input = "hello\nworld".to_owned();
+        state.cursor_pos = 11; // end of input
         state.scroll_offset = 4;
         handle_key(make_key(KeyCode::Down), &mut state, &[], 10, 80);
         assert_eq!(state.scroll_offset, 3); // decremented
-        assert_eq!(state.cursor_pos, 8); // unchanged
+        assert_eq!(state.cursor_pos, 11); // unchanged
+    }
+
+    /// Down on single-line input mid-line moves to end before scrolling.
+    #[test]
+    fn down_arrow_single_line_mid_line_moves_to_end() {
+        let mut state = InputState::new();
+        state.input = "hello world".to_owned();
+        state.cursor_pos = 5; // mid-line
+        state.scroll_offset = 3;
+        handle_key(make_key(KeyCode::Down), &mut state, &[], 10, 80);
+        assert_eq!(state.cursor_pos, 11); // moved to end
+        assert_eq!(state.scroll_offset, 3); // unchanged
     }
 
     /// Up clamps target column to the end of a shorter previous row.
