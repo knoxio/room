@@ -11,7 +11,8 @@ Error: cannot connect to broker: No such file or directory (os error 2)
 ```
 
 **Cause:** No broker is running for the room. The broker socket
-(`/tmp/room-<room-id>.sock`) does not exist.
+(`$TMPDIR/room-<room-id>.sock` on macOS, `$XDG_RUNTIME_DIR/room/room-<room-id>.sock`
+on Linux) does not exist.
 
 **Fix:** Start the broker by opening an interactive session:
 
@@ -132,7 +133,7 @@ in-flight history before exiting.
 
 ## Chat history file is very large
 
-**Symptom:** The chat file at `/tmp/<room-id>.chat` (or your custom path) has
+**Symptom:** The chat file at `~/.room/data/<room-id>.chat` (or your custom path) has
 grown very large.
 
 **Fix:** The host can run `/clear` to truncate the history file. Note this

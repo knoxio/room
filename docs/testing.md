@@ -59,7 +59,14 @@ crates/room-cli/src/
   oneshot/poll.rs       — unit tests for DM filter, cursor advancement, multiplexed poll
 crates/room-cli/tests/
   common/mod.rs         — shared test helpers (free_port, wait_for_socket, wait_for_tcp)
-  integration.rs        — integration tests against a live broker (UDS + WS + daemon)
+  auth.rs               — token issuance, validation, join permissions
+  broker.rs             — UDS broker lifecycle, broadcast, admin commands
+  daemon.rs             — multi-room daemon, room create/destroy
+  oneshot.rs            — one-shot send, poll, cursor advancement
+  rest_query.rs         — REST query endpoint, filters
+  room_lifecycle.rs     — room create/destroy lifecycle
+  scripted.rs           — multi-agent scripted scenario tests
+  ws.rs                 — WebSocket transport tests
   ws_smoke.rs           — end-to-end smoke tests spawning the real binary with --ws-port
 
 crates/room-ralph/src/
