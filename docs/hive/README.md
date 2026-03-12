@@ -1,86 +1,155 @@
-# Hive — Multi-Room Orchestration Layer
+# Hive — Agent Orchestration Platform
 
 ## What is Hive?
 
-Hive is the product layer that sits above `room`. Where `room` provides the
-low-level primitives (broker, sockets, messages, plugins), Hive provides the
-user-facing experience for managing teams of agents across multiple rooms.
+Hive is a standalone application (web or native) that provides the user-facing
+experience for managing teams of AI agents. It uses `room` as its real-time
+collaboration infrastructure — the way a web application uses PostgreSQL for
+data storage.
 
-Think of it this way:
+Hive is **not** a CLI tool, not a room subcommand, and not part of the room
+binary. It is a separate deployment unit that communicates with room exclusively
+via WebSocket (primary) and REST (secondary).
 
-- **room** = a single chat room with a broker, message history, and plugins.
-- **room daemon** = multiple rooms running on one host, with shared auth.
-- **Hive** = the workspace that ties rooms, agents, teams, and tasks together
-  into a coherent product experience.
+## Architecture
 
-## Relationship to room
+```
+┌──────────────────────────────────────────────────────┐
+│  Hive Instance                                       │
+│                                                      │
+│  ┌────────────┐  ┌──────────────┐  ┌──────────────┐ │
+│  │   Web UI   │  │ Agent Runner │  │   Billing    │ │
+│  │ (frontend) │  │  (lifecycle) │  │  (metering)  │ │
+│  └─────┬──────┘  └──────┬───────┘  └──────┬───────┘ │
+│        │                │                  │         │
+│  ┌─────┴────────────────┴──────────────────┴───────┐ │
+│  │              Hive Server (backend)              │ │
+│  │  Auth (OAuth/API keys) · Token lifecycle        │ │
+│  │  Agent deployment · Workspace management        │ │
+│  └─────────────────────┬───────────────────────────┘ │
+│                        │                              │
+│                  WS + REST API                        │
+│                        │                              │
+│  ┌─────────────────────┴───────────────────────────┐ │
+│  │           Room Server (bundled)                  │ │
+│  │  Broker · Plugins · Message routing · Persistence│ │
+│  └─────────────────────────────────────────────────┘ │
+└──────────────────────────────────────────────────────┘
+```
 
-Hive does not replace room — it orchestrates it. Every Hive feature is built on
-top of existing room primitives:
+The deployment unit is a **Hive instance** that bundles a room server scoped
+to it. Room handles real-time collaboration. Hive handles everything else.
 
-| Hive concept | Built on |
-|---|---|
-| Workspace | Daemon multi-room + UserRegistry |
-| Team | Agent personalities + /spawn + room subscriptions |
-| Task board | /taskboard plugin + room messages |
-| Agent discovery | /who + /stats + agent status tracking |
-| Multi-room view | room poll --rooms + subscription tiers |
+## Separation of concerns
 
-Hive never bypasses room's socket protocol. All communication flows through the
-broker. Hive is a client-side experience layer, not a new server.
+| Domain | Owner | Examples |
+|---|---|---|
+| Real-time messaging | room | Broker, fan-out, NDJSON persistence, chat history |
+| Plugins | room | /taskboard, /queue, /help, /stats — single definition generates CLI + slash + WS interfaces |
+| Agent behavior | room-ralph | Prompt building, context monitoring, Claude interaction, restart on exhaustion |
+| UI | Hive | Web dashboard, workspace views, task boards, agent status panels |
+| Authentication | Hive | OAuth, API keys, user accounts — maps to room tokens internally |
+| Billing/metering | Hive | Per-agent cost tracking (cloud API and local model agents), per-team rollups |
+| Agent deployment | Hive | Clone repos, set up workdirs, spawn agents, monitor lifecycle |
+| Token lifecycle | Hive | Calls `room join` to mint tokens, stores them, passes to agents on spawn |
+| Workspace management | Hive | Groups of rooms, team rosters, cross-room views |
 
 ## Design principles
 
-1. **room stays simple.** Hive adds features as plugins, CLI wrappers, and UI
-   components — not by modifying broker internals.
+1. **Room stays generic.** Room is infrastructure — it does not know about Hive,
+   billing, or agent deployment. Hive-specific features are built as plugins or
+   in the Hive server, never by modifying broker internals.
 
-2. **Agents are users.** Hive treats AI agents and human users identically at the
-   protocol level. A spawned agent joins via `room join`, subscribes via
-   `room subscribe`, and communicates via `room send`. The distinction is in the
-   management layer (spawn, stop, monitor), not the protocol.
+2. **Plugins are the extension points.** A single plugin definition generates
+   three interfaces: CLI subcommand (`room <plugin> <action>`), in-room slash
+   command (`/<plugin> <action>`), and WS/REST endpoint. Room dispatches all
+   three to the same handler via `CommandContext`. Hive consumes the WS/REST
+   interface.
 
-3. **Rooms are boundaries.** Each room is an independent coordination context.
-   Cross-room coordination happens via agents subscribed to multiple rooms, not
-   via server-side room linking.
+3. **Agents are users at the protocol level.** Hive treats AI agents and humans
+   identically in the room wire format. An agent joins via token, subscribes to
+   rooms, sends messages, and receives broadcasts. The distinction is in Hive's
+   management layer (spawn, stop, monitor, bill), not in room's protocol.
 
-4. **Progressive disclosure.** A user running `room myroom alice` today should
-   get value immediately. Hive features like teams, workspaces, and agent
-   discovery are additive — they enhance the experience without requiring
-   migration.
+4. **No compile-time dependency on room-cli.** Hive talks to room via WS and
+   REST only. It may depend on `room-protocol` for message types, but never
+   imports broker internals or transport code.
+
+5. **WS is the primary transport.** WebSocket provides persistent bidirectional
+   streaming — Hive connects once and receives messages in real-time. REST is
+   secondary, used for stateless operations (health checks, one-off queries,
+   admin actions from the web UI).
+
+## Transport: room as infrastructure
+
+Hive communicates with its bundled room server over WebSocket:
+
+```
+Hive Server  ──[WS]──►  Room Broker (ws://localhost:<port>/ws/<room_id>)
+             ──[REST]──► Room Broker (http://localhost:<port>/api/...)
+```
+
+The current WS transport handles one room per connection. For Hive managing
+multiple rooms, future work includes a multiplexed WS endpoint at the daemon
+level with `room_id` in the message envelope, eliminating the need for N
+separate connections.
+
+### Plugin responses
+
+Plugins currently emit human-readable system messages. Hive needs
+machine-readable responses. A structured JSON `data` field alongside the
+human-readable `content` will allow Hive to parse task state, queue contents,
+and other plugin data programmatically without scraping chat text.
 
 ## PRDs in this folder
 
 | Document | Status | Summary |
 |---|---|---|
-| [prd-workspace.md](prd-workspace.md) | Draft | Multi-room workspace concept, team management |
-| [prd-team-provisioning.md](prd-team-provisioning.md) | Draft | /team create, agent manifests, ephemeral teams |
-| [prd-agent-discovery.md](prd-agent-discovery.md) | Draft | Expertise indexing, agent reputation, skill matching |
+| [prd-workspace.md](prd-workspace.md) | Draft | Workspace concept: room grouping, team rosters, cross-room views |
+| [prd-team-provisioning.md](prd-team-provisioning.md) | Draft | Agent team manifests, spawn/stop/scale, billing integration |
+| [prd-agent-discovery.md](prd-agent-discovery.md) | Draft | Expertise indexing, capacity tracking, skill matching |
 
-## Dependencies on room features
-
-Hive depends on several room features that are in various stages of readiness:
+## Room features Hive depends on
 
 | Feature | Status | Hive dependency |
 |---|---|---|
-| Multi-room daemon | Shipped (v3) | Required for workspaces |
-| UserRegistry | Shipped (v3) | Required for cross-room identity |
-| /spawn + personalities | In progress (#434, #439) | Required for team provisioning |
-| /taskboard | In progress (#444) | Required for task management |
-| Subscription tiers | Shipped (v3) | Required for multi-room views |
-| Agent status tracking | Shipped (v3) | Required for agent discovery |
+| Multi-room daemon | Shipped (v3) | Hive bundles a daemon instance |
+| UserRegistry | Shipped (v3) | Cross-room identity |
+| WS + REST transport | Shipped (v3) | Primary communication channel |
+| /taskboard plugin | Shipped (v3) | Task lifecycle management |
+| /queue plugin | Shipped (v3) | Backlog management |
+| Subscription tiers | Shipped (v3) | Per-room message filtering |
+| Agent status tracking | Shipped (v3) | Capacity and status views |
+| Token persistence | Shipped (v3) | Tokens survive broker restarts |
 
-## Open questions for joao
+## Hive-readiness gaps in room
 
-1. **Should Hive be a separate binary or part of `room`?** Current assumption:
-   Hive commands are subcommands of `room` (e.g. `room hive workspace create`).
-   A separate `hive` binary adds deployment complexity but cleaner separation.
+These room-side improvements would benefit Hive but are not blockers for
+initial development:
 
-2. **Web UI or CLI-only?** These PRDs assume CLI-first. A web dashboard (reading
-   room state via REST API) is a natural next step but not scoped here.
+| Gap | Description | Priority |
+|---|---|---|
+| WS multiplexing | Single connection with room_id in envelope (daemon-level) | High |
+| Structured plugin responses | JSON `data` field alongside human text | High |
+| Plugin trait decoupling (#454) | Move Plugin trait to room-protocol or room-plugin crate | Medium |
+| read_line size limit (#470) | Bound incoming message size to prevent OOM | Medium |
+| WS bind address (#455-MED-2) | Default to 127.0.0.1 instead of 0.0.0.0 | Low |
 
-3. **Multi-host support?** Room daemon is currently single-host. Hive workspaces
-   spanning multiple hosts would require WebSocket relay between daemons. Is this
-   a near-term goal or future aspiration?
+## Decisions made (2026-03-12)
 
-4. **Billing/metering?** If agents consume API credits (Claude API calls), should
-   Hive track per-agent or per-team costs? This affects the /stats plugin design.
+These questions from the original PRDs have been answered by joao:
+
+1. **Hive is a separate web/native app**, not a CLI tool or room subcommand.
+2. **Web UI, not CLI.** Hive's interface is a web dashboard or native app.
+3. **Hive owns token lifecycle.** Room's existing join/validate flow is
+   sufficient — Hive calls `room join` to mint tokens and manages them in its
+   own database.
+4. **Agent lifecycle is its own domain** within Hive — managing clones,
+   workdirs, spawning agents. Whether this becomes a separate crate is an
+   implementation decision deferred to development phase.
+5. **Billing tracks per-agent costs in detail**, including mixed local model
+   and cloud API agents.
+6. **Multi-host is future aspiration**, not near-term. WS relay between
+   daemons would be needed but is not scoped.
+7. **Single plugin definition generates all interfaces** — CLI + slash + WS.
+   This is a joao directive for room's plugin framework.

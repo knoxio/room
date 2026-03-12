@@ -1,191 +1,156 @@
 # PRD: Hive Workspaces
 
-> Status: Draft
-> Author: r2d2
+> Status: Draft (revised)
+> Author: r2d2 (original), saphire (revised)
 > Date: 2026-03-12
-> Dependencies: daemon multi-room (shipped), UserRegistry (shipped), /taskboard (#444)
+> Dependencies: daemon multi-room (shipped), UserRegistry (shipped), /taskboard (shipped)
 
 ## Problem
 
-Today, managing multiple rooms requires running separate `room` commands per room
-or a daemon with manual `room create` / `room subscribe` invocations. There is no
-concept of a "workspace" — a named collection of rooms with shared configuration,
-team membership, and a unified view of activity across rooms.
-
-For a team running 5-10 rooms (one per feature, one for triage, one for CI
-notifications), the cognitive overhead of subscribing to the right rooms, tracking
-which agent is in which room, and finding messages across rooms is significant.
+Teams running multiple rooms (one per feature, one for triage, one for CI
+notifications) face cognitive overhead: tracking which agent is in which room,
+finding messages across rooms, and managing subscriptions. There is no unified
+"workspace" concept that groups rooms with shared configuration and team
+membership.
 
 ## Goal
 
-Provide a **workspace** abstraction that groups rooms, manages cross-room
-subscriptions, and gives users a single entry point for multi-room workflows.
+Provide a **workspace** abstraction within Hive that groups rooms, manages
+team membership, and gives users a unified view of activity across rooms.
 
 ## Non-goals
 
-- Replacing the daemon — workspaces are a layer on top of daemon rooms.
-- Cross-host workspaces (see open questions).
+- Replacing the room daemon — workspaces are a Hive-level concept layered on
+  daemon rooms.
+- Cross-host workspaces (future aspiration — requires WS relay).
 - Room-level ACLs beyond what room already supports.
 
 ---
 
+## Architecture
+
+Workspaces are a **Hive server concept**, not a room concept. Room has no
+knowledge of workspaces — it only knows about individual rooms and their
+subscribers. Hive maintains workspace state in its own database and
+translates workspace operations into room API calls.
+
+```
+Hive Web UI                    Hive Server                Room Daemon
+┌──────────────┐               ┌──────────────┐           ┌──────────┐
+│ Workspace    │──[HTTP/WS]──► │ Workspace    │──[WS]───► │ Room A   │
+│   Dashboard  │               │   Manager    │──[WS]───► │ Room B   │
+│              │               │              │──[REST]──► │ Room C   │
+└──────────────┘               └──────────────┘           └──────────┘
+```
+
 ## User flows
+
+All interactions happen through Hive's web UI or native app. There are no
+CLI commands — Hive is not a CLI tool.
 
 ### 1. Create a workspace
 
-```bash
-room hive workspace create sprint-12 \
-  --rooms triage,feature-auth,feature-taskboard,ci-notifications \
-  --default-room triage
-```
+The user opens Hive's web dashboard, creates a workspace named "sprint-12",
+and selects which rooms to include. Hive:
 
-This:
-1. Ensures all listed rooms exist in the daemon (creates missing ones).
-2. Stores workspace metadata in `~/.room/workspaces/sprint-12.toml`.
-3. Auto-subscribes the user to all listed rooms.
+1. Ensures all listed rooms exist in the bundled room daemon (creates missing
+   ones via REST `POST /api/<room>/create`).
+2. Stores workspace metadata in Hive's database.
+3. Auto-subscribes the user to all listed rooms via room's subscribe API.
 
-```toml
-# ~/.room/workspaces/sprint-12.toml
-[workspace]
-name = "sprint-12"
-default_room = "triage"
-rooms = ["triage", "feature-auth", "feature-taskboard", "ci-notifications"]
-created_at = "2026-03-12T10:00:00Z"
-```
+### 2. Workspace dashboard
 
-### 2. Join a workspace
-
-```bash
-room hive workspace join sprint-12
-```
-
-Reads the workspace TOML, subscribes the user to all rooms, and opens the TUI
-with the default room selected. The room list in the TUI sidebar shows only
-workspace rooms (not all daemon rooms).
-
-### 3. Multi-room view
-
-```bash
-room hive inbox
-# or within TUI: /inbox
-```
-
-Shows recent messages from all workspace rooms, merged by timestamp:
+The workspace view shows a unified timeline of messages from all workspace
+rooms, merged by timestamp:
 
 ```
-[triage]          ba: sprint 12 scorecard updated
-[feature-auth]    saphire: PR #445 merged
+[triage]           ba: sprint 12 scorecard updated
+[feature-auth]     saphire: PR #445 merged
 [ci-notifications] ci-bot: all checks passed on master
-[triage]          joao: @r2d2 pick up #435
+[triage]           joao: @r2d2 pick up #435
 ```
 
-This is a read-only view. To reply, the user switches to the specific room.
+Implementation: Hive maintains WS connections to each workspace room (or a
+single multiplexed connection once room supports it) and merges the streams
+in real-time.
 
-Implementation: uses `room poll --rooms <list>` under the hood.
+### 3. Room switching
+
+From the workspace view, the user clicks on a room name to enter that room's
+dedicated view. The room view shows full chat history, member list, and
+allows sending messages — all via room's WS transport.
 
 ### 4. Add/remove rooms
 
-```bash
-room hive workspace add-room sprint-12 hotfix-queue
-room hive workspace remove-room sprint-12 ci-notifications
-```
-
-Updates the TOML and adjusts subscriptions.
+The workspace settings panel allows adding or removing rooms. Hive updates
+its database and adjusts room subscriptions accordingly.
 
 ### 5. Archive a workspace
 
-```bash
-room hive workspace archive sprint-12
-```
-
-Unsubscribes from all rooms, moves the TOML to `~/.room/workspaces/archive/`.
-Rooms are not destroyed — they persist in the daemon with their history.
+Archiving a workspace unsubscribes users from all rooms and hides the
+workspace from the active list. Rooms are not destroyed — they persist in
+the daemon with their history.
 
 ---
 
 ## Team management within workspaces
 
-Each workspace can have a **team roster** — named users and agents assigned to it.
-The roster is informational (it does not enforce access control) but drives:
+Each workspace has a **team roster** — named users and agents assigned to it.
 
-- Default agent spawning: `room hive team spawn sprint-12` spawns all agents
-  defined in the team manifest (see prd-team-provisioning.md).
-- Status dashboard: `room hive team status sprint-12` shows the status of every
-  team member across all workspace rooms.
-- Notifications: `room hive team notify sprint-12 "standup in 5"` sends a message
-  to each team member via their subscribed room.
-
-```toml
-# Added to workspace TOML
-[team]
-members = ["joao", "ba", "r2d2", "saphire", "bumblebee"]
-```
+- **Status dashboard**: the workspace view shows each team member's status
+  across all workspace rooms (pulled from room's `/who` and status data via
+  WS).
+- **Agent spawning**: the workspace provides a "spawn team" action that
+  provisions agents according to a team manifest (see prd-team-provisioning.md).
+- **Notifications**: Hive can broadcast a message to all team members via
+  their subscribed rooms.
 
 ---
 
 ## Data model
 
-### Workspace file
+### Hive database (not room)
 
-Location: `~/.room/workspaces/<name>.toml`
+Workspace state lives in Hive's database — not in room's filesystem or
+NDJSON files. This includes:
 
-```toml
-[workspace]
-name = "sprint-12"
-default_room = "triage"
-rooms = ["triage", "feature-auth", "feature-taskboard"]
-created_at = "2026-03-12T10:00:00Z"
+- Workspace name, creation date, archived status
+- List of room IDs in the workspace
+- Team roster (user/agent names, roles)
+- Active workspace per user (last used)
 
-[team]
-members = ["joao", "ba", "r2d2", "saphire"]
-```
-
-### Workspace registry
-
-Location: `~/.room/workspaces/registry.json`
-
-```json
-{
-  "active": "sprint-12",
-  "workspaces": ["sprint-12", "sprint-11"]
-}
-```
-
-The `active` field tracks the last-used workspace for commands that don't specify
-one explicitly.
+Room's data model is unchanged. Room only knows about individual rooms,
+subscribers, and messages.
 
 ---
 
-## Dependencies on room features
+## Room features used
 
-| Feature | Status | How workspace uses it |
+| Feature | Status | How Hive uses it |
 |---|---|---|
 | Daemon multi-room | Shipped | Workspace rooms are daemon rooms |
-| room create / destroy | Shipped | Workspace create ensures rooms exist |
+| room create / destroy | Shipped | Workspace create ensures rooms exist (via REST) |
 | room subscribe | Shipped | Workspace join subscribes to all rooms |
-| room poll --rooms | Shipped | Multi-room inbox view |
+| WS streaming | Shipped | Real-time message feed for workspace view |
+| REST poll/query | Shipped | History and search across workspace rooms |
 | UserRegistry | Shipped | Cross-room identity for team roster |
-| /taskboard (#444) | In progress | Task tracking across workspace rooms |
-| Subscription persistence (#438) | In progress | Survives broker restarts |
+| /taskboard | Shipped | Task tracking across workspace rooms |
+| Subscription persistence | Shipped | Survives broker restarts |
 
 ---
 
-## Open questions for joao
+## Resolved questions
 
-1. **Should workspaces be shared or personal?** Current proposal: personal
-   (each user has their own `~/.room/workspaces/`). Shared workspaces would
-   require storing the TOML in the daemon's data directory and broadcasting
-   changes.
+1. **Workspaces are shared, managed by Hive.** Since Hive is a server, workspace
+   state is centralized in Hive's database — not per-user local TOML files.
+   All team members see the same workspace configuration.
 
-2. **Should workspace rooms auto-create on workspace create?** Current proposal:
-   yes — `workspace create` calls `room create` for any listed room that doesn't
-   exist. Alternative: require rooms to exist first (fail-fast).
+2. **Workspace rooms auto-create.** When a workspace is created, Hive ensures
+   all listed rooms exist in the daemon, creating any that are missing.
 
-3. **TUI integration depth.** Options:
-   - (a) Workspace-aware sidebar (show only workspace rooms, grouped).
-   - (b) Full workspace TUI mode (tabs per room, unified notification).
-   - (c) CLI-only for v1, TUI later.
+3. **Web UI, not TUI.** Hive provides a web dashboard. The room TUI remains
+   independently useful for direct room access but is not part of Hive.
 
-4. **Workspace-scoped taskboard.** Should `/taskboard` commands be workspace-wide
-   (tasks visible across all rooms) or per-room? Per-room is simpler but
-   fragments task tracking.
+4. **Taskboard scope.** Per-room taskboards remain the default (room is
+   generic). Hive's web UI can aggregate taskboard data across workspace rooms
+   by querying each room's `/taskboard list` response.
