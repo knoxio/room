@@ -12,6 +12,7 @@ use crate::{
 
 use super::{
     admin::{handle_admin_cmd, ADMIN_CMD_NAMES},
+    auth::check_join_permission,
     fanout::broadcast_and_persist,
     state::RoomState,
 };
@@ -167,6 +168,14 @@ pub(crate) async fn route_command(
 
         // Subscription commands.
         if cmd == "subscribe" || cmd == "set_subscription" {
+            // Reject subscriptions from users who cannot join this room.
+            // Without this guard, non-participants could subscribe to DM rooms
+            // and read regular messages through the poll path (#491).
+            if let Err(reason) = check_join_permission(username, state.config.as_ref()) {
+                let sys = make_system(&state.room_id, "broker", reason);
+                let json = serde_json::to_string(&sys)?;
+                return Ok(CommandResult::Reply(json));
+            }
             let tier_str = params.first().map(String::as_str).unwrap_or("full");
             let tier: SubscriptionTier = match tier_str.parse() {
                 Ok(t) => t,
@@ -1364,6 +1373,102 @@ mod tests {
         let history = std::fs::read_to_string(tmp.path()).unwrap();
         assert!(history.contains("unsubscribed"));
         assert!(history.contains("alice"));
+    }
+
+    // ── subscribe join-permission guard (#491) ─────────────────────────
+
+    #[tokio::test]
+    async fn subscribe_dm_room_participant_allowed() {
+        let tmp = NamedTempFile::new().unwrap();
+        let config = room_protocol::RoomConfig::dm("alice", "bob");
+        let state = make_state_with_config(tmp.path().to_path_buf(), config);
+        let msg = make_command("test-room", "alice", "subscribe", vec![]);
+        let result = route_command(msg, "alice", &state).await.unwrap();
+        assert!(
+            matches!(result, CommandResult::HandledWithReply(_)),
+            "DM participant should be allowed to subscribe"
+        );
+        assert_eq!(
+            state.subscription_map.lock().await.get("alice").copied(),
+            Some(SubscriptionTier::Full),
+        );
+    }
+
+    #[tokio::test]
+    async fn subscribe_dm_room_non_participant_rejected() {
+        let tmp = NamedTempFile::new().unwrap();
+        let config = room_protocol::RoomConfig::dm("alice", "bob");
+        let state = make_state_with_config(tmp.path().to_path_buf(), config);
+        let msg = make_command("test-room", "eve", "subscribe", vec![]);
+        let result = route_command(msg, "eve", &state).await.unwrap();
+        let CommandResult::Reply(json) = result else {
+            panic!("expected Reply (rejection) for non-participant");
+        };
+        assert!(
+            json.contains("permission denied"),
+            "should contain permission denied, got: {json}"
+        );
+        assert!(
+            state.subscription_map.lock().await.get("eve").is_none(),
+            "non-participant must not get a subscription entry"
+        );
+    }
+
+    #[tokio::test]
+    async fn subscribe_private_room_non_invited_rejected() {
+        let tmp = NamedTempFile::new().unwrap();
+        let config = room_protocol::RoomConfig {
+            visibility: room_protocol::RoomVisibility::Private,
+            max_members: None,
+            invite_list: ["alice".to_owned()].into(),
+            created_by: "owner".to_owned(),
+            created_at: "2026-01-01T00:00:00Z".to_owned(),
+        };
+        let state = make_state_with_config(tmp.path().to_path_buf(), config);
+        let msg = make_command("test-room", "stranger", "subscribe", vec![]);
+        let result = route_command(msg, "stranger", &state).await.unwrap();
+        let CommandResult::Reply(json) = result else {
+            panic!("expected Reply (rejection)");
+        };
+        assert!(json.contains("permission denied"));
+        assert!(state
+            .subscription_map
+            .lock()
+            .await
+            .get("stranger")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn subscribe_public_room_always_allowed() {
+        let tmp = NamedTempFile::new().unwrap();
+        let config = room_protocol::RoomConfig::public("owner");
+        let state = make_state_with_config(tmp.path().to_path_buf(), config);
+        let msg = make_command("test-room", "anyone", "subscribe", vec![]);
+        let result = route_command(msg, "anyone", &state).await.unwrap();
+        assert!(
+            matches!(result, CommandResult::HandledWithReply(_)),
+            "public room subscribe should succeed"
+        );
+    }
+
+    #[tokio::test]
+    async fn set_subscription_alias_dm_guard_applies() {
+        let tmp = NamedTempFile::new().unwrap();
+        let config = room_protocol::RoomConfig::dm("alice", "bob");
+        let state = make_state_with_config(tmp.path().to_path_buf(), config);
+        // set_subscription is an alias for subscribe — guard must apply
+        let msg = make_command(
+            "test-room",
+            "eve",
+            "set_subscription",
+            vec!["full".to_owned()],
+        );
+        let result = route_command(msg, "eve", &state).await.unwrap();
+        let CommandResult::Reply(json) = result else {
+            panic!("expected Reply (rejection) for non-participant via alias");
+        };
+        assert!(json.contains("permission denied"));
     }
 
     // ── subscription persistence ─────────────────────────────────────────
