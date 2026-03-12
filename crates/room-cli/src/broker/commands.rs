@@ -104,24 +104,6 @@ pub(crate) async fn route_command(
             }
         }
 
-        if cmd == "set_status" {
-            let status = params.join(" ");
-            state.set_status(username, status.clone()).await;
-            let display = if status.is_empty() {
-                format!("{username} cleared their status")
-            } else {
-                format!("{username} set status: {status}")
-            };
-            let sys = make_system(&state.room_id, "broker", display);
-            broadcast_and_persist(&sys, &state.clients, &state.chat_path, &state.seq_counter)
-                .await?;
-            // Broadcast already delivers to all interactive clients. One-shot callers are not
-            // subscribed to the broadcast channel, so we carry the JSON in HandledWithReply so
-            // handle_oneshot_send can write it back — preventing the EOF parse error.
-            let json = serde_json::to_string(&sys)?;
-            return Ok(CommandResult::HandledWithReply(json));
-        }
-
         if cmd == "who" {
             let entries: Vec<String> = state
                 .status_entries()
@@ -408,6 +390,20 @@ async fn dispatch_plugin(
             CommandResult::HandledWithReply(json)
         }
         PluginResult::Handled => CommandResult::Handled,
+        PluginResult::SetStatus(status) => {
+            state.set_status(username, status.clone()).await;
+            let display = if status.is_empty() {
+                format!("{username} cleared their status")
+            } else {
+                format!("{username} set status: {status}")
+            };
+            let sys = make_system(&state.room_id, "broker", display);
+            let seq_msg =
+                broadcast_and_persist(&sys, &state.clients, &state.chat_path, &state.seq_counter)
+                    .await?;
+            let json = serde_json::to_string(&seq_msg)?;
+            CommandResult::HandledWithReply(json)
+        }
     })
 }
 

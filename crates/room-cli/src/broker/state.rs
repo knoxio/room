@@ -129,6 +129,9 @@ impl RoomState {
         plugins
             .register(Box::new(crate::plugin::stats::StatsPlugin))
             .map_err(|e| format!("plugin error: {e}"))?;
+        plugins
+            .register(Box::new(crate::plugin::status::StatusPlugin))
+            .map_err(|e| format!("plugin error: {e}"))?;
         let taskboard_path =
             crate::plugin::taskboard::TaskboardPlugin::taskboard_path_from_chat(&chat_path);
         plugins

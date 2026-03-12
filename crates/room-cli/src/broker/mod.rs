@@ -82,6 +82,7 @@ impl Broker {
         let mut registry = PluginRegistry::new();
         registry.register(Box::new(plugin::help::HelpPlugin))?;
         registry.register(Box::new(plugin::stats::StatsPlugin))?;
+        registry.register(Box::new(plugin::status::StatusPlugin))?;
 
         // Load persisted state from a previous broker session (if any).
         let persisted_tokens = auth::load_token_map(&self.token_map_path);

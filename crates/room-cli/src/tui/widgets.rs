@@ -469,9 +469,9 @@ mod tests {
             p.filtered.len()
         );
         let first_cmd = &p.commands[p.filtered[0]].cmd;
-        assert_eq!(
-            first_cmd, "set_status",
-            "first match should be 'set_status' (prefix), not '{first_cmd}'"
+        assert!(
+            first_cmd.starts_with("se"),
+            "first match should be a 'se' prefix match, not '{first_cmd}'"
         );
         let prefix_count = p
             .filtered

@@ -1,6 +1,7 @@
 pub mod help;
 pub mod queue;
 pub mod stats;
+pub mod status;
 pub mod taskboard;
 
 use std::{
@@ -155,6 +156,12 @@ pub enum PluginResult {
     Broadcast(String),
     /// Command handled silently (side effects already done via [`ChatWriter`]).
     Handled,
+    /// Update the sender's status in the broker's status map, then broadcast.
+    ///
+    /// The broker handles the `status_map` write and broadcasts
+    /// `"{username} set status: {status}"` (or `"{username} cleared their status"`
+    /// if empty). Plugins never touch `StatusMap` directly.
+    SetStatus(String),
 }
 
 // ── HistoryReader ───────────────────────────────────────────────────────────
@@ -329,7 +336,6 @@ impl RoomMetadata {
 
 /// Built-in command names that plugins may not override.
 const RESERVED_COMMANDS: &[&str] = &[
-    "set_status",
     "who",
     "kick",
     "reauth",
@@ -512,17 +518,6 @@ pub fn builtin_command_infos() -> Vec<CommandInfo> {
             ],
         },
         CommandInfo {
-            name: "set_status".to_owned(),
-            description: "Set your presence status".to_owned(),
-            usage: "/set_status <status>".to_owned(),
-            params: vec![ParamSchema {
-                name: "status".to_owned(),
-                param_type: ParamType::Text,
-                required: false,
-                description: "Status text (omit to clear)".to_owned(),
-            }],
-        },
-        CommandInfo {
             name: "who".to_owned(),
             description: "List users in the room".to_owned(),
             usage: "/who".to_owned(),
@@ -620,6 +615,7 @@ pub fn all_known_commands() -> Vec<CommandInfo> {
     cmds.extend(help::HelpPlugin.commands());
     cmds.extend(queue::QueuePlugin::default_commands());
     cmds.extend(stats::StatsPlugin.commands());
+    cmds.extend(status::StatusPlugin.commands());
     cmds.extend(taskboard::TaskboardPlugin::default_commands());
     cmds
 }
@@ -858,7 +854,6 @@ mod tests {
             "unclaim",
             "claimed",
             "reply",
-            "set_status",
             "who",
             "kick",
             "reauth",
@@ -895,14 +890,6 @@ mod tests {
         assert_eq!(kick.params.len(), 1);
         assert_eq!(kick.params[0].param_type, ParamType::Username);
         assert!(kick.params[0].required);
-    }
-
-    #[test]
-    fn builtin_command_infos_set_status_is_optional() {
-        let cmds = builtin_command_infos();
-        let ss = cmds.iter().find(|c| c.name == "set_status").unwrap();
-        assert_eq!(ss.params.len(), 1);
-        assert!(!ss.params[0].required);
     }
 
     #[test]
