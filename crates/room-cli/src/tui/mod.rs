@@ -579,7 +579,8 @@ pub async fn run(
 
             if !has_chat {
                 let splash_width = msg_chunk.width.saturating_sub(2) as usize;
-                let splash = welcome_splash(frame_count, splash_width, splash_seed);
+                let splash_height = msg_chunk.height.saturating_sub(2) as usize;
+                let splash = welcome_splash(frame_count, splash_width, splash_height, splash_seed);
                 let splash_widget = Paragraph::new(splash)
                     .block(
                         Block::default()

@@ -280,11 +280,19 @@ fn bot_row(parts: &BotParts, row: usize, frame: usize) -> (String, Style) {
 /// for every slot — the same session always looks the same, but two sessions
 /// are almost certainly different.
 ///
+/// The splash is vertically centered within `height` rows: empty lines are
+/// prepended so the content block sits in the middle of the available area.
+///
 /// Bot count adapts to `width`:
 ///   < 55  → 1 bot
 ///   55–99 → 3 bots
 ///   ≥ 100 → 5 bots
-pub(super) fn welcome_splash(frame: usize, width: usize, seed: u64) -> Text<'static> {
+pub(super) fn welcome_splash(
+    frame: usize,
+    width: usize,
+    height: usize,
+    seed: u64,
+) -> Text<'static> {
     let bot_count: usize = if width >= 100 {
         5
     } else if width >= 55 {
@@ -304,7 +312,10 @@ pub(super) fn welcome_splash(frame: usize, width: usize, seed: u64) -> Text<'sta
     // Total display width of the bot group.
     let group_width = bot_count * 9 + bot_count.saturating_sub(1) * GAP.len();
 
-    let mut lines: Vec<Line<'static>> = vec![Line::from("")]; // top padding
+    // Content: 6 bot rows + 1 blank + 1 label + 1 blank + 1 tagline + 1 version = 11 lines.
+    const CONTENT_LINES: usize = 11;
+    let top_pad = height.saturating_sub(CONTENT_LINES) / 2;
+    let mut lines: Vec<Line<'static>> = (0..top_pad.max(1)).map(|_| Line::from("")).collect();
 
     for row in 0..6 {
         let pad = " ".repeat(width.saturating_sub(group_width) / 2);
@@ -364,7 +375,7 @@ mod tests {
     use super::*;
 
     fn splash_text(frame: usize, width: usize) -> String {
-        welcome_splash(frame, width, 0)
+        welcome_splash(frame, width, 40, 0)
             .lines
             .iter()
             .flat_map(|line| line.spans.iter().map(|s| s.content.to_string()))
@@ -407,7 +418,7 @@ mod tests {
 
     #[test]
     fn welcome_splash_has_more_lines_than_logo() {
-        let text = welcome_splash(0, 60, 0);
+        let text = welcome_splash(0, 60, 40, 0);
         // 1 vpad + 6 bot rows + 1 blank + 1 label + 1 blank + 1 tagline + 1 version = 12
         assert!(
             text.lines.len() >= 11,
@@ -421,7 +432,7 @@ mod tests {
         // width=40 < 55 → 1 bot → no inter-bot GAP spans ("   ") should exist.
         // Padding for this width is (40-9)/2 = 15 spaces, which is never confused
         // with the 3-space GAP constant.
-        let text = welcome_splash(0, 40, 42);
+        let text = welcome_splash(0, 40, 40, 42);
         let has_gap_span = text
             .lines
             .iter()
@@ -435,7 +446,7 @@ mod tests {
     #[test]
     fn welcome_splash_three_bots_at_medium_width() {
         // width=80 → 3 bots; all 3 bottom-border rows should appear in the same line
-        let text = welcome_splash(0, 80, 99);
+        let text = welcome_splash(0, 80, 40, 99);
         // Row 5 is the bottom border line; we should have 2 GAP spans in it
         let bottom_row = text.lines.iter().find(|line| {
             let raw: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
@@ -449,7 +460,7 @@ mod tests {
     fn welcome_splash_seed_produces_variety() {
         // Two different seeds should produce different bot faces.
         let a = splash_text(0, 80);
-        let b = welcome_splash(0, 80, 9999999999)
+        let b = welcome_splash(0, 80, 40, 9999999999)
             .lines
             .iter()
             .flat_map(|line| line.spans.iter().map(|s| s.content.to_string()))
@@ -458,6 +469,38 @@ mod tests {
         assert_ne!(
             a, b,
             "different seeds should (almost always) produce different bots"
+        );
+    }
+
+    #[test]
+    fn welcome_splash_vertically_centered() {
+        // Content is 11 lines. With height=31, top padding = (31-11)/2 = 10 empty lines.
+        let text = welcome_splash(0, 60, 31, 0);
+        let leading_empty = text
+            .lines
+            .iter()
+            .take_while(|line| {
+                line.spans.is_empty() || line.spans.iter().all(|s| s.content.trim().is_empty())
+            })
+            .count();
+        assert_eq!(
+            leading_empty, 10,
+            "should have 10 leading blank lines for height=31"
+        );
+    }
+
+    #[test]
+    fn welcome_splash_small_height_has_min_one_pad() {
+        // When height < content lines, still get at least 1 top padding line.
+        let text = welcome_splash(0, 60, 5, 0);
+        let first_empty = text
+            .lines
+            .first()
+            .map(|l| l.spans.is_empty() || l.spans.iter().all(|s| s.content.trim().is_empty()))
+            .unwrap_or(false);
+        assert!(
+            first_empty,
+            "should have at least 1 blank padding line even when height is small"
         );
     }
 }
