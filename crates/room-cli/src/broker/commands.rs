@@ -169,8 +169,13 @@ pub(crate) async fn route_command(
             let content = if raw.is_empty() {
                 "no active claims".to_owned()
             } else {
-                let entries: Vec<String> =
-                    raw.into_iter().map(|(u, t)| format!("{u}: {t}")).collect();
+                let entries: Vec<String> = raw
+                    .into_iter()
+                    .map(|(u, t, elapsed)| {
+                        let mins = elapsed.as_secs() / 60;
+                        format!("{u}: {t} ({mins}m ago)")
+                    })
+                    .collect();
                 format!("claimed — {}", entries.join(", "))
             };
             let sys = make_system(&state.room_id, "broker", content);
@@ -1028,7 +1033,7 @@ mod tests {
                 .lock()
                 .await
                 .get("alice")
-                .map(String::as_str),
+                .map(|e| e.task.as_str()),
             Some("fix bug #42")
         );
     }
@@ -1047,7 +1052,7 @@ mod tests {
                 .lock()
                 .await
                 .get("alice")
-                .map(String::as_str),
+                .map(|e| e.task.as_str()),
             Some("task B"),
             "new claim should overwrite the old one"
         );
@@ -1057,11 +1062,7 @@ mod tests {
     async fn route_command_unclaim_removes_claim() {
         let tmp = NamedTempFile::new().unwrap();
         let state = make_state(tmp.path().to_path_buf());
-        state
-            .claim_map
-            .lock()
-            .await
-            .insert("alice".to_owned(), "task A".to_owned());
+        state.set_claim("alice", "task A".to_owned()).await;
         let msg = make_command("test-room", "alice", "unclaim", vec![]);
         let result = route_command(msg, "alice", &state).await.unwrap();
         let CommandResult::HandledWithReply(json) = result else {
@@ -1100,11 +1101,8 @@ mod tests {
     async fn route_command_claimed_shows_all_claims() {
         let tmp = NamedTempFile::new().unwrap();
         let state = make_state(tmp.path().to_path_buf());
-        {
-            let mut map = state.claim_map.lock().await;
-            map.insert("alice".to_owned(), "task A".to_owned());
-            map.insert("bob".to_owned(), "task B".to_owned());
-        }
+        state.set_claim("alice", "task A".to_owned()).await;
+        state.set_claim("bob", "task B".to_owned()).await;
         let msg = make_command("test-room", "alice", "claimed", vec![]);
         let result = route_command(msg, "alice", &state).await.unwrap();
         let CommandResult::Reply(json) = result else {
@@ -1112,17 +1110,16 @@ mod tests {
         };
         assert!(json.contains("alice: task A"));
         assert!(json.contains("bob: task B"));
+        // Should include elapsed time
+        assert!(json.contains("0m ago"), "should show elapsed time");
     }
 
     #[tokio::test]
     async fn route_command_claimed_is_sorted() {
         let tmp = NamedTempFile::new().unwrap();
         let state = make_state(tmp.path().to_path_buf());
-        {
-            let mut map = state.claim_map.lock().await;
-            map.insert("zara".to_owned(), "z-task".to_owned());
-            map.insert("alice".to_owned(), "a-task".to_owned());
-        }
+        state.set_claim("zara", "z-task".to_owned()).await;
+        state.set_claim("alice", "a-task".to_owned()).await;
         let msg = make_command("test-room", "alice", "claimed", vec![]);
         let CommandResult::Reply(json) = route_command(msg, "alice", &state).await.unwrap() else {
             panic!("expected Reply");

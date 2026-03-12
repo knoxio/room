@@ -25,9 +25,20 @@ pub(crate) type HostUser = Arc<Mutex<Option<String>>>;
 /// Cleared when the broker process exits; token files on disk survive restarts.
 pub(crate) type TokenMap = Arc<Mutex<HashMap<String, String>>>;
 
-/// Maps username → claimed task description. Ephemeral; cleared on broker exit.
+/// Default claim TTL: 30 minutes. Claims expire after this duration unless renewed.
+pub(crate) const CLAIM_TTL: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
+/// A single task claim with creation timestamp for lease-based expiry.
+#[derive(Debug, Clone)]
+pub(crate) struct ClaimEntry {
+    pub(crate) task: String,
+    pub(crate) claimed_at: std::time::Instant,
+}
+
+/// Maps username → claim entry. Ephemeral; cleared on broker exit.
 /// Users can hold at most one claim at a time (new claim replaces old).
-pub(crate) type ClaimMap = Arc<Mutex<HashMap<String, String>>>;
+/// Claims expire after [`CLAIM_TTL`] and are lazily swept on access.
+pub(crate) type ClaimMap = Arc<Mutex<HashMap<String, ClaimEntry>>>;
 
 /// Maps username → subscription tier for this room. Persisted as JSON at
 /// `~/.room/state/<room_id>.subscriptions` on every mutation; loaded on
@@ -175,23 +186,31 @@ impl RoomState {
     // ── claim_map accessors ───────────────────────────────────────────────────
 
     /// Record a task claim for `user`. Replaces any existing claim.
+    /// Stores the current timestamp for lease-based expiry.
     pub(crate) async fn set_claim(&self, user: &str, task: String) {
-        self.claim_map.lock().await.insert(user.to_owned(), task);
+        self.claim_map.lock().await.insert(
+            user.to_owned(),
+            ClaimEntry {
+                task,
+                claimed_at: std::time::Instant::now(),
+            },
+        );
     }
 
-    /// Remove and return a user's active claim, if any.
+    /// Remove and return a user's active claim task, if any.
     pub(crate) async fn remove_claim(&self, user: &str) -> Option<String> {
-        self.claim_map.lock().await.remove(user)
+        self.claim_map.lock().await.remove(user).map(|e| e.task)
     }
 
-    /// Return all (username, task) claim pairs, sorted by username.
-    pub(crate) async fn claim_entries(&self) -> Vec<(String, String)> {
-        let mut entries: Vec<(String, String)> = self
-            .claim_map
-            .lock()
-            .await
+    /// Sweep expired claims and return remaining (username, task, elapsed)
+    /// triples, sorted by username.
+    pub(crate) async fn claim_entries(&self) -> Vec<(String, String, std::time::Duration)> {
+        let mut map = self.claim_map.lock().await;
+        let now = std::time::Instant::now();
+        map.retain(|_, entry| now.duration_since(entry.claimed_at) < CLAIM_TTL);
+        let mut entries: Vec<(String, String, std::time::Duration)> = map
             .iter()
-            .map(|(u, t)| (u.clone(), t.clone()))
+            .map(|(u, e)| (u.clone(), e.task.clone(), now.duration_since(e.claimed_at)))
             .collect();
         entries.sort_by(|a, b| a.0.cmp(&b.0));
         entries
@@ -364,7 +383,10 @@ mod tests {
         state.set_claim("alice", "fix #42".to_owned()).await;
         let entries = state.claim_entries().await;
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0], ("alice".to_owned(), "fix #42".to_owned()));
+        assert_eq!(entries[0].0, "alice");
+        assert_eq!(entries[0].1, "fix #42");
+        // elapsed should be very small (just created)
+        assert!(entries[0].2.as_secs() < 2);
     }
 
     #[tokio::test]
@@ -393,6 +415,47 @@ mod tests {
         let entries = state.claim_entries().await;
         assert_eq!(entries[0].0, "alice");
         assert_eq!(entries[1].0, "bob");
+    }
+
+    #[tokio::test]
+    async fn claim_entries_sweeps_expired() {
+        let dir = TempDir::new().unwrap();
+        let state = make_state(&dir);
+        // Insert a claim with a backdated timestamp (expired)
+        {
+            let mut map = state.claim_map.lock().await;
+            map.insert(
+                "stale".to_owned(),
+                ClaimEntry {
+                    task: "old task".to_owned(),
+                    claimed_at: std::time::Instant::now()
+                        - CLAIM_TTL
+                        - std::time::Duration::from_secs(1),
+                },
+            );
+        }
+        // Also insert a fresh claim
+        state.set_claim("fresh", "new task".to_owned()).await;
+        let entries = state.claim_entries().await;
+        assert_eq!(entries.len(), 1, "expired claim should be swept");
+        assert_eq!(entries[0].0, "fresh");
+    }
+
+    #[tokio::test]
+    async fn claim_reclaim_by_owner_resets_timestamp() {
+        let dir = TempDir::new().unwrap();
+        let state = make_state(&dir);
+        state.set_claim("alice", "task A".to_owned()).await;
+        // Re-claim should replace entry
+        state.set_claim("alice", "task B".to_owned()).await;
+        let entries = state.claim_entries().await;
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].1, "task B");
+    }
+
+    #[tokio::test]
+    async fn claim_ttl_is_30_minutes() {
+        assert_eq!(CLAIM_TTL, std::time::Duration::from_secs(30 * 60));
     }
 
     // ── subscription_map accessors ────────────────────────────────────────────
