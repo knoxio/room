@@ -168,12 +168,12 @@ All writes go through `history::append`, which opens the file in append mode. To
 | `status_map` | `Arc<Mutex<HashMap<String, String>>>` | Maps username to status string (ephemeral) |
 | `host_user` | `Arc<Mutex<Option<String>>>` | Username of the first connected client |
 | `token_map` | `Arc<Mutex<HashMap<String, String>>>` | Maps token UUID to username (persisted to `.tokens` file) |
-| `claim_map` | `Arc<Mutex<HashMap<String, String>>>` | Maps username to claimed task (ephemeral) |
+| `claim_map` | `Arc<Mutex<HashMap<String, ClaimEntry>>>` | Maps username to claim entry (task + timestamp, 30min TTL, lazily swept) |
 | `chat_path` | `Arc<PathBuf>` | Path to the NDJSON chat file |
 | `room_id` | `Arc<String>` | Room identifier |
 | `shutdown` | `Arc<watch::Sender<bool>>` | Shutdown signal |
 | `seq_counter` | `Arc<AtomicU64>` | Monotonic sequence counter |
-| `plugin_registry` | `Arc<PluginRegistry>` | Compiled-in plugin dispatch (`/help`, `/stats`) |
+| `plugin_registry` | `Arc<PluginRegistry>` | Compiled-in plugin dispatch (`/help`, `/stats`, `/queue`, `/taskboard`) |
 | `config` | `Option<RoomConfig>` | Room visibility and access control (daemon mode) |
 
 ## Admin commands

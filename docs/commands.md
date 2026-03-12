@@ -200,9 +200,10 @@ a `reply_to` reference so clients can thread it visually.
 
 ### `/claim <task>`
 
-Register a task claim. The broker stores the claim in memory and broadcasts
-a system message to all users. Each user can hold at most one claim at a
-time — a new `/claim` replaces any existing claim.
+Register a task claim. The broker stores the claim as a `ClaimEntry` with a
+30-minute TTL. Claims are lazily swept on access — expired claims are
+automatically removed. Each user can hold at most one claim at a time — a
+new `/claim` replaces any existing claim and resets the TTL.
 
 ```
 /claim implement the /dm command
@@ -256,6 +257,65 @@ statuses.
 ```
 
 Example response: `online — alice, bob: away, charlie`
+
+---
+
+## Plugin commands
+
+Plugin commands are provided by compiled-in plugins registered in the
+`PluginRegistry`. They are dispatched via `dispatch_plugin` in the broker.
+
+### `/queue <action> [args]`
+
+Manage a persistent task backlog. Items are stored in an NDJSON file alongside
+the chat file.
+
+| Action | Description |
+|--------|-------------|
+| `add <description>` | Add a task to the backlog. Broadcasts to the room. |
+| `list` | List all queued tasks with their index. Private reply. |
+| `remove <index>` | Remove a task by its 1-based index. Broadcasts to the room. |
+| `pop` | Claim and remove the first task from the queue. Broadcasts to the room. |
+
+```
+/queue add implement caching layer
+/queue list
+/queue remove 2
+/queue pop
+```
+
+---
+
+### `/taskboard <action> [args]`
+
+Manage task lifecycle with claim ownership, plan submission, approval gates,
+and lease-based expiry. Tasks are stored in an NDJSON file alongside the chat
+file. Each claimed task has a 10-minute lease TTL — expired leases auto-release
+the task back to open status.
+
+| Action | Description |
+|--------|-------------|
+| `post <description>` | Create a new task. Broadcasts to the room. |
+| `list` | List all tasks with status and assignee. Private reply. |
+| `show <task-id>` | Show full detail for a task (status, description, poster, assignee, plan, approved_by, notes, lease elapsed). Private reply. |
+| `claim <task-id>` | Claim an open task. Only open tasks can be claimed. Broadcasts to the room. |
+| `plan <task-id> <plan-text>` | Submit or resubmit a plan for a claimed task. Only the assignee can submit. Broadcasts the plan text to the room for review. |
+| `approve <task-id>` | Approve a planned task. Only the task poster or room host can approve. Broadcasts to the room. |
+| `update <task-id> [notes]` | Update progress notes and renew the lease. Only the assignee can update. Warns if the task is not yet approved. |
+| `release <task-id>` | Release a task back to open status. Only the assignee or room host can release. Broadcasts to the room. |
+| `finish <task-id>` | Mark a task as finished. Only the assignee can finish. Broadcasts to the room. |
+
+```
+/taskboard post implement caching layer
+/taskboard list
+/taskboard show tb-001
+/taskboard claim tb-001
+/taskboard plan tb-001 add LRU cache in broker state with 5m TTL
+/taskboard approve tb-001
+/taskboard update tb-001 cache struct done, writing tests
+/taskboard release tb-001
+/taskboard finish tb-001
+```
 
 ---
 

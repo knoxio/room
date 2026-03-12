@@ -1,7 +1,7 @@
 # Testing
 
 `room` has two test suites: **unit tests** (inside `src/`) and **integration
-tests** (`tests/integration.rs`) that run a real broker over a Unix socket.
+tests** (focused modules under `tests/`) that run a real broker over a Unix socket.
 
 ---
 
@@ -52,6 +52,9 @@ crates/room-cli/src/
   plugin/mod.rs         — unit tests for PluginRegistry, builtin_command_infos
   plugin/help.rs        — unit tests for /help output
   plugin/stats.rs       — unit tests for /stats output
+  plugin/queue.rs       — unit tests for /queue NDJSON persistence and subcommands
+  plugin/taskboard/mod.rs — unit tests for /taskboard subcommands, approve permissions, lifecycle
+  plugin/taskboard/task.rs — unit tests for Task model, LiveTask lease, NDJSON round-trip
   tui/input.rs          — unit tests for handle_key, cursor, key bindings
   tui/render.rs         — unit tests for wrap_words, format_message
   tui/widgets.rs        — unit tests for CommandPalette, MentionPicker
