@@ -1117,10 +1117,34 @@ async fn dispatch_connection(
             super::commands::persist_subscriptions(&state).await;
             return result;
         }
-        ClientHandshake::Interactive(u) => u,
+        ClientHandshake::Session(token) => {
+            // Resolve username from token (room-level first, then UserRegistry).
+            let resolved = match super::auth::validate_token(&token, &state.token_map).await {
+                Some(u) => Some(u),
+                None => {
+                    let reg = user_registry.lock().await;
+                    reg.validate_token(&token).map(|u| u.to_owned())
+                }
+            };
+            match resolved {
+                Some(u) => u,
+                None => {
+                    let err = serde_json::json!({"type":"error","code":"invalid_token"});
+                    write_half.write_all(format!("{err}\n").as_bytes()).await?;
+                    return Ok(());
+                }
+            }
+        }
+        ClientHandshake::Interactive(u) => {
+            eprintln!(
+                "[broker/daemon] DEPRECATED: unauthenticated interactive join for '{u}' — \
+                 migrate to SESSION:<token>"
+            );
+            u
+        }
     };
 
-    // Interactive join.
+    // Interactive join (authenticated via SESSION: or deprecated plain username).
     if username.is_empty() {
         return Ok(());
     }

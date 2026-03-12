@@ -31,11 +31,23 @@ impl Client {
         let stream = UnixStream::connect(&self.socket_path).await?;
         let (read_half, mut write_half) = stream.into_split();
 
-        // Handshake: send username (with ROOM: prefix for daemon connections).
+        // Handshake: prefer SESSION:<token> for authenticated interactive join,
+        // falling back to bare username (deprecated) if no token file exists.
+        let session_part = match read_token_for_session(&self.room_id, &self.username) {
+            Some(token) => format!("SESSION:{token}"),
+            None => {
+                eprintln!(
+                    "[tui] no token file found — falling back to unauthenticated join \
+                     (run `room join {}` to fix)",
+                    self.username
+                );
+                self.username.clone()
+            }
+        };
         let handshake = if self.daemon_mode {
-            format!("ROOM:{}:{}\n", self.room_id, self.username)
+            format!("ROOM:{}:{session_part}\n", self.room_id)
         } else {
-            format!("{}\n", self.username)
+            format!("{session_part}\n")
         };
         write_half.write_all(handshake.as_bytes()).await?;
 
@@ -106,6 +118,31 @@ impl Client {
             }
         }
     }
+}
+
+/// Read a session token for the given room/user.
+///
+/// Checks the global token file (`~/.room/state/room-<username>.token`) first,
+/// then falls back to the per-room token file (`~/.room/state/room-<room_id>-<username>.token`).
+/// Returns `Some(token_uuid)` if a valid token file is found, `None` otherwise.
+fn read_token_for_session(room_id: &str, username: &str) -> Option<String> {
+    let candidates = [
+        paths::global_token_path(username),
+        paths::token_path(room_id, username),
+    ];
+    for path in &candidates {
+        if let Some(token) = read_token_from_file(path) {
+            return Some(token);
+        }
+    }
+    None
+}
+
+/// Extract the `token` field from a JSON token file, or `None` on any failure.
+fn read_token_from_file(path: &std::path::Path) -> Option<String> {
+    let data = std::fs::read_to_string(path).ok()?;
+    let v: serde_json::Value = serde_json::from_str(data.trim()).ok()?;
+    v["token"].as_str().map(|s| s.to_owned())
 }
 
 /// Check whether a token file exists and contains valid JSON with a `token` field.
@@ -195,6 +232,50 @@ mod tests {
         let data = serde_json::json!({"username": "alice", "token": null});
         std::fs::write(&path, format!("{data}\n")).unwrap();
         assert!(!has_valid_token_file(&path));
+    }
+
+    // ── read_token_from_file ─────────────────────────────────────────────
+
+    #[test]
+    fn read_token_from_file_returns_token_for_valid_file() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("valid.token");
+        let data = serde_json::json!({"username": "alice", "token": "abc-123"});
+        std::fs::write(&path, format!("{data}\n")).unwrap();
+        assert_eq!(read_token_from_file(&path), Some("abc-123".to_owned()));
+    }
+
+    #[test]
+    fn read_token_from_file_returns_none_for_missing_file() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("nope.token");
+        assert_eq!(read_token_from_file(&path), None);
+    }
+
+    #[test]
+    fn read_token_from_file_returns_none_for_corrupt_json() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("corrupt.token");
+        std::fs::write(&path, "not json").unwrap();
+        assert_eq!(read_token_from_file(&path), None);
+    }
+
+    #[test]
+    fn read_token_from_file_returns_none_for_null_token() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("null.token");
+        let data = serde_json::json!({"username": "alice", "token": null});
+        std::fs::write(&path, format!("{data}\n")).unwrap();
+        assert_eq!(read_token_from_file(&path), None);
+    }
+
+    #[test]
+    fn read_token_from_file_returns_none_for_missing_token_field() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("no-field.token");
+        let data = serde_json::json!({"username": "alice"});
+        std::fs::write(&path, format!("{data}\n")).unwrap();
+        assert_eq!(read_token_from_file(&path), None);
     }
 }
 
