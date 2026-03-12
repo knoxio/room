@@ -7,6 +7,63 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `--allow-all` flag to skip all tool restrictions for trusted environments. (#433, #440)
+- Builtin personality templates — predefined personality files (`Coder`, `Reviewer`,
+  `Coordinator`, etc.) selectable via `--personality builtin:<name>` without an
+  external file. (#439, #446)
+
+## [0.4.0-rc.6] - 2026-03-10
+
+Version bump to stay in sync with room-cli 3.0.0-rc.6. No functional changes.
+
+## [0.4.0-rc.5] - 2026-03-10
+
+### Changed
+
+- Updated for global token migration: `room join` no longer requires a room-id
+  argument. Ralph now calls `room join <username>` and `room subscribe <room-id>`
+  separately. (#408)
+
+### Fixed
+
+- Retry with suffixed username (e.g. `alice-1`) when `room join` fails due to
+  duplicate username. (#403)
+
+## [0.4.0-rc.3] - 2026-03-09
+
+Version bump to stay in sync with room-cli 3.0.0-rc.3. No functional changes.
+
+## [0.4.0-rc.2] - 2026-03-09
+
+### Added
+
+- `--socket <path>` flag and `RALPH_SOCKET` environment variable for broker socket
+  path passthrough. Passed through to all `room` subcommands. (#309)
+
+### Fixed
+
+- Clippy complexity warnings in `loop_runner.rs` resolved. (#364)
+
+## [0.4.0-rc.1] - 2026-03-09
+
+### Added
+
+- `--profile <name>` flag and `RALPH_PROFILE` environment variable for tool profiles.
+  Built-in profiles (`Coder`, `Reviewer`, `Coordinator`, `Notion`, `Reader`) define curated
+  sets of allowed and disallowed tools. Profiles merge with explicit
+  `--allow-tools`/`--disallow-tools`. (#241)
+
+### Fixed
+
+- Token re-join after broker restart — ralph now detects auth failures and automatically
+  re-runs `room join` to obtain a fresh token. (#247, #248)
+
+### Changed
+
+- Removed EOF workaround from `/set_status` command dispatch. (#250)
+
 ## [0.3.0-rc.2] - 2026-03-08
 
 ### Added
@@ -16,10 +73,6 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   granular patterns like `Bash(python3:*)`. Empty by default. (#242)
 - Automatic `/set_status` updates at loop milestones: before claude spawn, on context
   restart, on claude error, and on shutdown. Handles #234 EOF gracefully. (#243)
-- `--profile <name>` flag and `RALPH_PROFILE` environment variable for tool profiles.
-  Built-in profiles (`Coder`, `Reviewer`, `Coordinator`, `Notion`, `Reader`) define curated
-  sets of allowed and disallowed tools. Profiles merge with explicit
-  `--allow-tools`/`--disallow-tools`. (#241)
 
 ### Fixed
 
@@ -70,8 +123,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Logging to stderr and `/tmp/ralph-room-<username>.log`.
 - 81 unit tests + 8 integration tests.
 
-[Unreleased]: https://github.com/knoxio/room/compare/v2.0.1...HEAD
-[0.3.0-rc.2]: https://github.com/knoxio/room/compare/v2.0.1...HEAD
-[0.3.0-rc.1]: https://github.com/knoxio/room/compare/v2.0.1...HEAD
+[Unreleased]: https://github.com/knoxio/room/compare/v3.0.0-rc.6...HEAD
+[0.4.0-rc.6]: https://github.com/knoxio/room/compare/v3.0.0-rc.5...v3.0.0-rc.6
+[0.4.0-rc.5]: https://github.com/knoxio/room/compare/v3.0.0-rc.3...v3.0.0-rc.5
+[0.4.0-rc.3]: https://github.com/knoxio/room/compare/v3.0.0-rc.2...v3.0.0-rc.3
+[0.4.0-rc.2]: https://github.com/knoxio/room/compare/v3.0.0-rc.1...v3.0.0-rc.2
+[0.4.0-rc.1]: https://github.com/knoxio/room/compare/v2.1.0-rc.2...v3.0.0-rc.1
+[0.3.0-rc.2]: https://github.com/knoxio/room/compare/v2.1.0-rc.1...v2.1.0-rc.2
+[0.3.0-rc.1]: https://github.com/knoxio/room/compare/v2.0.1...v2.1.0-rc.1
 [0.2.0]: https://github.com/knoxio/room/compare/v2.0.0...v2.0.1
 [0.1.0]: https://github.com/knoxio/room/releases/tag/v2.0.0

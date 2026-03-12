@@ -7,7 +7,34 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [2.1.0-rc.2] - 2026-03-08
+## [3.0.0-rc.6] - 2026-03-10
+
+Version bump to stay in sync with room-cli 3.0.0-rc.6. No protocol changes.
+
+## [3.0.0-rc.5] - 2026-03-10
+
+Version bump to stay in sync with room-cli 3.0.0-rc.5. No protocol changes.
+
+## [3.0.0-rc.3] - 2026-03-09
+
+Version bump to stay in sync with room-cli 3.0.0-rc.3. No protocol changes.
+
+## [3.0.0-rc.2] - 2026-03-09
+
+### Added
+
+- `Message::is_visible_to()` — centralised DM visibility check, replacing scattered
+  filter patterns across the codebase. (#352)
+- `SubscriptionTier` enum (`Full`, `MentionsOnly`, `Unsubscribed`) for tiered room
+  subscriptions. (#323)
+- `format_message_id()` and `parse_message_id()` helpers for structured message ID
+  handling. (#321)
+
+### Changed
+
+- `dm_room_id()` now returns an error when both users are the same. (#296)
+
+## [3.0.0-rc.1] - 2026-03-09
 
 ### Added
 
@@ -15,6 +42,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `Message::content()` and `Message::mentions()` accessors. (#256)
 - `RoomConfig` and `RoomVisibility` types for room access control. (#253)
 - `dm_room_id()` — deterministic room ID for DM pairs.
+
+### Changed
+
+- Major version bump to v3 for breaking wire format additions (new types and
+  visibility model).
+
+## [2.1.0-rc.2] - 2026-03-08
+
+Version bump to stay in sync with room-cli 2.1.0-rc.2. No functional changes.
 
 ## [2.1.0-rc.1] - 2026-03-07
 
@@ -44,6 +80,13 @@ Version bump to stay in sync with room-cli 2.1.0. No functional changes.
 - Extracted from `agentroom` crate into `room-protocol` as part of the workspace
   restructure. (#197, #204)
 
-[Unreleased]: https://github.com/knoxio/room/compare/v2.0.1...HEAD
+[Unreleased]: https://github.com/knoxio/room/compare/v3.0.0-rc.6...HEAD
+[3.0.0-rc.6]: https://github.com/knoxio/room/compare/v3.0.0-rc.5...v3.0.0-rc.6
+[3.0.0-rc.5]: https://github.com/knoxio/room/compare/v3.0.0-rc.3...v3.0.0-rc.5
+[3.0.0-rc.3]: https://github.com/knoxio/room/compare/v3.0.0-rc.2...v3.0.0-rc.3
+[3.0.0-rc.2]: https://github.com/knoxio/room/compare/v3.0.0-rc.1...v3.0.0-rc.2
+[3.0.0-rc.1]: https://github.com/knoxio/room/compare/v2.1.0-rc.2...v3.0.0-rc.1
+[2.1.0-rc.2]: https://github.com/knoxio/room/compare/v2.1.0-rc.1...v2.1.0-rc.2
+[2.1.0-rc.1]: https://github.com/knoxio/room/compare/v2.0.1...v2.1.0-rc.1
 [2.0.1]: https://github.com/knoxio/room/compare/v2.0.0...v2.0.1
 [2.0.0]: https://github.com/knoxio/room/releases/tag/v2.0.0

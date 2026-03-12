@@ -8,7 +8,7 @@ This crate defines the `Message` enum and constructor functions shared by all ro
 
 ```toml
 [dependencies]
-room-protocol = "2"
+room-protocol = "3"
 ```
 
 ## Message types

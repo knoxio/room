@@ -10,7 +10,25 @@ For changes prior to the workspace restructure (v0.1.2 through v1.0.2), see the
 
 ## [Unreleased]
 
-## [3.0.0-rc.6] - 2026-03-09
+### Added
+
+- `/taskboard` plugin — lease-based task lifecycle with `post`, `list`, `show`,
+  `claim`, `plan`, `approve`, `update`, `release`, `finish` subcommands. Tasks have
+  lease TTLs with auto-expiry. (#444, #451, #453)
+- `/queue` plugin — persistent FIFO queue with NDJSON storage. Subcommands: `add`,
+  `list`, `remove`, `pop`. (#442)
+- TUI: `ChoicePicker` widget for command parameter autocomplete. (#437, #445)
+- TUI: vertically center splash screen in the message area. (#427, #428)
+- Lease TTL on `/claim` with automatic expiry of stale claims. (#429, #443)
+
+### Fixed
+
+- Broker echoes plugin broadcast messages back to the oneshot sender. (#450)
+- Oneshot `watch` filter now includes system messages from plugins. (#452)
+- Persist subscription state on join so it survives broker restarts. (#438)
+- TUI: arrow-down on last line moves cursor to end before scrolling. (#422, #424)
+
+## [3.0.0-rc.6] - 2026-03-10
 
 ### Fixed
 
@@ -28,7 +46,7 @@ For changes prior to the workspace restructure (v0.1.2 through v1.0.2), see the
 - `room daemon --isolated` flag: spawns a daemon with a private temp dir for
   tests, prints socket path to stdout, and cleans up on exit. (#398, #417)
 
-## [3.0.0-rc.5] - 2026-03-09
+## [3.0.0-rc.5] - 2026-03-10
 
 ### Changed
 
@@ -49,14 +67,10 @@ For changes prior to the workspace restructure (v0.1.2 through v1.0.2), see the
 
 ## [3.0.0-rc.3] - 2026-03-09
 
-### Fixed
-
-- Ralph username crash when joining rooms with long or special-character names. (#400, #403)
-- DM host visibility — `is_visible_to()` now checks host membership for DM
-  rooms so the host can see all DMs in their room. (#394, #407)
-
 ### Added
 
+- TUI: use daemon exclusively for room join — all `room <room-id> <user>` sessions
+  now go through the daemon. (#385, #391)
 - `/claim`, `/unclaim`, `/claimed` built-in commands for task coordination. (#182)
 - Parameter validation for built-in commands against `CommandInfo` schemas. (#265)
 - Token persistence across broker restarts via `.tokens` files. (#183)
@@ -68,8 +82,26 @@ For changes prior to the workspace restructure (v0.1.2 through v1.0.2), see the
 
 ### Fixed
 
+- `room join` now sets `Full` subscription to prevent auto-subscribe downgrade. (#392)
+- TUI: redirect stderr to `~/.room/room.log` during TUI sessions. (#395)
+- DM host visibility — `is_visible_to()` now checks host membership for DM
+  rooms so the host can see all DMs in their room. (#394, #407)
 - WS smoke tests clean up stale `.tokens` files from previous runs. (#184)
 - Serialized WS smoke test execution to prevent disk I/O contention. (#184)
+
+## [3.0.0-rc.2] - 2026-03-09
+
+### Added
+
+- Sprint 9 refactor wave: `handshake.rs`, `admin.rs`, `render_bots.rs`, `ws/rest.rs`
+  split, `paths.rs`, Plugin trait defaults, RoomState factory and accessors, handle\_key
+  decomposition, `is_visible_to()` on Message. (#351–#379)
+- P0 test coverage: duplicate-username join, concurrent room creation, destroy with
+  connected clients, host disconnect/reconnect + DM history replay. (#381–#384)
+
+### Fixed
+
+- Daemon auto-start timeout increased to 15s to handle slow volumes. (#380)
 
 ## [3.0.0-rc.1] - 2026-03-08
 
@@ -132,7 +164,8 @@ For changes prior to the workspace restructure (v0.1.2 through v1.0.2), see the
 [Unreleased]: https://github.com/knoxio/room/compare/v3.0.0-rc.6...HEAD
 [3.0.0-rc.6]: https://github.com/knoxio/room/compare/v3.0.0-rc.5...v3.0.0-rc.6
 [3.0.0-rc.5]: https://github.com/knoxio/room/compare/v3.0.0-rc.3...v3.0.0-rc.5
-[3.0.0-rc.3]: https://github.com/knoxio/room/compare/v3.0.0-rc.1...v3.0.0-rc.3
+[3.0.0-rc.3]: https://github.com/knoxio/room/compare/v3.0.0-rc.2...v3.0.0-rc.3
+[3.0.0-rc.2]: https://github.com/knoxio/room/compare/v3.0.0-rc.1...v3.0.0-rc.2
 [3.0.0-rc.1]: https://github.com/knoxio/room/compare/v2.1.0-rc.2...v3.0.0-rc.1
 [2.1.0-rc.2]: https://github.com/knoxio/room/compare/v2.1.0-rc.1...v2.1.0-rc.2
 [2.1.0-rc.1]: https://github.com/knoxio/room/compare/v2.0.1...v2.1.0-rc.1
