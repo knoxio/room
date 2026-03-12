@@ -401,9 +401,11 @@ async fn dispatch_plugin(
         }
         PluginResult::Broadcast(text) => {
             let sys = make_system(&state.room_id, &format!("plugin:{}", plugin.name()), text);
-            broadcast_and_persist(&sys, &state.clients, &state.chat_path, &state.seq_counter)
-                .await?;
-            CommandResult::Handled
+            let seq_msg =
+                broadcast_and_persist(&sys, &state.clients, &state.chat_path, &state.seq_counter)
+                    .await?;
+            let json = serde_json::to_string(&seq_msg)?;
+            CommandResult::HandledWithReply(json)
         }
         PluginResult::Handled => CommandResult::Handled,
     })
@@ -1466,5 +1468,49 @@ mod tests {
 
         let loaded = super::load_subscription_map(&state.subscription_map_path);
         assert_eq!(loaded.get("alice"), Some(&SubscriptionTier::MentionsOnly));
+    }
+
+    // ── plugin broadcast returns HandledWithReply for oneshot echo ─────
+
+    #[tokio::test]
+    async fn plugin_broadcast_returns_handled_with_reply() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+        // /taskboard post produces PluginResult::Broadcast — should come
+        // back as HandledWithReply so oneshot senders receive the echo.
+        let msg = make_command(
+            "test-room",
+            "alice",
+            "taskboard",
+            vec!["post".to_owned(), "test task description".to_owned()],
+        );
+        let result = route_command(msg, "alice", &state).await.unwrap();
+        let CommandResult::HandledWithReply(json) = result else {
+            panic!("expected HandledWithReply for plugin broadcast");
+        };
+        assert!(
+            json.contains("plugin:taskboard"),
+            "reply should identify plugin source"
+        );
+        assert!(
+            json.contains("test task description"),
+            "reply should contain the task description"
+        );
+    }
+
+    #[tokio::test]
+    async fn plugin_reply_returns_reply_not_handled_with_reply() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+        // /taskboard list with no tasks produces PluginResult::Reply.
+        let msg = make_command("test-room", "alice", "taskboard", vec!["list".to_owned()]);
+        let result = route_command(msg, "alice", &state).await.unwrap();
+        let CommandResult::Reply(json) = result else {
+            panic!("expected Reply for plugin list");
+        };
+        assert!(
+            json.contains("plugin:taskboard"),
+            "reply should identify plugin source"
+        );
     }
 }
