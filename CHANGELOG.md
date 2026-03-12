@@ -12,6 +12,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 > - [room-protocol CHANGELOG](crates/room-protocol/CHANGELOG.md)
 > - [room-ralph CHANGELOG](crates/room-ralph/CHANGELOG.md)
 
+### Added
+
+- CI changelog enforcement — PRs must include a changelog entry under `[Unreleased]`. (#499)
+
 ### Changed
 
 - Restructured into a cargo workspace with four crates: `room-protocol` (wire types),

@@ -31,6 +31,17 @@ jobs:
         continue-on-error: true
         run: cargo test -p room-cli -- --ignored
 
+  changelog:
+    name: Changelog
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check changelog entry
+        run: bash scripts/check-changelog.sh origin/${{ github.base_ref }}
+
   scripts:
     name: Shell Scripts
     runs-on: ubuntu-latest
@@ -44,3 +55,4 @@ jobs:
         run: |
           bash scripts/test-context-monitor.sh
           bash scripts/test-ralph-room.sh
+          bash scripts/test-check-changelog.sh
