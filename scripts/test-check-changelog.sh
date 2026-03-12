@@ -36,6 +36,8 @@ setup_repo() {
   mkdir -p "$repo_dir"
   cd "$repo_dir"
   git init -q
+  git config user.name "test"
+  git config user.email "test@test"
   git checkout -q -b master
 
   # Create initial CHANGELOG.md
