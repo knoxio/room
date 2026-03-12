@@ -31,13 +31,13 @@ use room_protocol::SubscriptionTier;
 
 use crate::message::Message;
 use input::{
-    build_payload, cursor_display_pos, handle_key, parse_kick_broadcast, parse_status_broadcast,
-    parse_subscription_broadcast, seed_online_users_from_who, wrap_input_display, Action,
-    InputState,
+    build_payload, cursor_display_pos, handle_key, normalize_paste, parse_kick_broadcast,
+    parse_status_broadcast, parse_subscription_broadcast, seed_online_users_from_who,
+    wrap_input_display, Action, InputState,
 };
 use render::{
-    assign_color, find_view_start, format_message, render_tab_bar, user_color, welcome_splash,
-    ColorMap, TabInfo,
+    assign_color, build_member_panel_spans, find_view_start, format_message,
+    member_panel_row_width, render_tab_bar, user_color, welcome_splash, ColorMap, TabInfo,
 };
 
 /// Maximum visible content lines in the input box before it stops growing.
@@ -631,31 +631,7 @@ pub async fn run(
                     .map(|u| {
                         let status = user_statuses_ref.get(u).map(|s| s.as_str()).unwrap_or("");
                         let tier = subscription_tiers_ref.get(u).copied();
-                        let mut spans = vec![Span::styled(
-                            format!(" {u}"),
-                            Style::default()
-                                .fg(user_color(u, &color_map))
-                                .add_modifier(Modifier::BOLD),
-                        )];
-                        match tier {
-                            Some(SubscriptionTier::MentionsOnly) => {
-                                spans.push(Span::styled(" @", Style::default().fg(Color::Yellow)));
-                            }
-                            Some(SubscriptionTier::Unsubscribed) => {
-                                spans.push(Span::styled(
-                                    " \u{2717}",
-                                    Style::default().fg(Color::Red),
-                                ));
-                            }
-                            _ => {}
-                        }
-                        if !status.is_empty() {
-                            spans.push(Span::styled(
-                                format!("  {status}"),
-                                Style::default().fg(Color::DarkGray),
-                            ));
-                        }
-                        spans.push(Span::raw(" "));
+                        let spans = build_member_panel_spans(u, status, tier, &color_map);
                         ListItem::new(Line::from(spans))
                     })
                     .collect();
@@ -664,18 +640,8 @@ pub async fn run(
                     .iter()
                     .map(|u| {
                         let status = user_statuses_ref.get(u).map(|s| s.as_str()).unwrap_or("");
-                        let status_len = if status.is_empty() {
-                            0
-                        } else {
-                            status.len() + 2 // "  " + status
-                        };
                         let tier = subscription_tiers_ref.get(u).copied();
-                        let tier_len = match tier {
-                            Some(SubscriptionTier::MentionsOnly)
-                            | Some(SubscriptionTier::Unsubscribed) => 2, // " @" or " ✗"
-                            _ => 0,
-                        };
-                        u.len() + 1 + tier_len + status_len + 1 // " " + name + tier + status + " "
+                        member_panel_row_width(u, status, tier)
                     })
                     .max()
                     .unwrap_or(10);
@@ -882,8 +848,7 @@ pub async fn run(
                     }
                 }
                 Event::Paste(text) => {
-                    // Normalize line endings: \r\n → \n, stray \r → \n.
-                    let clean = text.replace("\r\n", "\n").replace('\r', "\n");
+                    let clean = normalize_paste(&text);
                     input_state.input.insert_str(input_state.cursor_pos, &clean);
                     input_state.cursor_pos += clean.len();
                     input_state.mention.active = false;

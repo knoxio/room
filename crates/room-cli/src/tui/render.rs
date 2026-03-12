@@ -5,6 +5,8 @@ use ratatui::{
     text::{Line, Span, Text},
 };
 
+use room_protocol::SubscriptionTier;
+
 use crate::message::Message;
 
 pub(super) use super::render_bots::welcome_splash;
@@ -498,6 +500,62 @@ pub(super) fn render_tab_bar(tabs: &[TabInfo]) -> Option<Line<'static>> {
     Some(Line::from(spans))
 }
 
+/// Build the styled spans for a single member panel row.
+///
+/// Renders: ` <username>` (bold, colored) + optional tier indicator + optional
+/// status (dimmed) + trailing space. Used by the floating member panel.
+pub(super) fn build_member_panel_spans(
+    username: &str,
+    status: &str,
+    tier: Option<SubscriptionTier>,
+    color_map: &ColorMap,
+) -> Vec<Span<'static>> {
+    let mut spans = vec![Span::styled(
+        format!(" {username}"),
+        Style::default()
+            .fg(user_color(username, color_map))
+            .add_modifier(Modifier::BOLD),
+    )];
+    match tier {
+        Some(SubscriptionTier::MentionsOnly) => {
+            spans.push(Span::styled(" @", Style::default().fg(Color::Yellow)));
+        }
+        Some(SubscriptionTier::Unsubscribed) => {
+            spans.push(Span::styled(" \u{2717}", Style::default().fg(Color::Red)));
+        }
+        _ => {}
+    }
+    if !status.is_empty() {
+        spans.push(Span::styled(
+            format!("  {status}"),
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+    spans.push(Span::raw(" "));
+    spans
+}
+
+/// Compute the content width of a single member panel row.
+///
+/// Returns the number of characters needed to display the username, tier
+/// indicator, and status for one row. Used to size the floating panel.
+pub(super) fn member_panel_row_width(
+    username: &str,
+    status: &str,
+    tier: Option<SubscriptionTier>,
+) -> usize {
+    let tier_len = match tier {
+        Some(SubscriptionTier::MentionsOnly) | Some(SubscriptionTier::Unsubscribed) => 2,
+        _ => 0,
+    };
+    let status_len = if status.is_empty() {
+        0
+    } else {
+        status.len() + 2 // "  " + status
+    };
+    username.len() + 1 + tier_len + status_len + 1 // " " + name + tier + status + " "
+}
+
 /// Look up a username's color from the map, falling back to the hash-based
 /// palette index if the user has not been assigned a color yet.
 pub(super) fn user_color(username: &str, color_map: &ColorMap) -> Color {
@@ -928,6 +986,143 @@ mod tests {
             .expect("should find alpha span");
         assert_eq!(alpha_span.style.fg, Some(Color::Black));
         assert_eq!(alpha_span.style.bg, Some(Color::Cyan));
+    }
+
+    // ── build_member_panel_spans tests ─────────────────────────────────────
+
+    #[test]
+    fn member_panel_spans_plain_user() {
+        let cm = ColorMap::new();
+        let spans = build_member_panel_spans("alice", "", None, &cm);
+        let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text, " alice ");
+    }
+
+    #[test]
+    fn member_panel_spans_with_status() {
+        let cm = ColorMap::new();
+        let spans = build_member_panel_spans("alice", "coding", None, &cm);
+        let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text, " alice  coding ");
+    }
+
+    #[test]
+    fn member_panel_spans_mentions_only_tier() {
+        let cm = ColorMap::new();
+        let spans = build_member_panel_spans("bob", "", Some(SubscriptionTier::MentionsOnly), &cm);
+        let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text, " bob @ ");
+        // Verify the "@" indicator has yellow color
+        let at_span = spans.iter().find(|s| s.content.contains('@')).unwrap();
+        assert_eq!(at_span.style.fg, Some(Color::Yellow));
+    }
+
+    #[test]
+    fn member_panel_spans_unsubscribed_tier() {
+        let cm = ColorMap::new();
+        let spans =
+            build_member_panel_spans("charlie", "", Some(SubscriptionTier::Unsubscribed), &cm);
+        let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains('\u{2717}'), "should contain cross mark");
+        // Verify the cross mark has red color
+        let cross_span = spans
+            .iter()
+            .find(|s| s.content.contains('\u{2717}'))
+            .unwrap();
+        assert_eq!(cross_span.style.fg, Some(Color::Red));
+    }
+
+    #[test]
+    fn member_panel_spans_full_tier_no_indicator() {
+        let cm = ColorMap::new();
+        let spans = build_member_panel_spans("dave", "", Some(SubscriptionTier::Full), &cm);
+        let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text, " dave ");
+    }
+
+    #[test]
+    fn member_panel_spans_with_status_and_tier() {
+        let cm = ColorMap::new();
+        let spans = build_member_panel_spans(
+            "eve",
+            "reviewing PR",
+            Some(SubscriptionTier::MentionsOnly),
+            &cm,
+        );
+        let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text, " eve @  reviewing PR ");
+    }
+
+    #[test]
+    fn member_panel_spans_username_is_bold() {
+        let cm = ColorMap::new();
+        let spans = build_member_panel_spans("alice", "", None, &cm);
+        let name_span = &spans[0];
+        assert!(
+            name_span.style.add_modifier.contains(Modifier::BOLD),
+            "username should be bold"
+        );
+    }
+
+    #[test]
+    fn member_panel_spans_status_is_dimmed() {
+        let cm = ColorMap::new();
+        let spans = build_member_panel_spans("alice", "busy", None, &cm);
+        let status_span = spans.iter().find(|s| s.content.contains("busy")).unwrap();
+        assert_eq!(
+            status_span.style.fg,
+            Some(Color::DarkGray),
+            "status should be DarkGray"
+        );
+    }
+
+    // ── member_panel_row_width tests ────────────────────────────────────────
+
+    #[test]
+    fn row_width_plain_user() {
+        // " alice " = 1 + 5 + 1 = 7
+        assert_eq!(member_panel_row_width("alice", "", None), 7);
+    }
+
+    #[test]
+    fn row_width_with_status() {
+        // " alice  coding " = 1 + 5 + 0 + (2 + 6) + 1 = 15
+        assert_eq!(member_panel_row_width("alice", "coding", None), 15);
+    }
+
+    #[test]
+    fn row_width_with_mentions_only_tier() {
+        // " bob @ " = 1 + 3 + 2 + 0 + 1 = 7
+        assert_eq!(
+            member_panel_row_width("bob", "", Some(SubscriptionTier::MentionsOnly)),
+            7
+        );
+    }
+
+    #[test]
+    fn row_width_with_unsubscribed_tier() {
+        // Same as MentionsOnly: +2 for the indicator
+        assert_eq!(
+            member_panel_row_width("bob", "", Some(SubscriptionTier::Unsubscribed)),
+            7
+        );
+    }
+
+    #[test]
+    fn row_width_full_tier_no_extra() {
+        assert_eq!(
+            member_panel_row_width("bob", "", Some(SubscriptionTier::Full)),
+            member_panel_row_width("bob", "", None),
+        );
+    }
+
+    #[test]
+    fn row_width_with_status_and_tier() {
+        // " eve @  reviewing PR " = 1 + 3 + 2 + (2 + 12) + 1 = 21
+        assert_eq!(
+            member_panel_row_width("eve", "reviewing PR", Some(SubscriptionTier::MentionsOnly)),
+            21
+        );
     }
 
     #[test]

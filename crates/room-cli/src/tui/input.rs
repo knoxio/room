@@ -636,6 +636,14 @@ pub(super) fn apply_backslash_enter(buf: &mut String, cursor_pos: usize) -> Opti
     }
 }
 
+/// Normalize pasted text: convert `\r\n` to `\n`, then stray `\r` to `\n`.
+///
+/// Called on `Event::Paste` to ensure consistent newline handling regardless
+/// of the clipboard's line-ending convention (Windows, old Mac, Unix).
+pub(super) fn normalize_paste(text: &str) -> String {
+    text.replace("\r\n", "\n").replace('\r', "\n")
+}
+
 /// Parse `/dm <user> <message>` input into a `DmRoom` action.
 ///
 /// Returns `Some(Action::DmRoom { .. })` when the input is a valid `/dm`
@@ -2397,5 +2405,142 @@ mod tests {
             state.mention.active,
             "mention picker should activate for Username params"
         );
+    }
+
+    // ── normalize_paste tests ───────────────────────────────────────────────
+
+    #[test]
+    fn normalize_paste_unix_newlines_unchanged() {
+        assert_eq!(normalize_paste("hello\nworld"), "hello\nworld");
+    }
+
+    #[test]
+    fn normalize_paste_windows_crlf_to_lf() {
+        assert_eq!(normalize_paste("hello\r\nworld"), "hello\nworld");
+    }
+
+    #[test]
+    fn normalize_paste_old_mac_cr_to_lf() {
+        assert_eq!(normalize_paste("hello\rworld"), "hello\nworld");
+    }
+
+    #[test]
+    fn normalize_paste_mixed_endings() {
+        assert_eq!(normalize_paste("a\r\nb\rc\nd"), "a\nb\nc\nd");
+    }
+
+    #[test]
+    fn normalize_paste_no_newlines() {
+        assert_eq!(normalize_paste("plain text"), "plain text");
+    }
+
+    #[test]
+    fn normalize_paste_empty() {
+        assert_eq!(normalize_paste(""), "");
+    }
+
+    #[test]
+    fn normalize_paste_multiple_crlf() {
+        assert_eq!(normalize_paste("a\r\n\r\nb"), "a\n\nb");
+    }
+
+    // ── Ctrl+D behavior (raw-mode TUI) ─────────────────────────────────────
+
+    #[test]
+    fn ctrl_d_does_not_quit() {
+        // In raw-mode TUI, Ctrl+D is not an exit signal (Ctrl+C is used
+        // instead). Ctrl+D falls through to handle_char which inserts 'd'.
+        let mut state = InputState::new();
+        let action = handle_key(
+            make_key_mod(KeyCode::Char('d'), KeyModifiers::CONTROL),
+            &mut state,
+            &[],
+            10,
+            80,
+        );
+        assert!(action.is_none(), "Ctrl+D should not trigger Quit");
+    }
+
+    // ── Tab switching (Ctrl+N / Ctrl+P / Ctrl+1-9) ─────────────────────────
+
+    #[test]
+    fn ctrl_n_returns_next_tab() {
+        let mut state = InputState::new();
+        let action = handle_key(
+            make_key_mod(KeyCode::Char('n'), KeyModifiers::CONTROL),
+            &mut state,
+            &[],
+            10,
+            80,
+        );
+        assert!(matches!(action, Some(Action::NextTab)));
+    }
+
+    #[test]
+    fn ctrl_p_returns_prev_tab() {
+        let mut state = InputState::new();
+        let action = handle_key(
+            make_key_mod(KeyCode::Char('p'), KeyModifiers::CONTROL),
+            &mut state,
+            &[],
+            10,
+            80,
+        );
+        assert!(matches!(action, Some(Action::PrevTab)));
+    }
+
+    #[test]
+    fn ctrl_1_returns_switch_tab_zero() {
+        let mut state = InputState::new();
+        let action = handle_key(
+            make_key_mod(KeyCode::Char('1'), KeyModifiers::CONTROL),
+            &mut state,
+            &[],
+            10,
+            80,
+        );
+        assert!(matches!(action, Some(Action::SwitchTab(0))));
+    }
+
+    #[test]
+    fn ctrl_9_returns_switch_tab_eight() {
+        let mut state = InputState::new();
+        let action = handle_key(
+            make_key_mod(KeyCode::Char('9'), KeyModifiers::CONTROL),
+            &mut state,
+            &[],
+            10,
+            80,
+        );
+        assert!(matches!(action, Some(Action::SwitchTab(8))));
+    }
+
+    // ── PageUp / PageDown scroll ────────────────────────────────────────────
+
+    #[test]
+    fn page_up_increases_scroll_offset() {
+        let mut state = InputState::new();
+        state.scroll_offset = 0;
+        handle_key(make_key(KeyCode::PageUp), &mut state, &[], 10, 80);
+        assert_eq!(state.scroll_offset, 10, "PageUp should add visible_count");
+    }
+
+    #[test]
+    fn page_down_decreases_scroll_offset() {
+        let mut state = InputState::new();
+        state.scroll_offset = 15;
+        handle_key(make_key(KeyCode::PageDown), &mut state, &[], 10, 80);
+        assert_eq!(
+            state.scroll_offset, 5,
+            "PageDown should subtract visible_count"
+        );
+    }
+
+    #[test]
+    fn page_down_saturates_at_zero() {
+        let mut state = InputState::new();
+        state.scroll_offset = 3;
+        handle_key(make_key(KeyCode::PageDown), &mut state, &[], 10, 80);
+        assert_eq!(state.scroll_offset, 0, "PageDown should not go below 0");
     }
 }
