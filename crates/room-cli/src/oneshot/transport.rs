@@ -368,8 +368,12 @@ pub async fn global_join_session(
 
 /// Connect to a daemon socket and create a new room via `CREATE:<room_id>`.
 ///
-/// Sends the room ID on the first line and the config JSON on the second.
-/// Returns the daemon's response JSON on success (`{"type":"room_created",...}`).
+/// Sends the room ID on the first line and the config JSON (with `token` field)
+/// on the second. Returns the daemon's response JSON on success
+/// (`{"type":"room_created",...}`).
+///
+/// The `config_json` should include a `"token"` field for authentication.
+/// Use [`inject_token_into_config`] to add it if not already present.
 pub async fn create_room(
     socket_path: &Path,
     room_id: &str,
@@ -399,14 +403,21 @@ pub async fn create_room(
 
 /// Connect to a daemon socket and destroy a room via `DESTROY:<room_id>`.
 ///
-/// Returns the daemon's response JSON on success (`{"type":"room_destroyed",...}`).
-pub async fn destroy_room(socket_path: &Path, room_id: &str) -> anyhow::Result<serde_json::Value> {
+/// Sends the room ID on the first line and the authentication token on the
+/// second. Returns the daemon's response JSON on success
+/// (`{"type":"room_destroyed",...}`).
+pub async fn destroy_room(
+    socket_path: &Path,
+    room_id: &str,
+    token: &str,
+) -> anyhow::Result<serde_json::Value> {
     let stream = UnixStream::connect(socket_path).await.map_err(|e| {
         anyhow::anyhow!("cannot connect to daemon at {}: {e}", socket_path.display())
     })?;
     let (r, mut w) = stream.into_split();
     w.write_all(format!("DESTROY:{room_id}\n").as_bytes())
         .await?;
+    w.write_all(format!("{token}\n").as_bytes()).await?;
 
     let mut reader = BufReader::new(r);
     let mut line = String::new();
@@ -420,6 +431,24 @@ pub async fn destroy_room(socket_path: &Path, room_id: &str) -> anyhow::Result<s
         anyhow::bail!("{message}");
     }
     Ok(v)
+}
+
+/// Inject a `"token"` field into a JSON config string.
+///
+/// If the config is valid JSON, merges the token into the object.
+/// If the config is empty or not an object, wraps the token in a minimal config.
+pub fn inject_token_into_config(config_json: &str, token: &str) -> String {
+    if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(config_json) {
+        if let Some(obj) = v.as_object_mut() {
+            obj.insert(
+                "token".to_owned(),
+                serde_json::Value::String(token.to_owned()),
+            );
+            return serde_json::to_string(&v).unwrap_or_default();
+        }
+    }
+    // Fallback: wrap in a new object.
+    serde_json::json!({"token": token}).to_string()
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

@@ -117,11 +117,14 @@ pub async fn cmd_dm(
 /// returns a `room_created` envelope.
 ///
 /// `socket` overrides the default daemon socket path (auto-discovered if `None`).
+/// `token` is required for authentication — the daemon validates it against the
+/// global UserRegistry.
 pub async fn cmd_create(
     room_id: &str,
     socket: Option<&std::path::Path>,
     visibility: &str,
     invite: &[String],
+    token: &str,
 ) -> anyhow::Result<()> {
     let daemon_socket = socket
         .map(|p| p.to_owned())
@@ -137,6 +140,7 @@ pub async fn cmd_create(
     let config = serde_json::json!({
         "visibility": visibility,
         "invite": invite,
+        "token": token,
     });
 
     let result = transport::create_room(&daemon_socket, room_id, &config.to_string()).await?;
@@ -147,11 +151,17 @@ pub async fn cmd_create(
 /// One-shot destroy subcommand: connect to daemon, destroy a room, print result.
 ///
 /// Sends a `DESTROY:<room_id>` request to the daemon socket. The daemon
-/// signals shutdown to connected clients, removes the room from its map,
-/// and preserves the chat file on disk.
+/// validates the token, signals shutdown to connected clients, removes the
+/// room from its map, and preserves the chat file on disk.
 ///
 /// `socket` overrides the default daemon socket path (auto-discovered if `None`).
-pub async fn cmd_destroy(room_id: &str, socket: Option<&std::path::Path>) -> anyhow::Result<()> {
+/// `token` is required for authentication — the daemon validates it against the
+/// global UserRegistry.
+pub async fn cmd_destroy(
+    room_id: &str,
+    socket: Option<&std::path::Path>,
+    token: &str,
+) -> anyhow::Result<()> {
     let daemon_socket = socket
         .map(|p| p.to_owned())
         .unwrap_or_else(crate::paths::room_socket_path);
@@ -163,7 +173,7 @@ pub async fn cmd_destroy(room_id: &str, socket: Option<&std::path::Path>) -> any
         );
     }
 
-    let result = transport::destroy_room(&daemon_socket, room_id).await?;
+    let result = transport::destroy_room(&daemon_socket, room_id, token).await?;
     println!("{}", serde_json::to_string(&result)?);
     Ok(())
 }

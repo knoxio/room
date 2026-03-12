@@ -128,6 +128,16 @@ impl RoomTab {
     }
 }
 
+/// Read the global token for `username` from the token file on disk.
+///
+/// Returns `None` if the file doesn't exist or can't be parsed.
+fn read_user_token(username: &str) -> Option<String> {
+    let path = crate::paths::global_token_path(username);
+    let data = std::fs::read_to_string(&path).ok()?;
+    let v: serde_json::Value = serde_json::from_str(data.trim()).ok()?;
+    v["token"].as_str().map(|s| s.to_owned())
+}
+
 /// Create or reuse a DM room and return a connected `RoomTab`.
 ///
 /// 1. Sends `CREATE:<dm_room_id>` to the daemon socket. If the room already
@@ -145,9 +155,12 @@ async fn open_dm_tab(
     use tokio::net::UnixStream;
 
     // Step 1: Create the DM room (idempotent — ignore "already exists").
+    // Read the user's token from the token file for authentication.
+    let token = read_user_token(username).unwrap_or_default();
     let config = room_protocol::RoomConfig::dm(username, target_user);
     let config_json = serde_json::to_string(&config)?;
-    match crate::oneshot::transport::create_room(socket_path, dm_room_id, &config_json).await {
+    let authed_config = crate::oneshot::transport::inject_token_into_config(&config_json, &token);
+    match crate::oneshot::transport::create_room(socket_path, dm_room_id, &authed_config).await {
         Ok(_) => {}
         Err(e) if e.to_string().contains("already exists") => {}
         Err(e) => return Err(e),

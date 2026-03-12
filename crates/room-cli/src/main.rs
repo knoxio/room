@@ -232,6 +232,9 @@ enum Cmd {
     Create {
         /// Room ID to create
         room_id: String,
+        /// Session token from `room join` (required)
+        #[arg(short = 't', long)]
+        token: String,
         /// Override the daemon socket path (default: auto-discover)
         #[arg(long)]
         socket: Option<PathBuf>,
@@ -250,6 +253,9 @@ enum Cmd {
     Destroy {
         /// Room ID to destroy
         room_id: String,
+        /// Session token from `room join` (required)
+        #[arg(short = 't', long)]
+        token: String,
         /// Override the daemon socket path (default: auto-discover)
         #[arg(long)]
         socket: Option<PathBuf>,
@@ -639,14 +645,19 @@ async fn main() -> anyhow::Result<()> {
         }
         Some(Cmd::Create {
             room_id,
+            token,
             socket,
             visibility,
             invite,
         }) => {
-            oneshot::cmd_create(&room_id, socket.as_deref(), &visibility, &invite).await?;
+            oneshot::cmd_create(&room_id, socket.as_deref(), &visibility, &invite, &token).await?;
         }
-        Some(Cmd::Destroy { room_id, socket }) => {
-            oneshot::cmd_destroy(&room_id, socket.as_deref()).await?;
+        Some(Cmd::Destroy {
+            room_id,
+            token,
+            socket,
+        }) => {
+            oneshot::cmd_destroy(&room_id, socket.as_deref(), &token).await?;
         }
         Some(Cmd::List) => {
             oneshot::cmd_list().await?;

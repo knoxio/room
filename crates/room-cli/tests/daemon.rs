@@ -334,15 +334,18 @@ async fn ws_dm_room_non_participant_join_rejected() {
 #[tokio::test]
 async fn daemon_concurrent_room_creation_deduplicates() {
     let td = TestDaemon::start(&[]).await;
+    let token = daemon_global_join(&td.socket_path, "admin").await;
     let socket1 = td.socket_path.clone();
     let socket2 = td.socket_path.clone();
+    let tok1 = token.clone();
+    let tok2 = token.clone();
 
     // Fire two concurrent CREATE requests for the same room ID.
     let t1 = tokio::spawn(async move {
-        daemon_create(&socket1, "race-room", r#"{"visibility":"public"}"#).await
+        daemon_create(&socket1, "race-room", r#"{"visibility":"public"}"#, &tok1).await
     });
     let t2 = tokio::spawn(async move {
-        daemon_create(&socket2, "race-room", r#"{"visibility":"public"}"#).await
+        daemon_create(&socket2, "race-room", r#"{"visibility":"public"}"#, &tok2).await
     });
 
     let (r1, r2) = tokio::join!(t1, t2);

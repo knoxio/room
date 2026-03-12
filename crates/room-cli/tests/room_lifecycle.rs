@@ -8,7 +8,8 @@ mod common;
 use std::time::Duration;
 
 use common::{
-    daemon_connect, daemon_create, daemon_destroy, daemon_join, daemon_send, rest_join, TestDaemon,
+    daemon_connect, daemon_create, daemon_destroy, daemon_global_join, daemon_join, daemon_send,
+    rest_join, TestDaemon,
 };
 use room_protocol::RoomConfig;
 use std::path::PathBuf;
@@ -21,11 +22,15 @@ async fn create_room_via_uds_then_join_and_send() {
     // Start a daemon with no pre-created rooms.
     let td = TestDaemon::start(&[]).await;
 
+    // Get a global token for authentication.
+    let admin_token = daemon_global_join(&td.socket_path, "admin").await;
+
     // Create a room dynamically.
     let resp = daemon_create(
         &td.socket_path,
         "dynamic-room",
         r#"{"visibility":"public"}"#,
+        &admin_token,
     )
     .await;
     assert_eq!(resp["type"], "room_created");
@@ -45,12 +50,14 @@ async fn create_room_via_uds_then_join_and_send() {
 #[tokio::test]
 async fn create_room_duplicate_returns_error() {
     let td = TestDaemon::start(&["existing-room"]).await;
+    let token = daemon_global_join(&td.socket_path, "admin").await;
 
     // Try to create a room that already exists.
     let resp = daemon_create(
         &td.socket_path,
         "existing-room",
         r#"{"visibility":"public"}"#,
+        &token,
     )
     .await;
     assert_eq!(resp["type"], "error");
@@ -60,14 +67,21 @@ async fn create_room_duplicate_returns_error() {
 #[tokio::test]
 async fn create_room_invalid_id_returns_error() {
     let td = TestDaemon::start(&[]).await;
+    let token = daemon_global_join(&td.socket_path, "admin").await;
 
     // Room ID with path traversal.
-    let resp = daemon_create(&td.socket_path, "../escape", r#"{"visibility":"public"}"#).await;
+    let resp = daemon_create(
+        &td.socket_path,
+        "../escape",
+        r#"{"visibility":"public"}"#,
+        &token,
+    )
+    .await;
     assert_eq!(resp["type"], "error");
     assert_eq!(resp["code"], "invalid_room_id");
 
     // Empty room ID.
-    let resp2 = daemon_create(&td.socket_path, "", r#"{"visibility":"public"}"#).await;
+    let resp2 = daemon_create(&td.socket_path, "", r#"{"visibility":"public"}"#, &token).await;
     assert_eq!(resp2["type"], "error");
     assert_eq!(resp2["code"], "invalid_room_id");
 }
@@ -75,12 +89,14 @@ async fn create_room_invalid_id_returns_error() {
 #[tokio::test]
 async fn create_dm_room_via_uds() {
     let td = TestDaemon::start(&[]).await;
+    let token = daemon_global_join(&td.socket_path, "admin").await;
 
     // Create a DM room with exactly 2 users.
     let resp = daemon_create(
         &td.socket_path,
         "dm-alice-bob",
         r#"{"visibility":"dm","invite":["alice","bob"]}"#,
+        &token,
     )
     .await;
     assert_eq!(resp["type"], "room_created");
@@ -105,12 +121,14 @@ async fn create_dm_room_via_uds() {
 #[tokio::test]
 async fn create_dm_room_wrong_invite_count_returns_error() {
     let td = TestDaemon::start(&[]).await;
+    let token = daemon_global_join(&td.socket_path, "admin").await;
 
     // DM with only 1 user — should fail.
     let resp = daemon_create(
         &td.socket_path,
         "dm-solo",
         r#"{"visibility":"dm","invite":["alice"]}"#,
+        &token,
     )
     .await;
     assert_eq!(resp["type"], "error");
@@ -121,6 +139,7 @@ async fn create_dm_room_wrong_invite_count_returns_error() {
         &td.socket_path,
         "dm-three",
         r#"{"visibility":"dm","invite":["alice","bob","carol"]}"#,
+        &token,
     )
     .await;
     assert_eq!(resp2["type"], "error");
@@ -128,10 +147,10 @@ async fn create_dm_room_wrong_invite_count_returns_error() {
 }
 
 #[tokio::test]
-async fn create_room_default_config() {
+async fn create_room_default_config_without_token_rejected() {
     let td = TestDaemon::start(&[]).await;
 
-    // Empty config line — should default to public.
+    // Empty config line (no token) — should be rejected.
     let stream = UnixStream::connect(&td.socket_path).await.unwrap();
     let (r, mut w) = stream.into_split();
     w.write_all(b"CREATE:default-room\n\n").await.unwrap();
@@ -140,19 +159,23 @@ async fn create_room_default_config() {
     let mut line = String::new();
     reader.read_line(&mut line).await.unwrap();
     let v: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
-    assert_eq!(v["type"], "room_created");
-    assert_eq!(v["room"], "default-room");
-
-    // Should be joinable (public).
-    let token = daemon_join(&td.socket_path, "default-room", "user1").await;
-    assert!(!token.is_empty());
+    assert_eq!(v["type"], "error");
+    assert_eq!(v["code"], "missing_token");
 }
 
 #[tokio::test]
 async fn create_room_invalid_json_returns_error() {
     let td = TestDaemon::start(&[]).await;
 
-    let resp = daemon_create(&td.socket_path, "bad-config", "not valid json").await;
+    // Send invalid JSON directly — no token injection possible.
+    let stream = UnixStream::connect(&td.socket_path).await.unwrap();
+    let (r, mut w) = stream.into_split();
+    w.write_all(b"CREATE:bad-config\n").await.unwrap();
+    w.write_all(b"not valid json\n").await.unwrap();
+    let mut reader = BufReader::new(r);
+    let mut line = String::new();
+    reader.read_line(&mut line).await.unwrap();
+    let resp: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
     assert_eq!(resp["type"], "error");
     assert_eq!(resp["code"], "invalid_config");
 }
@@ -160,8 +183,15 @@ async fn create_room_invalid_json_returns_error() {
 #[tokio::test]
 async fn create_room_unknown_visibility_returns_error() {
     let td = TestDaemon::start(&[]).await;
+    let token = daemon_global_join(&td.socket_path, "admin").await;
 
-    let resp = daemon_create(&td.socket_path, "weird-room", r#"{"visibility":"secret"}"#).await;
+    let resp = daemon_create(
+        &td.socket_path,
+        "weird-room",
+        r#"{"visibility":"secret"}"#,
+        &token,
+    )
+    .await;
     assert_eq!(resp["type"], "error");
     assert_eq!(resp["code"], "invalid_config");
 }
@@ -172,12 +202,12 @@ async fn create_room_unknown_visibility_returns_error() {
 async fn destroy_room_removes_from_daemon() {
     let td = TestDaemon::start(&["doomed-room"]).await;
 
-    // Room exists — join works.
+    // Room exists — join works. Also gives us a token for destroy.
     let token = daemon_join(&td.socket_path, "doomed-room", "alice").await;
     assert!(!token.is_empty());
 
     // Destroy it.
-    let resp = daemon_destroy(&td.socket_path, "doomed-room").await;
+    let resp = daemon_destroy(&td.socket_path, "doomed-room", &token).await;
     assert_eq!(resp["type"], "room_destroyed");
     assert_eq!(resp["room"], "doomed-room");
 
@@ -196,8 +226,9 @@ async fn destroy_room_removes_from_daemon() {
 #[tokio::test]
 async fn destroy_nonexistent_room_returns_error() {
     let td = TestDaemon::start(&[]).await;
+    let token = daemon_global_join(&td.socket_path, "admin").await;
 
-    let resp = daemon_destroy(&td.socket_path, "ghost-room").await;
+    let resp = daemon_destroy(&td.socket_path, "ghost-room", &token).await;
     assert_eq!(resp["type"], "error");
     assert_eq!(resp["code"], "room_not_found");
 }
@@ -215,7 +246,7 @@ async fn destroy_room_preserves_chat_file() {
     assert!(chat_path.exists(), "chat file should exist before destroy");
 
     // Destroy the room.
-    let resp = daemon_destroy(&td.socket_path, "chat-room").await;
+    let resp = daemon_destroy(&td.socket_path, "chat-room", &token).await;
     assert_eq!(resp["type"], "room_destroyed");
 
     // Chat file should still exist.
@@ -233,8 +264,9 @@ async fn destroy_room_preserves_chat_file() {
 #[tokio::test]
 async fn destroy_empty_room_id_returns_error() {
     let td = TestDaemon::start(&[]).await;
+    let token = daemon_global_join(&td.socket_path, "admin").await;
 
-    let resp = daemon_destroy(&td.socket_path, "").await;
+    let resp = daemon_destroy(&td.socket_path, "", &token).await;
     assert_eq!(resp["type"], "error");
     assert_eq!(resp["code"], "invalid_room_id");
 }
@@ -242,10 +274,16 @@ async fn destroy_empty_room_id_returns_error() {
 #[tokio::test]
 async fn create_then_destroy_then_recreate() {
     let td = TestDaemon::start(&[]).await;
+    let admin_token = daemon_global_join(&td.socket_path, "admin").await;
 
     // Create a room.
-    let create_resp =
-        daemon_create(&td.socket_path, "ephemeral", r#"{"visibility":"public"}"#).await;
+    let create_resp = daemon_create(
+        &td.socket_path,
+        "ephemeral",
+        r#"{"visibility":"public"}"#,
+        &admin_token,
+    )
+    .await;
     assert_eq!(create_resp["type"], "room_created");
 
     // Use it.
@@ -253,12 +291,17 @@ async fn create_then_destroy_then_recreate() {
     assert!(!token.is_empty());
 
     // Destroy it.
-    let destroy_resp = daemon_destroy(&td.socket_path, "ephemeral").await;
+    let destroy_resp = daemon_destroy(&td.socket_path, "ephemeral", &admin_token).await;
     assert_eq!(destroy_resp["type"], "room_destroyed");
 
     // Recreate it.
-    let recreate_resp =
-        daemon_create(&td.socket_path, "ephemeral", r#"{"visibility":"public"}"#).await;
+    let recreate_resp = daemon_create(
+        &td.socket_path,
+        "ephemeral",
+        r#"{"visibility":"public"}"#,
+        &admin_token,
+    )
+    .await;
     assert_eq!(recreate_resp["type"], "room_created");
 
     // Can join again (token is system-level, should still work).
@@ -460,8 +503,11 @@ async fn destroy_room_disconnects_uds_interactive_client() {
     // Drain the join broadcast and any history replay.
     tokio::time::sleep(Duration::from_millis(100)).await;
 
+    // Get a token for destroy auth.
+    let admin_token = daemon_global_join(&td.socket_path, "admin-469").await;
+
     // Destroy the room while the client is connected.
-    let resp = daemon_destroy(&td.socket_path, "live-room").await;
+    let resp = daemon_destroy(&td.socket_path, "live-room", &admin_token).await;
     assert_eq!(resp["type"], "room_destroyed");
 
     // The interactive client should receive EOF (0 bytes read) within a
@@ -513,8 +559,8 @@ async fn destroy_room_rejects_subsequent_token_send() {
     let msg = daemon_send(&td.socket_path, "send-room", &token, "before").await;
     assert_eq!(msg["type"], "message");
 
-    // Destroy the room.
-    let resp = daemon_destroy(&td.socket_path, "send-room").await;
+    // Destroy the room (reuse alice's token for auth).
+    let resp = daemon_destroy(&td.socket_path, "send-room", &token).await;
     assert_eq!(resp["type"], "room_destroyed");
 
     // Subsequent send should fail — room no longer exists.
@@ -548,8 +594,11 @@ async fn destroy_room_disconnects_multiple_uds_clients() {
     // Let join broadcasts settle.
     tokio::time::sleep(Duration::from_millis(200)).await;
 
+    // Get a token for destroy auth.
+    let admin_token = daemon_global_join(&td.socket_path, "admin-multi").await;
+
     // Destroy the room.
-    let resp = daemon_destroy(&td.socket_path, "multi-client-room").await;
+    let resp = daemon_destroy(&td.socket_path, "multi-client-room", &admin_token).await;
     assert_eq!(resp["type"], "room_destroyed");
 
     // All three clients should eventually get EOF or a read error.
@@ -577,4 +626,102 @@ async fn destroy_room_disconnects_multiple_uds_clients() {
         expect_disconnect(&mut r2, "client-2"),
         expect_disconnect(&mut r3, "client-3"),
     );
+}
+
+// ── Auth rejection tests (#469) ─────────────────────────────────────────────
+
+#[tokio::test]
+async fn create_room_without_token_returns_missing_token() {
+    let td = TestDaemon::start(&[]).await;
+
+    // Send CREATE without a token in the config.
+    let stream = UnixStream::connect(&td.socket_path).await.unwrap();
+    let (r, mut w) = stream.into_split();
+    w.write_all(b"CREATE:noauth-room\n{\"visibility\":\"public\"}\n")
+        .await
+        .unwrap();
+
+    let mut reader = BufReader::new(r);
+    let mut line = String::new();
+    reader.read_line(&mut line).await.unwrap();
+    let v: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+    assert_eq!(v["type"], "error");
+    assert_eq!(v["code"], "missing_token");
+}
+
+#[tokio::test]
+async fn create_room_with_invalid_token_returns_invalid_token() {
+    let td = TestDaemon::start(&[]).await;
+
+    // Send CREATE with a bogus token.
+    let stream = UnixStream::connect(&td.socket_path).await.unwrap();
+    let (r, mut w) = stream.into_split();
+    w.write_all(
+        b"CREATE:bad-token-room\n{\"visibility\":\"public\",\"token\":\"not-a-real-token\"}\n",
+    )
+    .await
+    .unwrap();
+
+    let mut reader = BufReader::new(r);
+    let mut line = String::new();
+    reader.read_line(&mut line).await.unwrap();
+    let v: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+    assert_eq!(v["type"], "error");
+    assert_eq!(v["code"], "invalid_token");
+}
+
+#[tokio::test]
+async fn destroy_room_without_token_returns_missing_token() {
+    let td = TestDaemon::start(&["auth-target"]).await;
+
+    // Send DESTROY with an empty second line (no token).
+    let stream = UnixStream::connect(&td.socket_path).await.unwrap();
+    let (r, mut w) = stream.into_split();
+    w.write_all(b"DESTROY:auth-target\n\n").await.unwrap();
+
+    let mut reader = BufReader::new(r);
+    let mut line = String::new();
+    reader.read_line(&mut line).await.unwrap();
+    let v: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+    assert_eq!(v["type"], "error");
+    assert_eq!(v["code"], "missing_token");
+}
+
+#[tokio::test]
+async fn destroy_room_with_invalid_token_returns_invalid_token() {
+    let td = TestDaemon::start(&["auth-target2"]).await;
+
+    // Send DESTROY with a bogus token.
+    let stream = UnixStream::connect(&td.socket_path).await.unwrap();
+    let (r, mut w) = stream.into_split();
+    w.write_all(b"DESTROY:auth-target2\nnot-a-real-token\n")
+        .await
+        .unwrap();
+
+    let mut reader = BufReader::new(r);
+    let mut line = String::new();
+    reader.read_line(&mut line).await.unwrap();
+    let v: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+    assert_eq!(v["type"], "error");
+    assert_eq!(v["code"], "invalid_token");
+}
+
+#[tokio::test]
+async fn create_and_destroy_with_valid_token_succeed() {
+    let td = TestDaemon::start(&[]).await;
+    let token = daemon_global_join(&td.socket_path, "auth-user").await;
+
+    // Create should succeed with valid token.
+    let create_resp = daemon_create(
+        &td.socket_path,
+        "auth-room",
+        r#"{"visibility":"public"}"#,
+        &token,
+    )
+    .await;
+    assert_eq!(create_resp["type"], "room_created");
+
+    // Destroy should succeed with valid token.
+    let destroy_resp = daemon_destroy(&td.socket_path, "auth-room", &token).await;
+    assert_eq!(destroy_resp["type"], "room_destroyed");
 }

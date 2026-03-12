@@ -365,17 +365,21 @@ pub async fn daemon_send(
 }
 
 /// Send a CREATE:<room_id> request to the daemon socket, returns the response JSON.
+///
+/// The `token` is injected into the config JSON for authentication.
 pub async fn daemon_create(
     socket_path: &PathBuf,
     room_id: &str,
     config_json: &str,
+    token: &str,
 ) -> serde_json::Value {
+    let authed_config = room_cli::oneshot::transport::inject_token_into_config(config_json, token);
     let stream = UnixStream::connect(socket_path).await.unwrap();
     let (r, mut w) = stream.into_split();
     w.write_all(format!("CREATE:{room_id}\n").as_bytes())
         .await
         .unwrap();
-    w.write_all(format!("{config_json}\n").as_bytes())
+    w.write_all(format!("{authed_config}\n").as_bytes())
         .await
         .unwrap();
 
@@ -386,12 +390,19 @@ pub async fn daemon_create(
 }
 
 /// Send a DESTROY:<room_id> request to the daemon socket, returns the response JSON.
-pub async fn daemon_destroy(socket_path: &PathBuf, room_id: &str) -> serde_json::Value {
+///
+/// The `token` is sent on the second line for authentication.
+pub async fn daemon_destroy(
+    socket_path: &PathBuf,
+    room_id: &str,
+    token: &str,
+) -> serde_json::Value {
     let stream = UnixStream::connect(socket_path).await.unwrap();
     let (r, mut w) = stream.into_split();
     w.write_all(format!("DESTROY:{room_id}\n").as_bytes())
         .await
         .unwrap();
+    w.write_all(format!("{token}\n").as_bytes()).await.unwrap();
 
     let mut reader = BufReader::new(r);
     let mut line = String::new();

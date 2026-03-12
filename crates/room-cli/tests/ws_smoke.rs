@@ -451,11 +451,37 @@ async fn smoke_isolated_daemon_prints_socket_json_and_is_reachable() {
 
     // Connect to the isolated daemon and create a room — verifies the socket is functional.
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+
+    // First: get a token via global JOIN.
+    let mut join_stream = tokio::net::UnixStream::connect(&sock)
+        .await
+        .expect("failed to connect for JOIN");
+    join_stream
+        .write_all(b"JOIN:smoke-admin\n")
+        .await
+        .expect("failed to write JOIN command");
+    let mut join_reader = tokio::io::BufReader::new(&mut join_stream);
+    let mut join_resp = String::new();
+    timeout(
+        Duration::from_secs(5),
+        join_reader.read_line(&mut join_resp),
+    )
+    .await
+    .expect("timed out reading JOIN response")
+    .expect("I/O error reading JOIN response");
+    let join_json: serde_json::Value =
+        serde_json::from_str(join_resp.trim()).expect("JOIN response not valid JSON");
+    let admin_token = join_json["token"]
+        .as_str()
+        .expect("JOIN response missing token field");
+
+    // Second: create a room with the token.
     let mut stream = tokio::net::UnixStream::connect(&sock)
         .await
         .expect("failed to connect to isolated daemon socket");
+    let create_config = format!("{{\"visibility\":\"public\",\"token\":\"{admin_token}\"}}");
     stream
-        .write_all(b"CREATE:test-isolated\n{\"visibility\":\"public\"}\n")
+        .write_all(format!("CREATE:test-isolated\n{create_config}\n").as_bytes())
         .await
         .expect("failed to write CREATE command");
     let mut reader2 = tokio::io::BufReader::new(&mut stream);
