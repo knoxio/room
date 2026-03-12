@@ -105,7 +105,7 @@ pub(crate) async fn route_command(
         }
 
         if cmd == "set_status" {
-            let status = params.first().cloned().unwrap_or_default();
+            let status = params.join(" ");
             state.set_status(username, status.clone()).await;
             let display = if status.is_empty() {
                 format!("{username} cleared their status")
@@ -538,6 +538,35 @@ mod tests {
                 .get("alice")
                 .map(String::as_str),
             Some("")
+        );
+    }
+
+    #[tokio::test]
+    async fn route_command_set_status_multi_word_joins_all_params() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+        let msg = make_command(
+            "test-room",
+            "alice",
+            "set_status",
+            vec!["reviewing".to_owned(), "PR".to_owned(), "#42".to_owned()],
+        );
+        let result = route_command(msg, "alice", &state).await.unwrap();
+        let CommandResult::HandledWithReply(json) = result else {
+            panic!("expected HandledWithReply");
+        };
+        assert!(
+            json.contains("reviewing PR #42"),
+            "broadcast must contain full multi-word status, got: {json}"
+        );
+        assert_eq!(
+            state
+                .status_map
+                .lock()
+                .await
+                .get("alice")
+                .map(String::as_str),
+            Some("reviewing PR #42")
         );
     }
 
