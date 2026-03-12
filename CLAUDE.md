@@ -479,6 +479,11 @@ crates/room-cli/src/
                           ParamSchema, ParamType, builtin_command_infos, all_known_commands
     help.rs            — Built-in /help plugin
     stats.rs           — Built-in /stats plugin
+    queue.rs           — Built-in /queue plugin (push, pop, peek, list, clear) with NDJSON persistence
+    taskboard/
+      mod.rs           — Built-in /taskboard plugin (post, list, claim, plan, approve, update, finish,
+                          release, show) with lease-based TTL and plan/approve gates
+      task.rs          — TaskEntry struct, status types, NDJSON task persistence
   oneshot/
     mod.rs             — Re-exports, subcommand dispatch, slash command routing (build_wire_payload)
     transport.rs       — Socket connect, send_message, send_message_with_token
@@ -487,6 +492,7 @@ crates/room-cli/src/
                           cmd_poll_multi, cmd_pull, poll_messages, poll_messages_multi,
                           per-room subscription tier filtering, QueryOptions
     list.rs            — cmd_list, discover_daemon_rooms (auto-discovery via .meta files)
+    subscribe.rs       — cmd_subscribe: oneshot /subscribe command for room subscription tiers
     who.rs             — cmd_who: oneshot /who query
   tui/
     mod.rs             — Main run() loop and TUI state
@@ -495,6 +501,7 @@ crates/room-cli/src/
     render_bots.rs     — Bot avatar rendering (extracted from render.rs)
     widgets.rs         — CommandPalette (dynamic, schema-driven), MentionPicker
 crates/room-cli/tests/
+  common/mod.rs        — Shared test helpers (free_port, wait_for_socket, wait_for_tcp)
   auth.rs              — Token and authentication tests
   broker.rs            — UDS broker lifecycle tests
   daemon.rs            — Daemon multi-room tests
@@ -517,7 +524,29 @@ crates/room-ralph/src/
                           Profile enum, merge_profiles, tool profiles
 
 docs/
+  README.md                    — Docs index with page listing
+  quick-start.md               — Install and first-room walkthrough
+  commands.md                  — Full CLI and slash command reference
+  wire-format.md               — JSON message envelope reference
+  authentication.md            — Token lifecycle, kick/reauth states
+  agent-coordination.md        — Multi-agent announce/claim/poll protocol
+  broker-internals.md          — Architecture: socket, fanout, persistence, shutdown
+  dms.md                       — DM delivery semantics
+  plugin.md                    — Claude Code plugin setup
+  ralph-setup.md               — room-ralph permissions, personality, memory
+  testing.md                   — Writing and running tests
+  contributing.md              — Contributor guide, pre-push checklist
+  deployment.md                — Self-hosting, socket paths, configuration
+  tips.md                      — Tips and best practices
+  troubleshooting.md           — FAQ and common errors
+  permission-prompts.md        — Claude Code permission prompt workarounds
   design-253-room-visibility.md — Design doc for room visibility and ACLs
+  design-agent-spawn.md        — Design doc for /agent and /spawn commands (#434)
+  hive/                        — PRDs for Hive orchestration layer
+    README.md                  — Hive overview
+    prd-workspace.md           — Workspace management PRD
+    prd-team-provisioning.md   — Team provisioning PRD
+    prd-agent-discovery.md     — Agent discovery PRD
 
 scripts/
   pre-push.sh          — Git hook: check + fmt + clippy + test
@@ -599,15 +628,15 @@ All tests must remain green. Add tests for any new behaviour.
 
 ## Baseline test count
 
-**Current baseline: 1009 Rust tests + 107 shell tests**
+**Current baseline: 1182 Rust tests + 107 shell tests**
 
 Rust breakdown:
 - room-protocol: 79 unit tests
-- room-cli: 640 unit + 137 integration (auth+broker+daemon+oneshot+rest+lifecycle+scripted+ws) + 5 smoke = 782 tests
-- room-ralph: 136 unit + 9 integration = 145 tests (+ 1 ignored live-broker test)
+- room-cli: 763 unit + 158 integration (26 auth + 25 broker + 25 daemon + 17 oneshot + 11 rest_query + 24 room_lifecycle + 8 scripted + 15 ws + 7 ws_smoke) = 928 tests
+- room-ralph: 164 unit + 11 integration = 175 tests
 
 Note: integration tests are split into focused modules under `tests/` (auth, broker, daemon,
-oneshot, rest_query, room_lifecycle, scripted, ws). No single `integration.rs` file.
+oneshot, rest_query, room_lifecycle, scripted, ws, ws_smoke). No single `integration.rs` file.
 
 Shell breakdown:
 - test-context-monitor.sh: 48 tests
