@@ -5,7 +5,7 @@
 
 use crate::message::make_system;
 
-use super::{fanout::broadcast_and_persist, state::RoomState};
+use super::{auth::save_token_map, fanout::broadcast_and_persist, state::RoomState};
 
 /// Admin command names — routed through `handle_admin_cmd` when received as
 /// a `Message::Command` with one of these cmd values.
@@ -58,6 +58,9 @@ pub(crate) async fn handle_admin_cmd(
             // kicking multiple users does not overwrite each other's sentinel entries.
             map.retain(|_, u| u != &target);
             map.insert(format!("KICKED:{target}"), target.clone());
+            if let Err(e) = save_token_map(&map, &state.token_map_path) {
+                eprintln!("[admin] kick token persist failed: {e}");
+            }
             drop(map);
             // In daemon mode, also revoke from the UserRegistry so the kicked user
             // cannot rejoin via issue_token_via_registry (which checks has_token_for_user).
@@ -79,6 +82,9 @@ pub(crate) async fn handle_admin_cmd(
             let target = arg.to_owned();
             let mut map = token_map.lock().await;
             map.retain(|_, u| u != &target);
+            if let Err(e) = save_token_map(&map, &state.token_map_path) {
+                eprintln!("[admin] reauth token persist failed: {e}");
+            }
             drop(map);
             // In daemon mode, also revoke from the UserRegistry so the reauthed user
             // can obtain a fresh token via issue_token_via_registry.
@@ -88,9 +94,10 @@ pub(crate) async fn handle_admin_cmd(
                 }
             }
             // Remove the on-disk token file so the user can join afresh.
+            let state_dir = crate::paths::room_state_dir();
             let prefix = format!("room-{room_id}-");
             let suffix = format!("-{target}.token");
-            if let Ok(entries) = std::fs::read_dir("/tmp") {
+            if let Ok(entries) = std::fs::read_dir(&state_dir) {
                 for entry in entries.flatten() {
                     let name = entry.file_name();
                     let s = name.to_string_lossy();
@@ -104,10 +111,16 @@ pub(crate) async fn handle_admin_cmd(
             let _ = broadcast_and_persist(&msg, clients, chat_path, seq_counter).await;
         }
         "clear-tokens" => {
-            token_map.lock().await.clear();
+            let mut map = token_map.lock().await;
+            map.clear();
+            if let Err(e) = save_token_map(&map, &state.token_map_path) {
+                eprintln!("[admin] clear-tokens persist failed: {e}");
+            }
+            drop(map);
             // Remove all on-disk token files for this room.
+            let state_dir = crate::paths::room_state_dir();
             let prefix = format!("room-{room_id}-");
-            if let Ok(entries) = std::fs::read_dir("/tmp") {
+            if let Ok(entries) = std::fs::read_dir(&state_dir) {
                 for entry in entries.flatten() {
                     let name = entry.file_name();
                     let s = name.to_string_lossy();
@@ -331,6 +344,114 @@ mod tests {
         assert!(
             !reg.has_token_for_user("bob"),
             "kick must remove all registry tokens for bob"
+        );
+    }
+
+    // ── token persistence after admin commands (#464) ──────────────────────
+
+    #[tokio::test]
+    async fn kick_persists_token_map_to_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let chat_path = dir.path().join("test.chat");
+        std::fs::write(&chat_path, "").unwrap();
+        let state = make_state(chat_path);
+        *state.host_user.lock().await = Some("alice".to_owned());
+        state
+            .token_map
+            .lock()
+            .await
+            .insert("tok-bob".to_owned(), "bob".to_owned());
+
+        handle_admin_cmd("kick bob", "alice", &state).await;
+
+        // Load from disk — KICKED sentinel must be persisted
+        let loaded = crate::broker::auth::load_token_map(&state.token_map_path);
+        assert!(
+            loaded.contains_key("KICKED:bob"),
+            "KICKED sentinel must be persisted to disk"
+        );
+        assert!(
+            !loaded.contains_key("tok-bob"),
+            "original token must not be on disk after kick"
+        );
+    }
+
+    #[tokio::test]
+    async fn reauth_persists_token_map_to_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let chat_path = dir.path().join("test.chat");
+        std::fs::write(&chat_path, "").unwrap();
+        let state = make_state(chat_path);
+        *state.host_user.lock().await = Some("alice".to_owned());
+        {
+            let mut map = state.token_map.lock().await;
+            map.insert("tok-bob".to_owned(), "bob".to_owned());
+            map.insert("KICKED:bob".to_owned(), "bob".to_owned());
+        }
+
+        handle_admin_cmd("reauth bob", "alice", &state).await;
+
+        let loaded = crate::broker::auth::load_token_map(&state.token_map_path);
+        assert!(
+            !loaded.values().any(|u| u == "bob"),
+            "bob must be fully removed from disk after reauth"
+        );
+    }
+
+    #[tokio::test]
+    async fn clear_tokens_persists_empty_map_to_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let chat_path = dir.path().join("test.chat");
+        std::fs::write(&chat_path, "").unwrap();
+        let state = make_state(chat_path);
+        *state.host_user.lock().await = Some("alice".to_owned());
+        {
+            let mut map = state.token_map.lock().await;
+            map.insert("t1".to_owned(), "alice".to_owned());
+            map.insert("t2".to_owned(), "bob".to_owned());
+        }
+
+        handle_admin_cmd("clear-tokens", "alice", &state).await;
+
+        let loaded = crate::broker::auth::load_token_map(&state.token_map_path);
+        assert!(
+            loaded.is_empty(),
+            "token map on disk must be empty after clear-tokens"
+        );
+    }
+
+    #[tokio::test]
+    async fn kicked_token_rejected_after_simulated_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let chat_path = dir.path().join("test.chat");
+        std::fs::write(&chat_path, "").unwrap();
+        let state = make_state(chat_path.clone());
+        *state.host_user.lock().await = Some("alice".to_owned());
+        state
+            .token_map
+            .lock()
+            .await
+            .insert("tok-bob".to_owned(), "bob".to_owned());
+
+        handle_admin_cmd("kick bob", "alice", &state).await;
+
+        // Simulate broker restart: load token map from disk into fresh state
+        let loaded = crate::broker::auth::load_token_map(&state.token_map_path);
+        let new_map: super::super::state::TokenMap = Arc::new(Mutex::new(loaded));
+
+        // The original token must be invalid
+        assert!(
+            crate::broker::auth::validate_token("tok-bob", &new_map)
+                .await
+                .is_none(),
+            "original token must be invalid after restart"
+        );
+        // The KICKED sentinel must not authenticate
+        assert!(
+            crate::broker::auth::validate_token("KICKED:bob", &new_map)
+                .await
+                .is_none(),
+            "KICKED sentinel must not authenticate after restart"
         );
     }
 

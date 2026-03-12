@@ -13,7 +13,7 @@ use super::state::{SubscriptionMap, TokenMap};
 // ── Token persistence ────────────────────────────────────────────────────────
 
 /// Write a token map to disk as JSON.
-fn save_token_map(map: &HashMap<String, String>, path: &Path) -> Result<(), String> {
+pub(crate) fn save_token_map(map: &HashMap<String, String>, path: &Path) -> Result<(), String> {
     let json = serde_json::to_string_pretty(&map).map_err(|e| format!("serialize tokens: {e}"))?;
     std::fs::write(path, json).map_err(|e| format!("write {}: {e}", path.display()))
 }
@@ -122,8 +122,12 @@ pub(crate) async fn issue_token(
 ///
 /// Returns `None` if the token is not found (invalid or expired).
 /// A `KICKED:<username>` sentinel is treated as invalid so kicked users
-/// cannot authenticate.
+/// cannot authenticate — the sentinel key starts with `KICKED:` and must
+/// never be accepted as a valid token.
 pub(crate) async fn validate_token(token: &str, token_map: &TokenMap) -> Option<String> {
+    if token.starts_with("KICKED:") {
+        return None;
+    }
     token_map.lock().await.get(token).cloned()
 }
 
@@ -334,6 +338,20 @@ mod tests {
     async fn validate_token_unknown_returns_none() {
         let map = make_token_map();
         assert!(validate_token("not-a-real-token", &map).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn validate_token_kicked_sentinel_key_rejected() {
+        let map = make_token_map();
+        // Simulate kick: insert KICKED:alice sentinel
+        map.lock()
+            .await
+            .insert("KICKED:alice".to_owned(), "alice".to_owned());
+        // Using the sentinel key as a token must be rejected
+        assert!(
+            validate_token("KICKED:alice", &map).await.is_none(),
+            "KICKED: sentinel key must not authenticate"
+        );
     }
 
     #[tokio::test]
