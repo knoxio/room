@@ -262,10 +262,40 @@ async fn handle_client(
             commands::persist_subscriptions(state).await;
             return result;
         }
-        ClientHandshake::Interactive(u) => u,
+        ClientHandshake::Session(token) => {
+            return match validate_token(&token, &token_map).await {
+                Some(u) => {
+                    if let Err(reason) = auth::check_join_permission(&u, state.config.as_ref()) {
+                        let err = serde_json::json!({
+                            "type": "error",
+                            "code": "join_denied",
+                            "message": reason,
+                            "username": u
+                        });
+                        write_half.write_all(format!("{err}\n").as_bytes()).await?;
+                        return Ok(());
+                    }
+                    run_interactive_session(cid, &u, reader, write_half, own_tx, state).await
+                }
+                None => {
+                    let err = serde_json::json!({"type":"error","code":"invalid_token"});
+                    write_half
+                        .write_all(format!("{err}\n").as_bytes())
+                        .await
+                        .map_err(Into::into)
+                }
+            };
+        }
+        ClientHandshake::Interactive(u) => {
+            eprintln!(
+                "[broker] DEPRECATED: unauthenticated interactive join for '{u}' — \
+                 migrate to SESSION:<token> (plain username joins will be removed in a future version)"
+            );
+            u
+        }
     };
 
-    // Remaining path: full interactive join.
+    // Remaining path: deprecated unauthenticated interactive join.
     if username.is_empty() {
         return Ok(());
     }

@@ -13,7 +13,8 @@
 //! | `SEND:<username>` | [`ClientHandshake::Send`] | **DEPRECATED** — unauthenticated one-shot send (use `TOKEN:` instead) |
 //! | `TOKEN:<uuid>` | [`ClientHandshake::Token`] | Token-authenticated one-shot send |
 //! | `JOIN:<username>` | [`ClientHandshake::Join`] | Register username, receive session token |
-//! | `<username>` | [`ClientHandshake::Interactive`] | Full interactive join |
+//! | `SESSION:<uuid>` | [`ClientHandshake::Session`] | Token-authenticated interactive session |
+//! | `<username>` | [`ClientHandshake::Interactive`] | **DEPRECATED** — unauthenticated interactive join (use `SESSION:` instead) |
 //!
 //! ## Daemon-level prefix
 //!
@@ -37,13 +38,20 @@ pub(crate) enum ClientHandshake {
     Token(String),
     /// `JOIN:<username>` — register username, receive a session token.
     Join(String),
-    /// `<username>` — full interactive session.
+    /// `SESSION:<uuid>` — token-authenticated interactive session.
+    ///
+    /// The broker resolves the username from the token and enters a full
+    /// interactive session. Replaces unauthenticated `Interactive` joins.
+    Session(String),
+    /// `<username>` — **deprecated** unauthenticated interactive session.
+    ///
+    /// Will be removed in a future version. Use [`ClientHandshake::Session`] instead.
     Interactive(String),
 }
 
 /// Parse the first line of a per-room connection into a typed handshake.
 ///
-/// Recognition order: `SEND:` → `TOKEN:` → `JOIN:` → Interactive.
+/// Recognition order: `SEND:` → `TOKEN:` → `JOIN:` → `SESSION:` → Interactive.
 /// Whitespace has already been trimmed by the caller.
 pub(crate) fn parse_client_handshake(line: &str) -> ClientHandshake {
     if let Some(u) = line.strip_prefix("SEND:") {
@@ -54,6 +62,9 @@ pub(crate) fn parse_client_handshake(line: &str) -> ClientHandshake {
     }
     if let Some(u) = line.strip_prefix("JOIN:") {
         return ClientHandshake::Join(u.to_owned());
+    }
+    if let Some(t) = line.strip_prefix("SESSION:") {
+        return ClientHandshake::Session(t.to_owned());
     }
     ClientHandshake::Interactive(line.to_owned())
 }
@@ -138,6 +149,22 @@ mod tests {
         assert_eq!(
             parse_client_handshake("JOIN:bob"),
             ClientHandshake::Join("bob".into())
+        );
+    }
+
+    #[test]
+    fn client_session_prefix() {
+        assert_eq!(
+            parse_client_handshake("SESSION:abc-123-def"),
+            ClientHandshake::Session("abc-123-def".into())
+        );
+    }
+
+    #[test]
+    fn client_session_empty_token() {
+        assert_eq!(
+            parse_client_handshake("SESSION:"),
+            ClientHandshake::Session("".into())
         );
     }
 

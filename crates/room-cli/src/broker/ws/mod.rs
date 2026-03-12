@@ -140,10 +140,40 @@ async fn run_ws_session(
                 }
             };
         }
-        ClientHandshake::Interactive(u) => u,
+        ClientHandshake::Session(token) => {
+            // Resolve username from token (room-level first, then UserRegistry).
+            let resolved = match validate_token(&token, &state.token_map).await {
+                Some(u) => Some(u),
+                None => {
+                    if let Some(reg) = user_registry {
+                        reg.lock()
+                            .await
+                            .validate_token(&token)
+                            .map(|u| u.to_owned())
+                    } else {
+                        None
+                    }
+                }
+            };
+            match resolved {
+                Some(u) => u,
+                None => {
+                    let err = serde_json::json!({"type":"error","code":"invalid_token"});
+                    let _ = ws_tx.send(WsMessage::Text(err.to_string().into())).await;
+                    return Ok(());
+                }
+            }
+        }
+        ClientHandshake::Interactive(u) => {
+            eprintln!(
+                "[broker/ws] DEPRECATED: unauthenticated interactive join for '{u}' — \
+                 migrate to SESSION:<token>"
+            );
+            u
+        }
     };
 
-    // Interactive join.
+    // Interactive join (authenticated via SESSION: or deprecated plain username).
     if username.is_empty() {
         return Ok(());
     }
