@@ -1038,7 +1038,7 @@ async fn dispatch_connection(
             };
         }
         ClientHandshake::Join(u) => {
-            return super::auth::handle_oneshot_join_with_registry(
+            let result = super::auth::handle_oneshot_join_with_registry(
                 u,
                 write_half,
                 user_registry,
@@ -1047,6 +1047,9 @@ async fn dispatch_connection(
                 state.config.as_ref(),
             )
             .await;
+            // Persist auto-subscription from join so it survives broker restart.
+            super::commands::persist_subscriptions(&state).await;
+            return result;
         }
         ClientHandshake::Interactive(u) => u,
     };

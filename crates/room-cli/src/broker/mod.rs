@@ -201,7 +201,7 @@ async fn handle_client(
             };
         }
         ClientHandshake::Join(u) => {
-            return handle_oneshot_join(
+            let result = handle_oneshot_join(
                 u,
                 write_half,
                 &token_map,
@@ -210,6 +210,9 @@ async fn handle_client(
                 Some(&state.token_map_path),
             )
             .await;
+            // Persist auto-subscription from join so it survives broker restart.
+            commands::persist_subscriptions(state).await;
+            return result;
         }
         ClientHandshake::Interactive(u) => u,
     };

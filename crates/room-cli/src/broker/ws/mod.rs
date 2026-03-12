@@ -364,6 +364,15 @@ async fn ws_oneshot_join(
         Ok(token) => {
             let resp = serde_json::json!({"type":"token","token": token, "username": username});
             let _ = ws_tx.send(WsMessage::Text(resp.to_string().into())).await;
+            // Set Full subscription so the joining user receives all messages,
+            // matching the UDS join behaviour in auth.rs.
+            state
+                .subscription_map
+                .lock()
+                .await
+                .insert(username.to_owned(), room_protocol::SubscriptionTier::Full);
+            // Persist so the subscription survives broker restart.
+            super::commands::persist_subscriptions(state).await;
         }
         Err(_) => {
             let err = serde_json::json!({

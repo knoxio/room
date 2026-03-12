@@ -1,7 +1,8 @@
-/// Token authentication and admin command tests.
+/// Token authentication, admin command, and subscription persistence tests.
 ///
 /// Covers: join_session token issuance, token reuse, token invalidation,
-/// admin kick/reauth/clear, admin exit, and permission enforcement.
+/// admin kick/reauth/clear, admin exit, permission enforcement,
+/// and subscription persistence across join and restart (#438).
 mod common;
 
 use std::time::Duration;
@@ -12,6 +13,7 @@ use room_cli::{
     message::{self, Message},
     oneshot,
 };
+use room_protocol::RoomConfig;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 
@@ -670,6 +672,197 @@ async fn daemon_duplicate_username_cross_room_rejected() {
         "cross-room duplicate should return error, got: {v}"
     );
     assert_eq!(v["code"], "username_taken");
+}
+
+// ── Subscription persistence on join ─────────────────────────────────────────
+
+/// Load a subscription map from disk (mirrors broker's load_subscription_map,
+/// which is pub(crate) and inaccessible from integration tests).
+fn load_sub_map(
+    path: &std::path::Path,
+) -> std::collections::HashMap<String, room_protocol::SubscriptionTier> {
+    let contents = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return std::collections::HashMap::new(),
+    };
+    serde_json::from_str(&contents).unwrap_or_default()
+}
+
+/// After a one-shot JOIN, the subscription file is written to disk with the
+/// user set to Full. This is the core fix for #438.
+#[tokio::test]
+async fn oneshot_join_persists_subscription_to_disk() {
+    let broker = TestBroker::start("t_sub_persist").await;
+    room_cli::oneshot::join_session(&broker.socket_path, "agent")
+        .await
+        .expect("join failed");
+
+    // Give the broker a moment to persist (fire-and-forget write).
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let sub_path = broker.chat_path.with_extension("subscriptions");
+    assert!(
+        sub_path.exists(),
+        "subscription file should exist after join"
+    );
+
+    let map = load_sub_map(&sub_path);
+    assert_eq!(
+        map.get("agent"),
+        Some(&room_protocol::SubscriptionTier::Full),
+        "join should persist Full subscription; got: {map:?}"
+    );
+}
+
+/// After a one-shot JOIN via the daemon protocol, the subscription is persisted.
+#[tokio::test]
+async fn daemon_join_persists_subscription_to_disk() {
+    let td = common::TestDaemon::start(&["sub-persist"]).await;
+    common::daemon_join(&td.socket_path, "sub-persist", "bot").await;
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let sub_path = td._dir.path().join("sub-persist.subscriptions");
+    assert!(
+        sub_path.exists(),
+        "subscription file should exist after daemon join"
+    );
+
+    let map = load_sub_map(&sub_path);
+    assert_eq!(
+        map.get("bot"),
+        Some(&room_protocol::SubscriptionTier::Full),
+        "daemon join should persist Full subscription; got: {map:?}"
+    );
+}
+
+/// A denied join (private room, not on invite list) must NOT create a
+/// subscription entry.
+#[tokio::test]
+async fn denied_join_does_not_persist_subscription() {
+    use std::collections::HashSet;
+
+    let td = common::TestDaemon::start_with_configs(vec![(
+        "private-sub",
+        Some(RoomConfig {
+            visibility: room_protocol::RoomVisibility::Private,
+            max_members: None,
+            invite_list: HashSet::new(),
+            created_by: "host".to_owned(),
+            created_at: "2026-01-01T00:00:00Z".to_owned(),
+        }),
+    )])
+    .await;
+
+    // Attempt to join — should be denied
+    let stream = tokio::net::UnixStream::connect(&td.socket_path)
+        .await
+        .unwrap();
+    let (r, mut w) = stream.into_split();
+    w.write_all(b"ROOM:private-sub:JOIN:stranger\n")
+        .await
+        .unwrap();
+
+    let mut reader = tokio::io::BufReader::new(r);
+    let mut line = String::new();
+    reader.read_line(&mut line).await.unwrap();
+    let v: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+    assert_eq!(v["type"], "error", "join should be denied: {v}");
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let sub_path = td._dir.path().join("private-sub.subscriptions");
+    let map = load_sub_map(&sub_path);
+    assert!(
+        !map.contains_key("stranger"),
+        "denied join must not create subscription entry; got: {map:?}"
+    );
+}
+
+/// Subscription persists across broker restart: join, stop broker, start a new
+/// broker with the same data files, verify subscription is loaded.
+#[tokio::test]
+async fn subscription_survives_broker_restart() {
+    use room_cli::broker::Broker;
+
+    let dir = tempfile::tempdir().unwrap();
+    let socket_path = dir.path().join("restart.sock");
+    let chat_path = dir.path().join("restart.chat");
+
+    // Phase 1: start broker, join, verify subscription written
+    {
+        let broker = Broker::new(
+            "restart",
+            chat_path.clone(),
+            chat_path.with_extension("tokens"),
+            chat_path.with_extension("subscriptions"),
+            socket_path.clone(),
+            None,
+        );
+        tokio::spawn(async move { broker.run().await.ok() });
+        common::wait_for_socket(&socket_path, Duration::from_secs(1)).await;
+
+        room_cli::oneshot::join_session(&socket_path, "survivor")
+            .await
+            .expect("join failed");
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    // Phase 1 broker dropped — socket gone. Verify file exists.
+    let sub_path = chat_path.with_extension("subscriptions");
+    let map_before = load_sub_map(&sub_path);
+    assert_eq!(
+        map_before.get("survivor"),
+        Some(&room_protocol::SubscriptionTier::Full),
+        "subscription should be on disk before restart"
+    );
+
+    // Clean up stale socket for phase 2.
+    let _ = std::fs::remove_file(&socket_path);
+
+    // Phase 2: new broker instance loads the same subscription file
+    {
+        let broker = Broker::new(
+            "restart",
+            chat_path.clone(),
+            chat_path.with_extension("tokens"),
+            chat_path.with_extension("subscriptions"),
+            socket_path.clone(),
+            None,
+        );
+        tokio::spawn(async move { broker.run().await.ok() });
+        common::wait_for_socket(&socket_path, Duration::from_secs(1)).await;
+
+        // The subscription file should still have the entry
+        let map_after = load_sub_map(&sub_path);
+        assert_eq!(
+            map_after.get("survivor"),
+            Some(&room_protocol::SubscriptionTier::Full),
+            "subscription should survive broker restart"
+        );
+    }
+}
+
+/// WS join persists the subscription to disk (ws_oneshot_join was missing
+/// subscription insert entirely before #438).
+#[tokio::test]
+async fn ws_join_persists_subscription() {
+    let (broker, port) = TestBroker::start_with_ws("t_ws_sub").await;
+
+    let (_tx, mut rx) = common::ws_connect(port, "t_ws_sub", "JOIN:wsbot").await;
+    let resp = common::ws_recv_json(&mut rx).await;
+    assert_eq!(resp["type"], "token", "WS join should return token: {resp}");
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let sub_path = broker.chat_path.with_extension("subscriptions");
+    let map = load_sub_map(&sub_path);
+    assert_eq!(
+        map.get("wsbot"),
+        Some(&room_protocol::SubscriptionTier::Full),
+        "WS join should persist Full subscription; got: {map:?}"
+    );
 }
 
 /// The room host (first interactive user) can execute admin commands.
