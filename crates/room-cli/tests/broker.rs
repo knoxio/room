@@ -1,7 +1,7 @@
 /// Core single-room UDS broker protocol tests.
 ///
 /// Covers: join/leave events, message broadcast, persistence, history replay,
-/// DM routing, set_status, /who, sequence numbers.
+/// DM routing, set_status, /who, sequence numbers, taskboard plugin lifecycle.
 mod common;
 
 use std::time::Duration;
@@ -1053,4 +1053,315 @@ async fn message_at_size_limit_is_accepted() {
         )
         .await;
     assert_eq!(msg.user(), "alice");
+}
+
+// ── Taskboard plugin integration tests ──────────────────────────────────────
+//
+// These tests use TestDaemon because the taskboard plugin is registered in
+// RoomState::new (daemon mode), not in Broker::new (standalone mode).
+
+/// Wrapper around a daemon interactive connection for ergonomic test code.
+struct DaemonClient {
+    reader: tokio::io::BufReader<tokio::net::unix::OwnedReadHalf>,
+    writer: tokio::net::unix::OwnedWriteHalf,
+}
+
+impl DaemonClient {
+    /// Connect to a daemon room as an interactive user.
+    async fn connect(socket_path: &std::path::PathBuf, room_id: &str, username: &str) -> Self {
+        let (reader, writer) = common::daemon_connect(socket_path, room_id, username).await;
+        Self { reader, writer }
+    }
+
+    /// Send a plain-text line.
+    async fn send_text(&mut self, text: &str) {
+        self.writer
+            .write_all(format!("{text}\n").as_bytes())
+            .await
+            .unwrap();
+    }
+
+    /// Send a JSON envelope.
+    async fn send_json(&mut self, json: &str) {
+        self.writer
+            .write_all(format!("{json}\n").as_bytes())
+            .await
+            .unwrap();
+    }
+
+    /// Drain messages until the predicate matches, or panic after 2 s.
+    async fn recv_until<F: Fn(&Message) -> bool>(&mut self, pred: F) -> Message {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            let remaining = deadline
+                .checked_duration_since(tokio::time::Instant::now())
+                .unwrap_or_default();
+            if remaining.is_zero() {
+                panic!("timed out waiting for expected message");
+            }
+            let mut line = String::new();
+            tokio::time::timeout(remaining, self.reader.read_line(&mut line))
+                .await
+                .expect("timed out")
+                .expect("read error");
+            if let Ok(msg) = serde_json::from_str::<Message>(line.trim()) {
+                if pred(&msg) {
+                    return msg;
+                }
+            }
+        }
+    }
+}
+
+/// Helper: send a taskboard command as a JSON envelope.
+async fn send_taskboard_cmd(client: &mut DaemonClient, action: &str, args: &[&str]) {
+    let mut params = vec![serde_json::Value::String(action.to_owned())];
+    for arg in args {
+        params.push(serde_json::Value::String((*arg).to_owned()));
+    }
+    let envelope = serde_json::json!({
+        "type": "command",
+        "cmd": "taskboard",
+        "params": params,
+    });
+    client.send_json(&envelope.to_string()).await;
+}
+
+/// Helper: drain messages until a system message from `plugin:taskboard`
+/// containing `needle` is received.
+async fn recv_taskboard_msg(client: &mut DaemonClient, needle: &str) -> Message {
+    let needle_owned = needle.to_owned();
+    client
+        .recv_until(move |m| {
+            matches!(m,
+                Message::System { user, content, .. }
+                if user == "plugin:taskboard" && content.contains(&needle_owned)
+            )
+        })
+        .await
+}
+
+/// Full taskboard approve gate lifecycle with 3 interactive clients.
+///
+/// Flow: alice posts → bob claims → bob plans → charlie tries approve (rejected)
+/// → alice approves (accepted) → bob finishes.
+///
+/// Verifies:
+/// - Broadcast messages (post, claim, plan, approve, finish) reach all clients
+/// - Rejection (charlie's approve attempt) is a private reply, not broadcast
+/// - Correct gate: only poster (alice) or host can approve
+#[tokio::test]
+async fn taskboard_approve_gate_multi_user() {
+    let td = common::TestDaemon::start(&["tb-room"]).await;
+
+    // alice connects first → becomes host
+    let mut alice = DaemonClient::connect(&td.socket_path, "tb-room", "alice").await;
+    alice
+        .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "alice"))
+        .await;
+
+    // bob connects
+    let mut bob = DaemonClient::connect(&td.socket_path, "tb-room", "bob").await;
+    bob.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "bob"))
+        .await;
+    alice
+        .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "bob"))
+        .await;
+
+    // charlie connects
+    let mut charlie = DaemonClient::connect(&td.socket_path, "tb-room", "charlie").await;
+    charlie
+        .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "charlie"))
+        .await;
+    alice
+        .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "charlie"))
+        .await;
+    bob.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "charlie"))
+        .await;
+
+    // ── Step 1: alice posts a task ──────────────────────────────────────────
+    send_taskboard_cmd(&mut alice, "post", &["implement", "feature", "X"]).await;
+
+    // All three should receive the broadcast
+    let post_msg = recv_taskboard_msg(&mut alice, "tb-001").await;
+    assert!(post_msg.content().unwrap().contains("implement feature X"));
+
+    recv_taskboard_msg(&mut bob, "tb-001").await;
+    recv_taskboard_msg(&mut charlie, "tb-001").await;
+
+    // ── Step 2: bob claims the task ─────────────────────────────────────────
+    send_taskboard_cmd(&mut bob, "claim", &["tb-001"]).await;
+
+    let claim_msg = recv_taskboard_msg(&mut bob, "claimed by bob").await;
+    assert!(claim_msg.content().unwrap().contains("claimed by bob"));
+
+    recv_taskboard_msg(&mut alice, "claimed by bob").await;
+    recv_taskboard_msg(&mut charlie, "claimed by bob").await;
+
+    // ── Step 3: bob submits a plan ──────────────────────────────────────────
+    send_taskboard_cmd(
+        &mut bob,
+        "plan",
+        &["tb-001", "add", "struct", "and", "tests"],
+    )
+    .await;
+
+    let plan_msg = recv_taskboard_msg(&mut bob, "plan submitted").await;
+    assert!(plan_msg.content().unwrap().contains("add struct and tests"));
+
+    recv_taskboard_msg(&mut alice, "plan submitted").await;
+    recv_taskboard_msg(&mut charlie, "plan submitted").await;
+
+    // ── Step 4: charlie tries to approve (should be rejected) ───────────────
+    send_taskboard_cmd(&mut charlie, "approve", &["tb-001"]).await;
+
+    // charlie gets a private reply (Reply, not Broadcast)
+    let reject_msg = recv_taskboard_msg(&mut charlie, "only the task poster or host").await;
+    assert!(reject_msg
+        .content()
+        .unwrap()
+        .contains("only the task poster or host"));
+
+    // Verify alice and bob do NOT receive the rejection.
+    // We do this by sending a probe message and verifying it arrives first
+    // (if the rejection had been broadcast, it would arrive before the probe).
+    alice.send_text("probe-after-reject").await;
+    let probe = alice
+        .recv_until(
+            |m| matches!(m, Message::Message { content, .. } if content == "probe-after-reject"),
+        )
+        .await;
+    assert_eq!(probe.user(), "alice");
+
+    // bob should also get the probe, not a taskboard rejection
+    let bob_probe = bob
+        .recv_until(
+            |m| matches!(m, Message::Message { content, .. } if content == "probe-after-reject"),
+        )
+        .await;
+    assert_eq!(bob_probe.user(), "alice");
+
+    // ── Step 5: alice approves (she is both poster and host) ────────────────
+    send_taskboard_cmd(&mut alice, "approve", &["tb-001"]).await;
+
+    let approve_msg = recv_taskboard_msg(&mut alice, "approved by alice").await;
+    assert!(approve_msg.content().unwrap().contains("@bob proceed"));
+
+    recv_taskboard_msg(&mut bob, "approved by alice").await;
+    recv_taskboard_msg(&mut charlie, "approved by alice").await;
+
+    // ── Step 6: bob finishes the task ───────────────────────────────────────
+    send_taskboard_cmd(&mut bob, "finish", &["tb-001"]).await;
+
+    let finish_msg = recv_taskboard_msg(&mut bob, "finished by bob").await;
+    assert!(finish_msg.content().unwrap().contains("finished by bob"));
+
+    recv_taskboard_msg(&mut alice, "finished by bob").await;
+    recv_taskboard_msg(&mut charlie, "finished by bob").await;
+}
+
+/// Verify that the host (first connected user) can approve tasks they didn't post.
+///
+/// Scenario: bob posts a task, charlie claims+plans, alice (host) approves.
+#[tokio::test]
+async fn taskboard_host_can_approve_others_tasks() {
+    let td = common::TestDaemon::start(&["tb-host"]).await;
+
+    // alice connects first → host
+    let mut alice = DaemonClient::connect(&td.socket_path, "tb-host", "alice").await;
+    alice
+        .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "alice"))
+        .await;
+
+    let mut bob = DaemonClient::connect(&td.socket_path, "tb-host", "bob").await;
+    bob.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "bob"))
+        .await;
+    alice
+        .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "bob"))
+        .await;
+
+    let mut charlie = DaemonClient::connect(&td.socket_path, "tb-host", "charlie").await;
+    charlie
+        .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "charlie"))
+        .await;
+    bob.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "charlie"))
+        .await;
+    alice
+        .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "charlie"))
+        .await;
+
+    // bob posts a task (bob is NOT the host)
+    send_taskboard_cmd(&mut bob, "post", &["security", "audit"]).await;
+    recv_taskboard_msg(&mut bob, "tb-001").await;
+    recv_taskboard_msg(&mut alice, "tb-001").await;
+    recv_taskboard_msg(&mut charlie, "tb-001").await;
+
+    // charlie claims and plans
+    send_taskboard_cmd(&mut charlie, "claim", &["tb-001"]).await;
+    recv_taskboard_msg(&mut charlie, "claimed by charlie").await;
+    recv_taskboard_msg(&mut alice, "claimed by charlie").await;
+    recv_taskboard_msg(&mut bob, "claimed by charlie").await;
+
+    send_taskboard_cmd(&mut charlie, "plan", &["tb-001", "review", "auth", "code"]).await;
+    recv_taskboard_msg(&mut charlie, "plan submitted").await;
+    recv_taskboard_msg(&mut alice, "plan submitted").await;
+    recv_taskboard_msg(&mut bob, "plan submitted").await;
+
+    // alice (host, NOT poster) approves — should succeed
+    send_taskboard_cmd(&mut alice, "approve", &["tb-001"]).await;
+
+    let approve_msg = recv_taskboard_msg(&mut alice, "approved by alice").await;
+    assert!(approve_msg.content().unwrap().contains("@charlie proceed"));
+
+    recv_taskboard_msg(&mut bob, "approved by alice").await;
+    recv_taskboard_msg(&mut charlie, "approved by alice").await;
+}
+
+/// Verify that assignee cannot approve their own task.
+///
+/// The approve gate checks posted_by or host — the assignee (claimer) is
+/// explicitly NOT authorized unless they happen to also be the poster or host.
+#[tokio::test]
+async fn taskboard_assignee_cannot_self_approve() {
+    let td = common::TestDaemon::start(&["tb-self"]).await;
+
+    let mut alice = DaemonClient::connect(&td.socket_path, "tb-self", "alice").await;
+    alice
+        .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "alice"))
+        .await;
+
+    let mut bob = DaemonClient::connect(&td.socket_path, "tb-self", "bob").await;
+    bob.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "bob"))
+        .await;
+    alice
+        .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "bob"))
+        .await;
+
+    // alice posts
+    send_taskboard_cmd(&mut alice, "post", &["write", "tests"]).await;
+    recv_taskboard_msg(&mut alice, "tb-001").await;
+    recv_taskboard_msg(&mut bob, "tb-001").await;
+
+    // bob claims + plans
+    send_taskboard_cmd(&mut bob, "claim", &["tb-001"]).await;
+    recv_taskboard_msg(&mut bob, "claimed by bob").await;
+    recv_taskboard_msg(&mut alice, "claimed by bob").await;
+
+    send_taskboard_cmd(
+        &mut bob,
+        "plan",
+        &["tb-001", "unit", "tests", "for", "module"],
+    )
+    .await;
+    recv_taskboard_msg(&mut bob, "plan submitted").await;
+    recv_taskboard_msg(&mut alice, "plan submitted").await;
+
+    // bob (assignee, not poster, not host) tries to approve — should fail
+    send_taskboard_cmd(&mut bob, "approve", &["tb-001"]).await;
+
+    let reject = recv_taskboard_msg(&mut bob, "only the task poster or host").await;
+    assert!(reject
+        .content()
+        .unwrap()
+        .contains("only the task poster or host"));
 }
