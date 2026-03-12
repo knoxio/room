@@ -1,4 +1,5 @@
 pub mod help;
+pub mod queue;
 pub mod stats;
 
 use std::{
@@ -616,6 +617,7 @@ pub fn builtin_command_infos() -> Vec<CommandInfo> {
 pub fn all_known_commands() -> Vec<CommandInfo> {
     let mut cmds = builtin_command_infos();
     cmds.extend(help::HelpPlugin.commands());
+    cmds.extend(queue::QueuePlugin::default_commands());
     cmds.extend(stats::StatsPlugin.commands());
     cmds
 }

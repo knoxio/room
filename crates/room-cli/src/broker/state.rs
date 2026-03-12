@@ -102,9 +102,18 @@ impl RoomState {
         subscription_map: SubscriptionMap,
         config: Option<RoomConfig>,
     ) -> Result<Arc<Self>, String> {
+        let claim_map: ClaimMap = Arc::new(Mutex::new(HashMap::new()));
+        let queue_path = crate::plugin::queue::QueuePlugin::queue_path_from_chat(&chat_path);
+
         let mut plugins = crate::plugin::PluginRegistry::new();
         plugins
             .register(Box::new(crate::plugin::help::HelpPlugin))
+            .map_err(|e| format!("plugin error: {e}"))?;
+        plugins
+            .register(Box::new(
+                crate::plugin::queue::QueuePlugin::new(queue_path, claim_map.clone())
+                    .map_err(|e| format!("queue plugin error: {e}"))?,
+            ))
             .map_err(|e| format!("plugin error: {e}"))?;
         plugins
             .register(Box::new(crate::plugin::stats::StatsPlugin))
@@ -117,7 +126,7 @@ impl RoomState {
             status_map: Arc::new(Mutex::new(HashMap::new())),
             host_user: Arc::new(Mutex::new(None)),
             token_map,
-            claim_map: Arc::new(Mutex::new(HashMap::new())),
+            claim_map,
             subscription_map,
             chat_path: Arc::new(chat_path),
             token_map_path: Arc::new(token_map_path),
