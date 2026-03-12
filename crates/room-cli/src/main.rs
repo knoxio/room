@@ -760,14 +760,25 @@ async fn run_join(
     room_cli::oneshot::transport::ensure_daemon_running().await?;
     let daemon_socket = paths::effective_socket_path(None);
 
+    // Read the user's token so we can authenticate the CREATE request.
+    // The token file is written by `room join <username>` or by Client::ensure_token.
+    let token_val = {
+        let path = paths::global_token_path(&username);
+        std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|data| serde_json::from_str::<serde_json::Value>(data.trim()).ok())
+            .and_then(|v| v["token"].as_str().map(|s| s.to_owned()))
+    };
+    let config_json = match token_val {
+        Some(tok) => room_cli::oneshot::transport::inject_token_into_config(
+            r#"{"visibility":"public"}"#,
+            &tok,
+        ),
+        None => r#"{"visibility":"public"}"#.to_owned(),
+    };
+
     // Create the room on the daemon (ignore "already exists").
-    match room_cli::oneshot::transport::create_room(
-        &daemon_socket,
-        &room_id,
-        r#"{"visibility":"public"}"#,
-    )
-    .await
-    {
+    match room_cli::oneshot::transport::create_room(&daemon_socket, &room_id, &config_json).await {
         Ok(_) => eprintln!("[room] created room '{room_id}' on daemon"),
         Err(e) => {
             let msg = e.to_string();
