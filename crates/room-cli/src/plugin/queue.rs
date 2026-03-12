@@ -107,10 +107,10 @@ impl Plugin for QueuePlugin {
             let rest: Vec<&str> = ctx.params.iter().skip(1).map(String::as_str).collect();
 
             match action {
-                "add" => self.handle_add(&ctx.sender, &rest, &ctx).await,
+                "add" => self.handle_add(&ctx.sender, &rest).await,
                 "list" => self.handle_list(&ctx).await,
-                "remove" => self.handle_remove(&rest, &ctx).await,
-                "pop" => self.handle_pop(&ctx.sender, &ctx).await,
+                "remove" => self.handle_remove(&rest).await,
+                "pop" => self.handle_pop(&ctx.sender).await,
                 _ => Ok(PluginResult::Reply(format!(
                     "queue: unknown action '{action}'. use add, list, remove, or pop"
                 ))),
@@ -120,12 +120,7 @@ impl Plugin for QueuePlugin {
 }
 
 impl QueuePlugin {
-    async fn handle_add(
-        &self,
-        sender: &str,
-        rest: &[&str],
-        ctx: &CommandContext,
-    ) -> anyhow::Result<PluginResult> {
+    async fn handle_add(&self, sender: &str, rest: &[&str]) -> anyhow::Result<PluginResult> {
         if rest.is_empty() {
             return Ok(PluginResult::Reply(
                 "queue add: missing task description".to_owned(),
@@ -147,14 +142,11 @@ impl QueuePlugin {
         }
 
         append_item(&self.queue_path, &item)?;
-        ctx.writer
-            .broadcast(&format!(
-                "queue: {sender} added \"{description}\" (#{} in backlog)",
-                self.queue.lock().await.len()
-            ))
-            .await?;
+        let count = self.queue.lock().await.len();
 
-        Ok(PluginResult::Handled)
+        Ok(PluginResult::Broadcast(format!(
+            "queue: {sender} added \"{description}\" (#{count} in backlog)"
+        )))
     }
 
     async fn handle_list(&self, _ctx: &CommandContext) -> anyhow::Result<PluginResult> {
@@ -179,11 +171,7 @@ impl QueuePlugin {
         Ok(PluginResult::Reply(lines.join("\n")))
     }
 
-    async fn handle_remove(
-        &self,
-        rest: &[&str],
-        ctx: &CommandContext,
-    ) -> anyhow::Result<PluginResult> {
+    async fn handle_remove(&self, rest: &[&str]) -> anyhow::Result<PluginResult> {
         let index_str = rest.first().copied().unwrap_or("");
         let index: usize = match index_str.parse::<usize>() {
             Ok(n) if n >= 1 => n,
@@ -206,17 +194,14 @@ impl QueuePlugin {
         };
 
         self.rewrite_queue().await?;
-        ctx.writer
-            .broadcast(&format!(
-                "queue: removed \"{}\" (was #{})",
-                removed.description, index
-            ))
-            .await?;
 
-        Ok(PluginResult::Handled)
+        Ok(PluginResult::Broadcast(format!(
+            "queue: removed \"{}\" (was #{index})",
+            removed.description
+        )))
     }
 
-    async fn handle_pop(&self, sender: &str, ctx: &CommandContext) -> anyhow::Result<PluginResult> {
+    async fn handle_pop(&self, sender: &str) -> anyhow::Result<PluginResult> {
         let popped = {
             let mut queue = self.queue.lock().await;
             if queue.is_empty() {
@@ -241,14 +226,10 @@ impl QueuePlugin {
             );
         }
 
-        ctx.writer
-            .broadcast(&format!(
-                "{sender} claimed from queue: \"{}\"",
-                popped.description
-            ))
-            .await?;
-
-        Ok(PluginResult::Handled)
+        Ok(PluginResult::Broadcast(format!(
+            "{sender} claimed from queue: \"{}\"",
+            popped.description
+        )))
     }
 
     /// Rewrite the entire queue file from the in-memory state.
@@ -507,7 +488,14 @@ mod tests {
         );
 
         let result = plugin.handle(ctx).await.unwrap();
-        assert!(matches!(result, PluginResult::Handled));
+        match &result {
+            PluginResult::Broadcast(msg) => {
+                assert!(msg.contains("fix the bug"), "broadcast should mention task");
+                assert!(msg.contains("alice"), "broadcast should mention sender");
+                assert!(msg.contains("#1"), "broadcast should show queue position");
+            }
+            _ => panic!("expected Broadcast"),
+        }
 
         // In-memory
         let queue = plugin.queue.lock().await;
@@ -631,7 +619,16 @@ mod tests {
             &seq,
         );
         let result = plugin.handle(ctx).await.unwrap();
-        assert!(matches!(result, PluginResult::Handled));
+        match &result {
+            PluginResult::Broadcast(msg) => {
+                assert!(
+                    msg.contains("first"),
+                    "broadcast should mention removed item"
+                );
+                assert!(msg.contains("#1"), "broadcast should mention index");
+            }
+            _ => panic!("expected Broadcast"),
+        }
 
         // Verify only "second" remains
         let queue = plugin.queue.lock().await;
@@ -740,7 +737,13 @@ mod tests {
             &seq,
         );
         let result = plugin.handle(ctx).await.unwrap();
-        assert!(matches!(result, PluginResult::Handled));
+        match &result {
+            PluginResult::Broadcast(msg) => {
+                assert!(msg.contains("alice"), "broadcast should mention claimer");
+                assert!(msg.contains("urgent fix"), "broadcast should mention task");
+            }
+            _ => panic!("expected Broadcast"),
+        }
 
         // Verify claim was set
         let claims = claim_map.lock().await;
