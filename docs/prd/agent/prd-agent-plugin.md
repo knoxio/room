@@ -255,8 +255,11 @@ consumers (Hive, scripts, other agents). This pattern applies to all plugin resp
 - Hive calls `room join` and `room subscribe` directly via WS/REST.
 - Hive spawns ralph processes through its own agent runner (which may handle repo
   cloning, workdir setup, and monitoring).
-- `/agent list` still works — it shows agents the plugin spawned. Hive-spawned agents
-  appear as regular users in the member panel.
+- **`/agent list` only shows plugin-spawned agents.** Hive-spawned agents are not
+  tracked in the plugin's `SpawnedAgent` map because Hive provisions them independently
+  (its own token minting, workdir setup, process management). They still appear as
+  regular users in the member panel and `/who` output — they just aren't visible to
+  `/agent list`, `/agent stop`, or `/agent health`.
 - `/agent` should document this boundary: "when Hive is absent, this plugin is the
   agent control plane. When Hive is present, Hive manages agent lifecycle."
 
@@ -310,13 +313,13 @@ Files:
 Tests:
 - Unit: palette filters personality names on keystroke
 
-## Open Questions
+## Decided Questions
 
-1. **Should `/agent stop` be graceful-only?** Current proposal: SIGTERM then SIGKILL
-   after 5s. Alternative: SIGTERM only, let ralph handle shutdown. Risk: stuck claude
-   subprocess keeps ralph alive indefinitely.
+1. **`/agent stop` uses SIGTERM then SIGKILL.** SIGTERM with a 5-second grace period,
+   then SIGKILL. SIGTERM-only is insufficient — a stuck claude subprocess can keep
+   ralph alive indefinitely, and the host needs a guaranteed way to reclaim resources.
 
-2. **Progress file location**: `/tmp/room-progress-<issue>.md` (current convention,
-   dies on reboot) vs `~/.room/state/progress/<username>-<issue>.md` (persistent).
-   Decision from discussion: use persistent location. Progress must survive both
-   context exhaustion AND host reboot.
+2. **Progress files use persistent storage.** Location:
+   `~/.room/state/progress/<username>-<issue>.md`. Progress must survive both context
+   exhaustion and host reboot. The ephemeral workdir (`/tmp/room-agent-<username>/`)
+   is for scratch files only.

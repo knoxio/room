@@ -155,6 +155,41 @@ Implementation approach:
 - Missing expected steps trigger a warning, not a block.
 - The host can `/agent health <username>` to see the full workflow tracking state.
 
+#### Keyword Matching Algorithm
+
+Each workflow step defines a `keywords` list. When an agent sends a `/set_status` update,
+the health system lowercases the status text and checks each unmatched step's keywords
+using substring matching. The first step whose keyword matches is marked as observed.
+
+Default keyword sets for the built-in `coder` personality:
+
+| Workflow step | Keywords |
+|---|---|
+| `read target files` | `reading`, `read`, `examining`, `looking at`, `reviewing src` |
+| `announce plan in room` | `plan`, `proposing`, `announcing`, `approach` |
+| `wait for approval` | `waiting`, `blocked on approval`, `hold` |
+| `implement` | `implement`, `drafting`, `writing`, `coding`, `fixing`, `adding` |
+| `run tests` | `test`, `cargo test`, `running test`, `checking` |
+| `open PR` | `pr`, `pull request`, `opening pr`, `gh pr` |
+| `announce completion` | `done`, `complete`, `merged`, `finished` |
+
+Matching rules:
+- **Substring, case-insensitive**: `"running cargo test for #42"` matches `cargo test`.
+- **First match wins**: If a status matches multiple steps, the earliest unmatched step
+  in the workflow order is marked.
+- **Order-independent observation**: Steps can be observed out of order (the agent may
+  skip ahead), but the skip is flagged as a warning.
+- **No re-matching**: Once a step is marked observed, subsequent statuses do not re-trigger
+  it. This prevents a status like `"reading test output"` from re-marking the `read` step
+  after `test` has already been observed.
+- **Custom overrides**: Personality TOML files can override keyword sets per step:
+
+```toml
+[workflow.keywords]
+"read target files" = ["reading", "scanning", "inspecting"]
+"run tests" = ["pytest", "running suite", "test pass"]
+```
+
 ### Lifecycle-Specific Rules
 
 #### Persistent agents
