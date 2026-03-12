@@ -176,13 +176,13 @@ pub async fn cmd_pull(room_id: &str, token: &str, n: usize) -> anyhow::Result<()
     Ok(())
 }
 
-/// Watch subcommand: poll in a loop until at least one foreign `Message` arrives.
+/// Watch subcommand: poll in a loop until at least one foreign message arrives.
 ///
 /// Reads the caller's username from the session token file. Polls every
-/// `interval_secs` seconds, filtering out own messages and non-`Message` variants.
-/// Exits after printing the first batch of foreign messages as NDJSON.
-/// Shares the cursor file with `room poll` — the two subcommands never re-deliver
-/// the same message.
+/// `interval_secs` seconds, filtering out own messages. Wakes on `Message`,
+/// `System`, and `DirectMessage` variants. Exits after printing the first batch
+/// of foreign messages as NDJSON. Shares the cursor file with `room poll` — the
+/// two subcommands never re-deliver the same message.
 pub async fn cmd_watch(room_id: &str, token: &str, interval_secs: u64) -> anyhow::Result<()> {
     let username = username_from_token(token)?;
     let meta_path = paths::room_meta_path(room_id);
@@ -203,7 +203,7 @@ pub async fn cmd_watch(room_id: &str, token: &str, interval_secs: u64) -> anyhow
         let foreign: Vec<&Message> = messages
             .iter()
             .filter(|m| match m {
-                Message::Message { user, .. } => user != &username,
+                Message::Message { user, .. } | Message::System { user, .. } => user != &username,
                 Message::DirectMessage { to, .. } => to == &username,
                 _ => false,
             })
@@ -402,11 +402,13 @@ async fn cmd_query_new(
         apply_sort_and_limit(&mut filtered, &filter);
 
         if opts.wait {
-            // Only wake on foreign messages.
+            // Only wake on foreign messages (includes system messages from plugins).
             let foreign: Vec<&Message> = filtered
                 .iter()
                 .filter(|m| match m {
-                    Message::Message { user, .. } => user != username,
+                    Message::Message { user, .. } | Message::System { user, .. } => {
+                        user != username
+                    }
                     Message::DirectMessage { to, .. } => to == username,
                     _ => false,
                 })
@@ -610,7 +612,7 @@ mod tests {
         let foreign: Vec<&Message> = messages
             .iter()
             .filter(|m| match m {
-                Message::Message { user, .. } => user != username,
+                Message::Message { user, .. } | Message::System { user, .. } => user != username,
                 Message::DirectMessage { to, .. } => to == username,
                 _ => false,
             })
@@ -646,7 +648,7 @@ mod tests {
         let foreign: Vec<&Message> = messages
             .iter()
             .filter(|m| match m {
-                Message::Message { user, .. } => user != username,
+                Message::Message { user, .. } | Message::System { user, .. } => user != username,
                 Message::DirectMessage { to, .. } => to == username,
                 _ => false,
             })
@@ -655,6 +657,129 @@ mod tests {
         assert!(
             foreign.is_empty(),
             "DMs sent by the watcher should not wake watch"
+        );
+    }
+
+    /// System messages from other users wake the watch filter (#452).
+    #[tokio::test]
+    async fn watch_filter_wakes_on_foreign_system_message() {
+        use room_protocol::make_system;
+        let chat = NamedTempFile::new().unwrap();
+        let cursor_dir = TempDir::new().unwrap();
+        let cursor = cursor_dir.path().join("cursor");
+
+        let sys = make_system("r", "plugin:taskboard", "task tb-001 approved");
+        crate::history::append(chat.path(), &sys).await.unwrap();
+
+        let messages = poll_messages(chat.path(), &cursor, Some("bob"), None, None)
+            .await
+            .unwrap();
+
+        let username = "bob";
+        let foreign: Vec<&Message> = messages
+            .iter()
+            .filter(|m| match m {
+                Message::Message { user, .. } | Message::System { user, .. } => user != username,
+                Message::DirectMessage { to, .. } => to == username,
+                _ => false,
+            })
+            .collect();
+
+        assert_eq!(
+            foreign.len(),
+            1,
+            "system messages from other users should wake watch"
+        );
+        assert!(matches!(foreign[0], Message::System { .. }));
+    }
+
+    /// System messages from the watcher's own username do not wake watch.
+    #[tokio::test]
+    async fn watch_filter_ignores_own_system_message() {
+        use room_protocol::make_system;
+        let chat = NamedTempFile::new().unwrap();
+        let cursor_dir = TempDir::new().unwrap();
+        let cursor = cursor_dir.path().join("cursor");
+
+        let sys = make_system("r", "bob", "bob subscribed (tier: full)");
+        crate::history::append(chat.path(), &sys).await.unwrap();
+
+        let messages = poll_messages(chat.path(), &cursor, Some("bob"), None, None)
+            .await
+            .unwrap();
+
+        let username = "bob";
+        let foreign: Vec<&Message> = messages
+            .iter()
+            .filter(|m| match m {
+                Message::Message { user, .. } | Message::System { user, .. } => user != username,
+                Message::DirectMessage { to, .. } => to == username,
+                _ => false,
+            })
+            .collect();
+
+        assert!(
+            foreign.is_empty(),
+            "system messages from self should not wake watch"
+        );
+    }
+
+    /// Watch filter handles a mix of messages, system events, and DMs correctly.
+    #[tokio::test]
+    async fn watch_filter_mixed_message_types() {
+        use crate::message::make_dm;
+        use room_protocol::make_system;
+        let chat = NamedTempFile::new().unwrap();
+        let cursor_dir = TempDir::new().unwrap();
+        let cursor = cursor_dir.path().join("cursor");
+
+        // Foreign regular message
+        let msg = make_message("r", "alice", "hello");
+        // Foreign system message (plugin broadcast)
+        let sys = make_system("r", "plugin:taskboard", "task tb-001 claimed by alice");
+        // Own system message (should be filtered out)
+        let own_sys = make_system("r", "bob", "bob subscribed (tier: full)");
+        // DM addressed to watcher
+        let dm = make_dm("r", "alice", "bob", "private note");
+        // Own regular message (should be filtered out)
+        let own_msg = make_message("r", "bob", "my own message");
+
+        for m in [&msg, &sys, &own_sys, &dm, &own_msg] {
+            crate::history::append(chat.path(), m).await.unwrap();
+        }
+
+        let messages = poll_messages(chat.path(), &cursor, Some("bob"), None, None)
+            .await
+            .unwrap();
+
+        let username = "bob";
+        let foreign: Vec<&Message> = messages
+            .iter()
+            .filter(|m| match m {
+                Message::Message { user, .. } | Message::System { user, .. } => user != username,
+                Message::DirectMessage { to, .. } => to == username,
+                _ => false,
+            })
+            .collect();
+
+        assert_eq!(
+            foreign.len(),
+            3,
+            "should see: foreign message + foreign system + DM to self"
+        );
+        assert!(
+            foreign.iter().any(|m| matches!(m, Message::System { .. })),
+            "system message must appear in watch results"
+        );
+        assert!(
+            foreign.iter().any(|m| matches!(m, Message::Message { .. })),
+            "regular foreign message must appear"
+        );
+        assert!(
+            foreign
+                .iter()
+                .any(|m| matches!(m, Message::DirectMessage { .. })),
+            "DM to self must appear"
         );
     }
 
