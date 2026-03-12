@@ -12,7 +12,7 @@ use room_cli::{
     history,
     message::{self, Message},
 };
-use tokio::io::AsyncBufReadExt;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 
 #[tokio::test]
@@ -953,4 +953,104 @@ async fn dm_history_replay_includes_dms_for_host() {
         dave_saw_dm.is_err() || !dave_saw_dm.unwrap(),
         "dave (non-participant, non-host) must not receive the DM in history replay"
     );
+}
+
+// --- read_line_limited integration tests ---
+
+/// Sending a handshake line that exceeds MAX_LINE_BYTES causes the broker to
+/// drop the connection without allocating unbounded memory.
+#[tokio::test]
+async fn oversized_handshake_line_is_rejected() {
+    let broker = TestBroker::start("t_oversized_hs").await;
+
+    let stream = UnixStream::connect(&broker.socket_path).await.unwrap();
+    let (_, mut writer) = stream.into_split();
+
+    // Send a username line that exceeds the limit (no newline — forces the
+    // broker's read_line_limited to accumulate until it hits the cap).
+    let payload = vec![b'A'; room_cli::broker::MAX_LINE_BYTES + 1];
+    let _ = writer.write_all(&payload).await;
+    // Also send a newline so that a non-limited reader would complete.
+    let _ = writer.write_all(b"\n").await;
+
+    // Give the broker time to process and drop the connection.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Verify the broker is still alive by connecting a normal client.
+    let mut alice = TestClient::connect(&broker.socket_path, "alice").await;
+    let msg = alice
+        .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "alice"))
+        .await;
+    assert_eq!(msg.user(), "alice");
+}
+
+/// An interactive client that sends an oversized message line after handshake
+/// receives an error and is disconnected, while the broker continues serving.
+#[tokio::test]
+async fn oversized_message_line_disconnects_client() {
+    let broker = TestBroker::start("t_oversized_msg").await;
+
+    let mut alice = TestClient::connect(&broker.socket_path, "alice").await;
+    alice
+        .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "alice"))
+        .await;
+
+    // Send an oversized message (no newline first, then newline).
+    let mut payload = vec![b'x'; room_cli::broker::MAX_LINE_BYTES + 1];
+    payload.push(b'\n');
+    let _ = alice.writer.write_all(&payload).await;
+
+    // The broker should send an error response and close the connection.
+    // Try reading — we should either get the error JSON or EOF.
+    let mut line = String::new();
+    let result =
+        tokio::time::timeout(Duration::from_secs(2), alice.reader.read_line(&mut line)).await;
+    match result {
+        Ok(Ok(0)) => {} // EOF — broker closed connection
+        Ok(Ok(_)) => {
+            // Got a response — should be an error envelope.
+            let parsed: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+            assert_eq!(parsed["code"], "line_too_long");
+        }
+        Ok(Err(_)) => {} // I/O error — also acceptable (connection reset)
+        Err(_) => panic!("timed out waiting for broker response after oversized line"),
+    }
+
+    // Verify broker is still alive.
+    let mut bob = TestClient::connect(&broker.socket_path, "bob").await;
+    bob.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "bob"))
+        .await;
+}
+
+/// A normal message just under the size limit is accepted.
+#[tokio::test]
+async fn message_at_size_limit_is_accepted() {
+    let broker = TestBroker::start("t_at_limit").await;
+
+    let mut alice = TestClient::connect(&broker.socket_path, "alice").await;
+    alice
+        .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "alice"))
+        .await;
+
+    let mut bob = TestClient::connect(&broker.socket_path, "bob").await;
+    bob.recv_until(|m| matches!(m, Message::Join { user, .. } if user == "bob"))
+        .await;
+    // drain bob's join from alice's perspective
+    alice
+        .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "bob"))
+        .await;
+
+    // Send a message that fits within the limit.
+    // Account for the JSON envelope overhead (~200 bytes for message wrapper).
+    let content_size = room_cli::broker::MAX_LINE_BYTES - 300;
+    let big_content: String = std::iter::repeat('Z').take(content_size).collect();
+    alice.send_text(&big_content).await;
+
+    // Bob should receive it.
+    let msg = bob
+        .recv_until(
+            |m| matches!(m, Message::Message { content, .. } if content.len() > content_size / 2),
+        )
+        .await;
+    assert_eq!(msg.user(), "alice");
 }

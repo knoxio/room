@@ -28,13 +28,56 @@ use fanout::{broadcast_and_persist, dm_and_persist};
 use room_protocol::SubscriptionTier;
 use state::RoomState;
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::{
         unix::{OwnedReadHalf, OwnedWriteHalf},
         UnixListener, UnixStream,
     },
     sync::{broadcast, watch, Mutex},
 };
+
+/// Maximum bytes allowed in a single line from a client connection.
+/// Prevents memory exhaustion from malicious clients sending arbitrarily large lines.
+pub const MAX_LINE_BYTES: usize = 64 * 1024; // 64 KB
+
+/// Read a single newline-terminated line, rejecting lines that exceed `MAX_LINE_BYTES`.
+///
+/// Returns `Ok(n)` where `n` is the number of bytes read (0 = EOF).
+/// Returns an error if the accumulated bytes before a newline exceed the limit.
+///
+/// The line (including the trailing `\n`) is appended to `buf`, matching the
+/// behaviour of `AsyncBufReadExt::read_line`.
+pub(crate) async fn read_line_limited<R: AsyncBufRead + Unpin>(
+    reader: &mut R,
+    buf: &mut String,
+) -> anyhow::Result<usize> {
+    let mut total = 0usize;
+    loop {
+        let available = reader.fill_buf().await?;
+        if available.is_empty() {
+            // EOF
+            return Ok(total);
+        }
+        // Look for a newline in the buffered data.
+        let (chunk, found_newline) = match available.iter().position(|&b| b == b'\n') {
+            Some(pos) => (&available[..=pos], true),
+            None => (available, false),
+        };
+        let chunk_len = chunk.len();
+        if total + chunk_len > MAX_LINE_BYTES {
+            anyhow::bail!("line exceeds maximum size of {} bytes", MAX_LINE_BYTES);
+        }
+        // Safety: we validate UTF-8 before appending.
+        let text = std::str::from_utf8(chunk)
+            .map_err(|e| anyhow::anyhow!("invalid UTF-8 in client line: {e}"))?;
+        buf.push_str(text);
+        total += chunk_len;
+        reader.consume(chunk_len);
+        if found_newline {
+            return Ok(total);
+        }
+    }
+}
 
 pub struct Broker {
     room_id: String,
@@ -180,7 +223,7 @@ async fn handle_client(
 
     // First line: username handshake, or one of the one-shot prefixes.
     let mut first = String::new();
-    reader.read_line(&mut first).await?;
+    read_line_limited(&mut reader, &mut first).await?;
     let first_line = first.trim();
 
     use handshake::{parse_client_handshake, ClientHandshake};
@@ -372,7 +415,7 @@ pub(crate) async fn run_interactive_session(
         let mut line = String::new();
         loop {
             line.clear();
-            match reader.read_line(&mut line).await {
+            match read_line_limited(&mut reader, &mut line).await {
                 Ok(0) => break,
                 Ok(_) => {
                     let trimmed = line.trim();
@@ -442,7 +485,20 @@ pub(crate) async fn run_interactive_session(
                         Err(e) => eprintln!("[broker] bad message from {username_in}: {e}"),
                     }
                 }
-                Err(_) => break,
+                Err(e) => {
+                    eprintln!("[broker] read error from {username_in}: {e:#}");
+                    let err = serde_json::json!({
+                        "type": "error",
+                        "code": "line_too_long",
+                        "message": format!("{e}")
+                    });
+                    let _ = write_half_in
+                        .lock()
+                        .await
+                        .write_all(format!("{err}\n").as_bytes())
+                        .await;
+                    break;
+                }
             }
         }
     });
@@ -480,7 +536,7 @@ pub(crate) async fn handle_oneshot_send(
     state: &RoomState,
 ) -> anyhow::Result<()> {
     let mut line = String::new();
-    reader.read_line(&mut line).await?;
+    read_line_limited(&mut reader, &mut line).await?;
     let trimmed = line.trim();
     if trimmed.is_empty() {
         return Ok(());
@@ -781,5 +837,105 @@ mod tests {
         // Verify subscriptions were persisted to the .subscriptions file.
         let loaded = commands::load_subscription_map(&state.subscription_map_path);
         assert_eq!(loaded.get("alice"), Some(&SubscriptionTier::MentionsOnly));
+    }
+
+    // --- read_line_limited tests ---
+
+    #[tokio::test]
+    async fn read_line_limited_reads_normal_line() {
+        let data = b"hello world\n";
+        let cursor = std::io::Cursor::new(data.to_vec());
+        let mut reader = tokio::io::BufReader::new(cursor);
+        let mut buf = String::new();
+        let n = read_line_limited(&mut reader, &mut buf).await.unwrap();
+        assert_eq!(n, 12);
+        assert_eq!(buf, "hello world\n");
+    }
+
+    #[tokio::test]
+    async fn read_line_limited_reads_line_without_trailing_newline() {
+        let data = b"no newline";
+        let cursor = std::io::Cursor::new(data.to_vec());
+        let mut reader = tokio::io::BufReader::new(cursor);
+        let mut buf = String::new();
+        let n = read_line_limited(&mut reader, &mut buf).await.unwrap();
+        assert_eq!(n, 10);
+        assert_eq!(buf, "no newline");
+    }
+
+    #[tokio::test]
+    async fn read_line_limited_returns_zero_on_eof() {
+        let data = b"";
+        let cursor = std::io::Cursor::new(data.to_vec());
+        let mut reader = tokio::io::BufReader::new(cursor);
+        let mut buf = String::new();
+        let n = read_line_limited(&mut reader, &mut buf).await.unwrap();
+        assert_eq!(n, 0);
+        assert!(buf.is_empty());
+    }
+
+    #[tokio::test]
+    async fn read_line_limited_rejects_oversized_line() {
+        // Create a line that exceeds the limit (no newline, so it keeps reading).
+        let data = vec![b'A'; MAX_LINE_BYTES + 1];
+        let cursor = std::io::Cursor::new(data);
+        let mut reader = tokio::io::BufReader::new(cursor);
+        let mut buf = String::new();
+        let result = read_line_limited(&mut reader, &mut buf).await;
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("exceeds maximum size"),
+            "unexpected error: {err_msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_line_limited_accepts_line_at_exact_limit() {
+        // Line of exactly MAX_LINE_BYTES (including the newline).
+        let mut data = vec![b'A'; MAX_LINE_BYTES - 1];
+        data.push(b'\n');
+        let cursor = std::io::Cursor::new(data);
+        let mut reader = tokio::io::BufReader::new(cursor);
+        let mut buf = String::new();
+        let n = read_line_limited(&mut reader, &mut buf).await.unwrap();
+        assert_eq!(n, MAX_LINE_BYTES);
+        assert!(buf.ends_with('\n'));
+    }
+
+    #[tokio::test]
+    async fn read_line_limited_reads_multiple_lines() {
+        let data = b"line one\nline two\n";
+        let cursor = std::io::Cursor::new(data.to_vec());
+        let mut reader = tokio::io::BufReader::new(cursor);
+
+        let mut buf = String::new();
+        let n = read_line_limited(&mut reader, &mut buf).await.unwrap();
+        assert_eq!(n, 9);
+        assert_eq!(buf, "line one\n");
+
+        buf.clear();
+        let n = read_line_limited(&mut reader, &mut buf).await.unwrap();
+        assert_eq!(n, 9);
+        assert_eq!(buf, "line two\n");
+
+        buf.clear();
+        let n = read_line_limited(&mut reader, &mut buf).await.unwrap();
+        assert_eq!(n, 0);
+    }
+
+    #[tokio::test]
+    async fn read_line_limited_rejects_invalid_utf8() {
+        let data: Vec<u8> = vec![0xFF, 0xFE, b'\n'];
+        let cursor = std::io::Cursor::new(data);
+        let mut reader = tokio::io::BufReader::new(cursor);
+        let mut buf = String::new();
+        let result = read_line_limited(&mut reader, &mut buf).await;
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("invalid UTF-8"),
+            "unexpected error: {err_msg}"
+        );
     }
 }

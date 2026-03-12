@@ -768,7 +768,7 @@ async fn handle_create(
     system_token_map: &TokenMap,
     user_registry: &Arc<tokio::sync::Mutex<UserRegistry>>,
 ) -> anyhow::Result<()> {
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+    use tokio::io::AsyncWriteExt;
 
     // Validate room ID.
     if let Err(e) = validate_room_id(room_id) {
@@ -797,7 +797,7 @@ async fn handle_create(
 
     // Read config JSON from second line.
     let mut config_line = String::new();
-    reader.read_line(&mut config_line).await?;
+    super::read_line_limited(reader, &mut config_line).await?;
     let config_str = config_line.trim();
 
     let (visibility_str, invite): (String, Vec<String>) = if config_str.is_empty() {
@@ -944,13 +944,13 @@ async fn dispatch_connection(
     system_token_map: &TokenMap,
     user_registry: &Arc<tokio::sync::Mutex<UserRegistry>>,
 ) -> anyhow::Result<()> {
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::io::{AsyncWriteExt, BufReader};
 
     let (read_half, mut write_half) = stream.into_split();
     let mut reader = BufReader::new(read_half);
 
     let mut first = String::new();
-    reader.read_line(&mut first).await?;
+    super::read_line_limited(&mut reader, &mut first).await?;
     let first_line = first.trim();
 
     if first_line.is_empty() {
