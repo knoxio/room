@@ -1,5 +1,4 @@
 use std::{
-    collections::HashMap,
     io::{BufRead, Write},
     path::{Path, PathBuf},
     sync::Arc,
@@ -11,9 +10,7 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use super::{BoxFuture, CommandContext, CommandInfo, ParamSchema, ParamType, Plugin, PluginResult};
-
-/// Type alias matching `broker::state::ClaimMap`.
-type ClaimMap = Arc<Mutex<HashMap<String, String>>>;
+use crate::broker::state::{ClaimEntry, ClaimMap};
 
 /// A single item in the task queue backlog.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,7 +48,7 @@ impl QueuePlugin {
     /// # Arguments
     /// * `queue_path` — path to the `.queue` NDJSON file
     /// * `claim_map` — the broker's `ClaimMap` Arc (not a data clone)
-    pub fn new(queue_path: PathBuf, claim_map: ClaimMap) -> anyhow::Result<Self> {
+    pub(crate) fn new(queue_path: PathBuf, claim_map: ClaimMap) -> anyhow::Result<Self> {
         let items = load_queue(&queue_path)?;
         Ok(Self {
             queue: Arc::new(Mutex::new(items)),
@@ -235,7 +232,13 @@ impl QueuePlugin {
         // Integrate with /claim — set the claim on the invoker
         {
             let mut claims = self.claim_map.lock().await;
-            claims.insert(sender.to_owned(), popped.description.clone());
+            claims.insert(
+                sender.to_owned(),
+                ClaimEntry {
+                    task: popped.description.clone(),
+                    claimed_at: std::time::Instant::now(),
+                },
+            );
         }
 
         ctx.writer
@@ -312,6 +315,7 @@ fn rewrite_queue_file(path: &Path, items: &[QueueItem]) -> anyhow::Result<()> {
 mod tests {
     use super::*;
     use crate::plugin::{ChatWriter, HistoryReader, RoomMetadata, UserInfo};
+    use std::collections::HashMap;
     use std::sync::atomic::AtomicU64;
     use tempfile::TempDir;
     use tokio::sync::broadcast;
@@ -740,7 +744,7 @@ mod tests {
 
         // Verify claim was set
         let claims = claim_map.lock().await;
-        assert_eq!(claims.get("alice").unwrap(), "urgent fix");
+        assert_eq!(claims.get("alice").unwrap().task, "urgent fix");
         drop(claims);
 
         // Verify queue has only 1 item left
@@ -785,7 +789,13 @@ mod tests {
         // Pre-existing claim
         {
             let mut claims = claim_map.lock().await;
-            claims.insert("alice".to_owned(), "old task".to_owned());
+            claims.insert(
+                "alice".to_owned(),
+                ClaimEntry {
+                    task: "old task".to_owned(),
+                    claimed_at: std::time::Instant::now(),
+                },
+            );
         }
 
         let plugin = QueuePlugin::new(queue_path, claim_map.clone()).unwrap();
@@ -815,7 +825,7 @@ mod tests {
 
         // Verify claim was replaced
         let claims = claim_map.lock().await;
-        assert_eq!(claims.get("alice").unwrap(), "new task");
+        assert_eq!(claims.get("alice").unwrap().task, "new task");
     }
 
     #[tokio::test]

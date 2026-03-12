@@ -129,6 +129,14 @@ impl RoomState {
         plugins
             .register(Box::new(crate::plugin::stats::StatsPlugin))
             .map_err(|e| format!("plugin error: {e}"))?;
+        let taskboard_path =
+            crate::plugin::taskboard::TaskboardPlugin::taskboard_path_from_chat(&chat_path);
+        plugins
+            .register(Box::new(crate::plugin::taskboard::TaskboardPlugin::new(
+                taskboard_path,
+                None,
+            )))
+            .map_err(|e| format!("plugin error: {e}"))?;
 
         let (shutdown_tx, _) = watch::channel(false);
 

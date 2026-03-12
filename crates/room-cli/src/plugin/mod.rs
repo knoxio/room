@@ -1,6 +1,7 @@
 pub mod help;
 pub mod queue;
 pub mod stats;
+pub mod taskboard;
 
 use std::{
     collections::HashMap,
@@ -619,6 +620,7 @@ pub fn all_known_commands() -> Vec<CommandInfo> {
     cmds.extend(help::HelpPlugin.commands());
     cmds.extend(queue::QueuePlugin::default_commands());
     cmds.extend(stats::StatsPlugin.commands());
+    cmds.extend(taskboard::TaskboardPlugin::default_commands());
     cmds
 }
 
