@@ -20,3 +20,9 @@ The README covers installation and basic usage. This folder contains deep-dive d
 | [troubleshooting.md](troubleshooting.md) | FAQ and common errors |
 | [contributing.md](contributing.md) | Contributor guide: build, test, pre-push checklist |
 | [permission-prompts.md](permission-prompts.md) | Preventing Claude Code permission prompts — known triggers and safe alternatives |
+
+## Hive (product layer)
+
+| Folder | Description |
+|--------|-------------|
+| [hive/](hive/) | PRDs for the Hive orchestration layer — workspaces, teams, agent discovery |
