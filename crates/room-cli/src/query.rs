@@ -23,12 +23,11 @@ pub struct QueryFilter {
     /// Only include messages whose content contains this substring
     /// (case-sensitive).
     pub content_search: Option<String>,
-    /// Only include messages whose content matches this regex pattern.
+    /// Only include messages whose content matches this pre-compiled regex.
     ///
-    /// Stored as `String` to keep the struct `Clone`-able; compiled inside
-    /// [`matches`][Self::matches] on each call. An invalid pattern causes the
-    /// message to be excluded (treated as "no match").
-    pub content_regex: Option<String>,
+    /// Compiled once at construction time. Callers should validate the pattern
+    /// before building the filter (e.g. via [`Regex::new`]).
+    pub content_regex: Option<Regex>,
     /// Only include messages whose sequence number is strictly greater than
     /// this value. Tuple is `(room_id, seq)`. The constraint is skipped for
     /// messages whose `room_id` differs from the filter room.
@@ -88,13 +87,10 @@ impl QueryFilter {
         }
 
         // ── content_regex: regex match ─────────────────────────────────────────
-        if let Some(ref pattern) = self.content_regex {
-            match Regex::new(pattern) {
-                Ok(re) => match msg.content() {
-                    Some(content) if re.is_match(content) => {}
-                    _ => return false,
-                },
-                Err(_) => return false,
+        if let Some(ref re) = self.content_regex {
+            match msg.content() {
+                Some(content) if re.is_match(content) => {}
+                _ => return false,
             }
         }
 
@@ -383,7 +379,7 @@ mod tests {
     #[test]
     fn content_regex_passes_matching_pattern() {
         let f = QueryFilter {
-            content_regex: Some(r"\d+".into()),
+            content_regex: Some(Regex::new(r"\d+").unwrap()),
             ..Default::default()
         };
         assert!(f.matches(&make_message("r", "u", "issue #42 fixed"), "r"));
@@ -392,25 +388,22 @@ mod tests {
     #[test]
     fn content_regex_rejects_non_matching() {
         let f = QueryFilter {
-            content_regex: Some(r"^\d+$".into()),
+            content_regex: Some(Regex::new(r"^\d+$").unwrap()),
             ..Default::default()
         };
         assert!(!f.matches(&make_message("r", "u", "no numbers here"), "r"));
     }
 
     #[test]
-    fn content_regex_invalid_pattern_excludes_message() {
-        let f = QueryFilter {
-            content_regex: Some("[invalid".into()),
-            ..Default::default()
-        };
-        assert!(!f.matches(&make_message("r", "u", "anything"), "r"));
+    fn content_regex_invalid_pattern_rejected_at_compile_time() {
+        // Invalid patterns are now caught at construction time, not inside matches().
+        assert!(Regex::new("[invalid").is_err());
     }
 
     #[test]
     fn content_regex_rejects_no_content() {
         let f = QueryFilter {
-            content_regex: Some(".*".into()),
+            content_regex: Some(Regex::new(".*").unwrap()),
             ..Default::default()
         };
         // Join has no content — should be excluded.
@@ -694,7 +687,7 @@ mod tests {
     #[test]
     fn has_narrowing_filter_content_regex_is_true() {
         let f = QueryFilter {
-            content_regex: Some(r"\d+".into()),
+            content_regex: Some(Regex::new(r"\d+").unwrap()),
             ..Default::default()
         };
         assert!(has_narrowing_filter(&f, false));

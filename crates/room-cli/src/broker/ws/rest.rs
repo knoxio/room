@@ -117,8 +117,19 @@ pub(super) struct CreateRoomRequest {
 // ── Query helpers ───────────────────────────────────────────────────────
 
 /// Build a [`QueryFilter`] from REST query params, scoped to `room_id`.
-pub(super) fn build_query_filter(params: &QueryParams, room_id: &str) -> QueryFilter {
-    QueryFilter {
+///
+/// Returns `Err` with a human-readable message if the `regex` param is invalid.
+pub(super) fn build_query_filter(
+    params: &QueryParams,
+    room_id: &str,
+) -> Result<QueryFilter, String> {
+    let compiled_regex = params
+        .regex
+        .as_deref()
+        .map(|pat| regex::Regex::new(pat).map_err(|e| format!("invalid regex pattern: {e}")))
+        .transpose()?;
+
+    Ok(QueryFilter {
         users: params
             .user
             .as_ref()
@@ -128,14 +139,14 @@ pub(super) fn build_query_filter(params: &QueryParams, room_id: &str) -> QueryFi
         after_seq: params.since.map(|seq| (room_id.to_owned(), seq)),
         before_seq: params.before.map(|seq| (room_id.to_owned(), seq)),
         content_search: params.content.clone(),
-        content_regex: params.regex.clone(),
+        content_regex: compiled_regex,
         mention_user: params.mention.clone(),
         public_only: params.public.unwrap_or(false),
         ascending: params.asc.unwrap_or(false),
         after_ts: params.after_ts.as_deref().and_then(|s| s.parse().ok()),
         before_ts: params.before_ts.as_deref().and_then(|s| s.parse().ok()),
         ..QueryFilter::default()
-    }
+    })
 }
 
 /// Apply a [`QueryFilter`] to a history, enforcing DM privacy.
@@ -355,7 +366,20 @@ pub(super) async fn api_query(
         }
     };
 
-    let filter = build_query_filter(&params, &room_id);
+    let filter = match build_query_filter(&params, &room_id) {
+        Ok(f) => f,
+        Err(msg) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "type": "error",
+                    "code": "invalid_regex",
+                    "message": msg
+                })),
+            )
+                .into_response()
+        }
+    };
 
     // `public=true` alone is not a valid query — require at least one narrowing param.
     if filter.public_only && !has_narrowing_filter(&filter, false) {
@@ -724,7 +748,20 @@ pub(super) async fn daemon_api_query(
         }
     };
 
-    let filter = build_query_filter(&params, &room_id);
+    let filter = match build_query_filter(&params, &room_id) {
+        Ok(f) => f,
+        Err(msg) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "type": "error",
+                    "code": "invalid_regex",
+                    "message": msg
+                })),
+            )
+                .into_response()
+        }
+    };
 
     // `public=true` alone is not a valid query — require at least one narrowing param.
     if filter.public_only && !has_narrowing_filter(&filter, false) {

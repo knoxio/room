@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use chrono::DateTime;
 use clap::{Parser, Subcommand};
+use regex::Regex;
 use room_cli::{
     broker::daemon::{is_pid_alive, DaemonConfig, DaemonState},
     client::Client,
@@ -479,11 +480,17 @@ async fn main() -> anyhow::Result<()> {
                 new || wait
             };
 
+            let compiled_regex = regex
+                .map(|pat| {
+                    Regex::new(&pat).map_err(|e| anyhow::anyhow!("invalid --regex pattern: {e}"))
+                })
+                .transpose()?;
+
             let filter = QueryFilter {
                 rooms: effective_rooms.clone(),
                 users: user.map(|u| vec![u]).unwrap_or_default(),
                 content_search: search,
-                content_regex: regex,
+                content_regex: compiled_regex,
                 after_seq,
                 before_seq,
                 after_ts,
