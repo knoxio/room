@@ -91,6 +91,12 @@ pub struct Cli {
     #[arg(long, env = "ROOM_SOCKET")]
     pub socket: Option<PathBuf>,
 
+    /// Skip all tool restrictions — passes no --allowedTools or --disallowedTools
+    /// to claude, giving full unrestricted tool access.
+    /// Overrides --profile, --allow-tools, and --disallow-tools when set.
+    #[arg(long, env = "RALPH_ALLOW_ALL")]
+    pub allow_all: bool,
+
     /// Print the prompt that would be sent, then exit
     #[arg(long)]
     pub dry_run: bool,
@@ -114,6 +120,7 @@ mod tests {
             "RALPH_ISSUE",
             "RALPH_DISALLOWED_TOOLS",
             "RALPH_PROFILE",
+            "RALPH_ALLOW_ALL",
             "ROOM_SOCKET",
         ] {
             unsafe { std::env::remove_var(key) };
@@ -356,6 +363,59 @@ mod tests {
             Some(PathBuf::from("/tmp/flag.sock")),
             "CLI --socket should override ROOM_SOCKET env var"
         );
+        clear_ralph_env();
+    }
+
+    #[test]
+    fn allow_all_flag_defaults_to_false() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        clear_ralph_env();
+
+        let cli = Cli::try_parse_from(["room-ralph", "myroom", "myuser"]).unwrap();
+        assert!(!cli.allow_all, "allow_all should default to false");
+        clear_ralph_env();
+    }
+
+    #[test]
+    fn allow_all_flag_sets_true() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        clear_ralph_env();
+
+        let cli = Cli::try_parse_from(["room-ralph", "myroom", "myuser", "--allow-all"]).unwrap();
+        assert!(cli.allow_all, "allow_all should be true when flag is set");
+        clear_ralph_env();
+    }
+
+    #[test]
+    fn allow_all_from_env_var() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        clear_ralph_env();
+
+        unsafe { std::env::set_var("RALPH_ALLOW_ALL", "true") };
+        let cli = Cli::try_parse_from(["room-ralph", "myroom", "myuser"]).unwrap();
+        assert!(
+            cli.allow_all,
+            "allow_all should be true from RALPH_ALLOW_ALL env var"
+        );
+        clear_ralph_env();
+    }
+
+    #[test]
+    fn allow_all_coexists_with_profile() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        clear_ralph_env();
+
+        let cli = Cli::try_parse_from([
+            "room-ralph",
+            "myroom",
+            "myuser",
+            "--allow-all",
+            "--profile",
+            "reviewer",
+        ])
+        .unwrap();
+        assert!(cli.allow_all);
+        assert_eq!(cli.profile, Some(claude::Profile::Reviewer));
         clear_ralph_env();
     }
 }

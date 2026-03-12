@@ -33,6 +33,7 @@ fn test_cli(f: impl FnOnce(&mut Cli)) -> Cli {
         disallow_tools: vec![],
         profile: None,
         socket: None,
+        allow_all: false,
         dry_run: false,
     };
     f(&mut cli);
@@ -376,7 +377,29 @@ async fn personality_appears_in_dry_run_output() {
     cleanup("integ-personality", None);
 }
 
-// ── Test 9: live broker join and announce ────────────────────────────────────
+// ── Test 9: --allow-all skips tool restrictions in dry-run ───────────────────
+
+#[tokio::test]
+async fn allow_all_dry_run_succeeds() {
+    let cli = test_cli(|c| {
+        c.dry_run = true;
+        c.allow_all = true;
+        c.username = "integ-allow-all".to_string();
+        // Also set a profile to verify allow_all takes precedence
+        c.profile = Some(room_ralph::claude::Profile::Reader);
+        c.disallow_tools = vec!["Bash".to_string()];
+    });
+    let running = Arc::new(AtomicBool::new(true));
+
+    let result = loop_runner::run_loop(&cli, "fake-token".to_string(), &running).await;
+    assert!(
+        result.is_ok(),
+        "allow_all + dry_run should succeed: {result:?}"
+    );
+    cleanup("integ-allow-all", None);
+}
+
+// ── Test 10: live broker join and announce ───────────────────────────────────
 
 #[tokio::test]
 #[ignore = "requires a running broker: `room ralph-live-test host &`"]

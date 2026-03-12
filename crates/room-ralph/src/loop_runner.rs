@@ -152,10 +152,20 @@ fn try_invoke_claude(
         cli.model,
         iteration
     );
-    let (profile_allow, profile_disallow) =
-        claude::merge_profile_with_overrides(cli.profile, &cli.allow_tools, &cli.disallow_tools);
-    let effective_tools = claude::resolve_allowed_tools(&profile_allow);
-    let effective_disallowed = claude::resolve_disallowed_tools(&profile_disallow);
+    let (effective_tools, effective_disallowed) = if cli.allow_all {
+        tracing::info!("--allow-all: skipping all tool restrictions");
+        (Vec::new(), Vec::new())
+    } else {
+        let (profile_allow, profile_disallow) = claude::merge_profile_with_overrides(
+            cli.profile,
+            &cli.allow_tools,
+            &cli.disallow_tools,
+        );
+        (
+            claude::resolve_allowed_tools(&profile_allow),
+            claude::resolve_disallowed_tools(&profile_disallow),
+        )
+    };
 
     match claude::spawn_claude(
         &cli.model,

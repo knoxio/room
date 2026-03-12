@@ -76,6 +76,9 @@ fn launch_tmux(cli: &Cli) -> Result<(), String> {
         args.push("--socket".into());
         args.push(socket.display().to_string());
     }
+    if cli.allow_all {
+        args.push("--allow-all".into());
+    }
 
     let cmd_str = format!("{} {}", exe.display(), args.join(" "));
     std::process::Command::new("tmux")
@@ -163,12 +166,13 @@ async fn main() -> ExitCode {
     }
 
     tracing::info!(
-        "room-ralph starting: room={} user={} model={} issue={} max_iter={}",
+        "room-ralph starting: room={} user={} model={} issue={} max_iter={} allow_all={}",
         cli.room_id,
         cli.username,
         cli.model,
         cli.issue.as_deref().unwrap_or("none"),
         cli.max_iter,
+        cli.allow_all,
     );
 
     let socket_str = cli.socket.as_ref().map(|p| p.display().to_string());
@@ -192,10 +196,17 @@ async fn main() -> ExitCode {
         cli.username = join_result.username;
     }
 
-    let announce = format!(
-        "online (room-ralph, model={}, iter limit={})",
-        cli.model, cli.max_iter
-    );
+    let announce = if cli.allow_all {
+        format!(
+            "online (room-ralph, model={}, iter limit={}, allow-all)",
+            cli.model, cli.max_iter
+        )
+    } else {
+        format!(
+            "online (room-ralph, model={}, iter limit={})",
+            cli.model, cli.max_iter
+        )
+    };
     room::send_message(&cli.room_id, &token, &announce, socket_ref).ok();
 
     match loop_runner::run_loop(&cli, token, &running).await {
