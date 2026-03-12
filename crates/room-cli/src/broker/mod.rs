@@ -487,6 +487,13 @@ pub(crate) async fn run_interactive_session(
                                     continue;
                                 }
                                 let is_broadcast = !matches!(&msg, Message::DirectMessage { .. });
+                                // Subscribe @mentioned users BEFORE broadcast so the
+                                // subscription is on disk before the message (#481).
+                                let newly_subscribed = if is_broadcast {
+                                    subscribe_mentioned(&msg, &state_in).await
+                                } else {
+                                    Vec::new()
+                                };
                                 let result = match &msg {
                                     Message::DirectMessage { .. } => {
                                         dm_and_persist(
@@ -511,8 +518,8 @@ pub(crate) async fn run_interactive_session(
                                 if let Err(e) = &result {
                                     eprintln!("[broker] persist error: {e:#}");
                                 }
-                                if is_broadcast && result.is_ok() {
-                                    auto_subscribe_mentioned(&msg, &state_in).await;
+                                if !newly_subscribed.is_empty() && result.is_ok() {
+                                    broadcast_subscribe_notices(&newly_subscribed, &state_in).await;
                                 }
                             }
                             Err(e) => eprintln!("[broker] route error: {e:#}"),
@@ -594,6 +601,13 @@ pub(crate) async fn handle_oneshot_send(
                 return Ok(());
             }
             let is_broadcast = !matches!(&msg, Message::DirectMessage { .. });
+            // Subscribe @mentioned users BEFORE broadcast so the
+            // subscription is on disk before the message (#481).
+            let newly_subscribed = if is_broadcast {
+                subscribe_mentioned(&msg, state).await
+            } else {
+                Vec::new()
+            };
             let seq_msg = match &msg {
                 Message::DirectMessage { .. } => {
                     dm_and_persist(
@@ -615,8 +629,8 @@ pub(crate) async fn handle_oneshot_send(
                     .await?
                 }
             };
-            if is_broadcast {
-                auto_subscribe_mentioned(&msg, state).await;
+            if !newly_subscribed.is_empty() {
+                broadcast_subscribe_notices(&newly_subscribed, state).await;
             }
             let echo = format!("{}\n", serde_json::to_string(&seq_msg)?);
             write_half.write_all(echo.as_bytes()).await?;
@@ -625,25 +639,29 @@ pub(crate) async fn handle_oneshot_send(
     Ok(())
 }
 
-/// Check a broadcast message for @mentions and auto-subscribe any mentioned
-/// registered users who are not already subscribed (or are `Unsubscribed`).
+/// Subscribe @mentioned users who are not already subscribed (or are `Unsubscribed`).
 ///
-/// Sets the tier to `MentionsOnly` and broadcasts a system notice for each
-/// newly subscribed user so the room is aware.
-async fn auto_subscribe_mentioned(msg: &Message, state: &RoomState) {
+/// Must be called BEFORE `broadcast_and_persist` so that the subscription exists
+/// on disk before the message is persisted to the chat file. This ensures poll-based
+/// room discovery (`discover_joined_rooms`) finds the room before the mention message
+/// is written, closing the race window described in #481.
+///
+/// Returns the list of newly subscribed usernames. Callers should pass this to
+/// [`broadcast_subscribe_notices`] after the message has been broadcast.
+async fn subscribe_mentioned(msg: &Message, state: &RoomState) -> Vec<String> {
     let mentioned = msg.mentions();
     if mentioned.is_empty() {
-        return;
+        return Vec::new();
     }
 
-    // Phase 1: collect users to auto-subscribe (brief lock hold).
-    let auto_subscribed = {
+    // Collect users to auto-subscribe (brief lock hold).
+    let newly_subscribed = {
         let token_map = state.token_map.lock().await;
         let registered: std::collections::HashSet<&str> =
             token_map.values().map(String::as_str).collect();
 
         let mut sub_map = state.subscription_map.lock().await;
-        let mut newly_subscribed = Vec::new();
+        let mut newly = Vec::new();
 
         for username in &mentioned {
             if !registered.contains(username.as_str()) {
@@ -655,21 +673,27 @@ async fn auto_subscribe_mentioned(msg: &Message, state: &RoomState) {
             };
             if dominated {
                 sub_map.insert(username.clone(), SubscriptionTier::MentionsOnly);
-                newly_subscribed.push(username.clone());
+                newly.push(username.clone());
             }
         }
-        newly_subscribed
+        newly
     };
 
-    if auto_subscribed.is_empty() {
-        return;
+    if !newly_subscribed.is_empty() {
+        // Persist the updated subscription map to disk so that
+        // `discover_joined_rooms` picks up the new room immediately.
+        commands::persist_subscriptions(state).await;
     }
 
-    // Persist the updated subscription map to disk.
-    commands::persist_subscriptions(state).await;
+    newly_subscribed
+}
 
-    // Phase 2: broadcast notices (no locks held).
-    for username in &auto_subscribed {
+/// Broadcast system notices for users that were auto-subscribed by [`subscribe_mentioned`].
+///
+/// Call this AFTER the original message has been broadcast so that the notice
+/// appears after the mention in chat history.
+async fn broadcast_subscribe_notices(newly_subscribed: &[String], state: &RoomState) {
+    for username in newly_subscribed {
         let notice = format!(
             "{username} auto-subscribed at mentions_only (mentioned in {})",
             state.room_id
@@ -714,7 +738,7 @@ mod tests {
         let state = make_test_state(tmp.path().to_path_buf());
         // Message mentions @alice but alice has no token — should not auto-subscribe.
         let msg = make_message("test-room", "bob", "hey @alice check this");
-        auto_subscribe_mentioned(&msg, &state).await;
+        subscribe_mentioned(&msg, &state).await;
         assert!(state.subscription_map.lock().await.is_empty());
     }
 
@@ -729,7 +753,7 @@ mod tests {
             .await
             .insert("tok-alice".to_owned(), "alice".to_owned());
         let msg = make_message("test-room", "bob", "hey @alice check this");
-        auto_subscribe_mentioned(&msg, &state).await;
+        subscribe_mentioned(&msg, &state).await;
         assert_eq!(
             *state.subscription_map.lock().await.get("alice").unwrap(),
             SubscriptionTier::MentionsOnly
@@ -751,7 +775,7 @@ mod tests {
             .await
             .insert("alice".to_owned(), SubscriptionTier::Full);
         let msg = make_message("test-room", "bob", "hey @alice check this");
-        auto_subscribe_mentioned(&msg, &state).await;
+        subscribe_mentioned(&msg, &state).await;
         // Should remain Full, not downgraded to MentionsOnly.
         assert_eq!(
             *state.subscription_map.lock().await.get("alice").unwrap(),
@@ -774,7 +798,7 @@ mod tests {
             .await
             .insert("alice".to_owned(), SubscriptionTier::MentionsOnly);
         let msg = make_message("test-room", "bob", "@alice ping");
-        auto_subscribe_mentioned(&msg, &state).await;
+        subscribe_mentioned(&msg, &state).await;
         assert_eq!(
             *state.subscription_map.lock().await.get("alice").unwrap(),
             SubscriptionTier::MentionsOnly
@@ -796,7 +820,7 @@ mod tests {
             .await
             .insert("alice".to_owned(), SubscriptionTier::Unsubscribed);
         let msg = make_message("test-room", "bob", "@alice come back");
-        auto_subscribe_mentioned(&msg, &state).await;
+        subscribe_mentioned(&msg, &state).await;
         assert_eq!(
             *state.subscription_map.lock().await.get("alice").unwrap(),
             SubscriptionTier::MentionsOnly
@@ -813,7 +837,7 @@ mod tests {
             tokens.insert("tok-carol".to_owned(), "carol".to_owned());
         }
         let msg = make_message("test-room", "bob", "@alice @carol @unknown review this");
-        auto_subscribe_mentioned(&msg, &state).await;
+        subscribe_mentioned(&msg, &state).await;
         let sub_map = state.subscription_map.lock().await;
         assert_eq!(
             *sub_map.get("alice").unwrap(),
@@ -836,7 +860,7 @@ mod tests {
             .await
             .insert("tok-alice".to_owned(), "alice".to_owned());
         let msg = make_message("test-room", "bob", "hello everyone");
-        auto_subscribe_mentioned(&msg, &state).await;
+        subscribe_mentioned(&msg, &state).await;
         assert!(state.subscription_map.lock().await.is_empty());
     }
 
@@ -850,7 +874,8 @@ mod tests {
             .await
             .insert("tok-alice".to_owned(), "alice".to_owned());
         let msg = make_message("test-room", "bob", "hey @alice");
-        auto_subscribe_mentioned(&msg, &state).await;
+        let newly = subscribe_mentioned(&msg, &state).await;
+        broadcast_subscribe_notices(&newly, &state).await;
         // Verify the auto-subscribe notice was persisted to chat history.
         let history = std::fs::read_to_string(tmp.path()).unwrap();
         assert!(history.contains("auto-subscribed"));
@@ -868,10 +893,56 @@ mod tests {
             .await
             .insert("tok-alice".to_owned(), "alice".to_owned());
         let msg = make_message("test-room", "bob", "hey @alice");
-        auto_subscribe_mentioned(&msg, &state).await;
+        subscribe_mentioned(&msg, &state).await;
         // Verify subscriptions were persisted to the .subscriptions file.
         let loaded = commands::load_subscription_map(&state.subscription_map_path);
         assert_eq!(loaded.get("alice"), Some(&SubscriptionTier::MentionsOnly));
+    }
+
+    /// Regression test for #481: subscription must be persisted to disk BEFORE
+    /// the message is written to the chat file. This ensures `discover_joined_rooms`
+    /// finds the room before the mention message appears in history.
+    #[tokio::test]
+    async fn subscribe_mentioned_returns_newly_subscribed_before_broadcast() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let state = make_test_state(tmp.path().to_path_buf());
+        state
+            .token_map
+            .lock()
+            .await
+            .insert("tok-alice".to_owned(), "alice".to_owned());
+        let msg = make_message("test-room", "bob", "hey @alice check this");
+
+        // Step 1: subscribe_mentioned runs before broadcast — subscription is on disk.
+        let newly = subscribe_mentioned(&msg, &state).await;
+        assert_eq!(newly, vec!["alice"]);
+
+        // Verify subscription is persisted BEFORE any message is in the chat file.
+        let loaded = commands::load_subscription_map(&state.subscription_map_path);
+        assert_eq!(loaded.get("alice"), Some(&SubscriptionTier::MentionsOnly));
+        // Chat file should still be empty (broadcast hasn't happened yet).
+        let chat_content = std::fs::read_to_string(tmp.path()).unwrap();
+        assert!(
+            chat_content.is_empty(),
+            "chat file must be empty before broadcast — subscription should precede message"
+        );
+
+        // Step 2: broadcast the message (simulating the real flow).
+        let seq_msg =
+            broadcast_and_persist(&msg, &state.clients, &state.chat_path, &state.seq_counter)
+                .await
+                .unwrap();
+        assert!(seq_msg.seq().is_some());
+
+        // Step 3: broadcast notices after the message.
+        broadcast_subscribe_notices(&newly, &state).await;
+
+        // Verify ordering: chat file has the message, then the notice.
+        let history = std::fs::read_to_string(tmp.path()).unwrap();
+        let lines: Vec<&str> = history.trim().lines().collect();
+        assert_eq!(lines.len(), 2, "expected message + notice");
+        assert!(lines[0].contains("hey @alice check this"));
+        assert!(lines[1].contains("auto-subscribed"));
     }
 
     // --- read_line_limited tests ---

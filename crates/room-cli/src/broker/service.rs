@@ -233,7 +233,7 @@ mod tests {
         assert_eq!(
             tier,
             Some(SubscriptionTier::Full),
-            "REST join must set Full so auto_subscribe_mentioned cannot downgrade"
+            "REST join must set Full so subscribe_mentioned cannot downgrade"
         );
     }
 

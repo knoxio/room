@@ -163,7 +163,7 @@ pub(crate) async fn handle_oneshot_join(
             let resp = serde_json::json!({"type":"token","token": token,"username": username});
             write_half.write_all(format!("{resp}\n").as_bytes()).await?;
             // Set Full subscription so the joining user receives all messages,
-            // not just @mentions. Without this, auto_subscribe_mentioned would
+            // not just @mentions. Without this, subscribe_mentioned would
             // downgrade them to MentionsOnly on the first @mention.
             subscription_map
                 .lock()
@@ -249,7 +249,7 @@ pub(crate) async fn handle_oneshot_join_with_registry(
             let resp = serde_json::json!({"type":"token","token": token,"username": username});
             write_half.write_all(format!("{resp}\n").as_bytes()).await?;
             // Set Full subscription so the joining user receives all messages,
-            // not just @mentions. Without this, auto_subscribe_mentioned would
+            // not just @mentions. Without this, subscribe_mentioned would
             // downgrade them to MentionsOnly on the first @mention.
             subscription_map
                 .lock()
@@ -738,7 +738,7 @@ mod tests {
         assert_eq!(
             guard.get("alice"),
             Some(&SubscriptionTier::Full),
-            "join must set subscription to Full so auto_subscribe_mentioned cannot downgrade"
+            "join must set subscription to Full so subscribe_mentioned cannot downgrade"
         );
     }
 
