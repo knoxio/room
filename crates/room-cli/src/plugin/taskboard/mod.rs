@@ -52,7 +52,7 @@ impl TaskboardPlugin {
         vec![CommandInfo {
             name: "taskboard".to_owned(),
             description:
-                "Manage task lifecycle — post, claim, plan, approve, update, release, finish"
+                "Manage task lifecycle — post, list, show, claim, plan, approve, update, release, finish"
                     .to_owned(),
             usage: "/taskboard <action> [args...]".to_owned(),
             params: vec![
@@ -61,6 +61,7 @@ impl TaskboardPlugin {
                     param_type: ParamType::Choice(vec![
                         "post".to_owned(),
                         "list".to_owned(),
+                        "show".to_owned(),
                         "claim".to_owned(),
                         "plan".to_owned(),
                         "approve".to_owned(),
@@ -249,7 +250,7 @@ impl TaskboardPlugin {
         let tasks: Vec<Task> = board.iter().map(|lt| lt.task.clone()).collect();
         let _ = task::save_tasks(&self.storage_path, &tasks);
         (
-            format!("task {task_id} plan submitted — awaiting approval"),
+            format!("task {task_id} plan submitted — awaiting approval\nplan: {plan_text}"),
             true,
         )
     }
@@ -274,7 +275,12 @@ impl TaskboardPlugin {
                 false,
             );
         }
-        // Only host can approve — checked via metadata in handle().
+        // Poster or host can approve.
+        let is_poster = lt.task.posted_by == ctx.sender;
+        let is_host = ctx.metadata.host.as_deref() == Some(&ctx.sender);
+        if !is_poster && !is_host {
+            return ("only the task poster or host can approve".to_owned(), false);
+        }
         lt.task.status = TaskStatus::Approved;
         lt.task.approved_by = Some(ctx.sender.clone());
         lt.task.approved_at = Some(chrono::Utc::now());
@@ -396,6 +402,39 @@ impl TaskboardPlugin {
         )
     }
 
+    fn handle_show(&self, ctx: &CommandContext) -> String {
+        let task_id = match ctx.params.get(1) {
+            Some(id) => id,
+            None => return "usage: /taskboard show <task-id>".to_owned(),
+        };
+        self.sweep_expired();
+        let board = self.board.lock().unwrap();
+        let lt = match board.iter().find(|lt| lt.task.id == *task_id) {
+            Some(lt) => lt,
+            None => return format!("task {task_id} not found"),
+        };
+        let t = &lt.task;
+        let assignee = t.assigned_to.as_deref().unwrap_or("-");
+        let plan = t.plan.as_deref().unwrap_or("-");
+        let approved_by = t.approved_by.as_deref().unwrap_or("-");
+        let notes = t.notes.as_deref().unwrap_or("-");
+        let elapsed = match lt.lease_start {
+            Some(start) => {
+                let secs = start.elapsed().as_secs();
+                if secs < 60 {
+                    format!("{secs}s")
+                } else {
+                    format!("{}m", secs / 60)
+                }
+            }
+            None => "-".to_owned(),
+        };
+        format!(
+            "task {}\n  status:      {}\n  description: {}\n  posted by:   {}\n  assigned to: {}\n  plan:        {}\n  approved by: {}\n  notes:       {}\n  lease:       {}",
+            t.id, t.status, t.description, t.posted_by, assignee, plan, approved_by, notes, elapsed
+        )
+    }
+
     fn handle_finish(&self, ctx: &CommandContext) -> (String, bool) {
         let task_id = match ctx.params.get(1) {
             Some(id) => id,
@@ -451,19 +490,13 @@ impl Plugin for TaskboardPlugin {
                 "list" => (self.handle_list(), false),
                 "claim" => self.handle_claim(&ctx),
                 "plan" => self.handle_plan(&ctx),
-                "approve" => {
-                    // Only host can approve.
-                    if ctx.metadata.host.as_deref() != Some(&ctx.sender) {
-                        ("only the host can approve tasks".to_owned(), false)
-                    } else {
-                        self.handle_approve(&ctx)
-                    }
-                }
+                "approve" => self.handle_approve(&ctx),
+                "show" => (self.handle_show(&ctx), false),
                 "update" => self.handle_update(&ctx),
                 "release" => self.handle_release(&ctx),
                 "finish" => self.handle_finish(&ctx),
-                "" => ("usage: /taskboard <post|list|claim|plan|approve|update|release|finish> [args...]".to_owned(), false),
-                other => (format!("unknown action: {other}. use: post, list, claim, plan, approve, update, release, finish"), false),
+                "" => ("usage: /taskboard <post|list|show|claim|plan|approve|update|release|finish> [args...]".to_owned(), false),
+                other => (format!("unknown action: {other}. use: post, list, show, claim, plan, approve, update, release, finish"), false),
             };
             if broadcast {
                 Ok(PluginResult::Broadcast(result))
@@ -500,7 +533,7 @@ mod tests {
         if let ParamType::Choice(ref choices) = cmds[0].params[0].param_type {
             assert!(choices.contains(&"post".to_owned()));
             assert!(choices.contains(&"approve".to_owned()));
-            assert_eq!(choices.len(), 8);
+            assert_eq!(choices.len(), 9);
         } else {
             panic!("expected Choice param type");
         }
@@ -543,6 +576,7 @@ mod tests {
             &["plan", "tb-001", "add struct, write tests"],
         ));
         assert!(result.contains("plan submitted"));
+        assert!(result.contains("plan: add struct, write tests"));
         assert!(broadcast);
         let board = plugin.board.lock().unwrap();
         assert_eq!(board[0].task.status, TaskStatus::Planned);
@@ -553,21 +587,50 @@ mod tests {
     }
 
     #[test]
-    fn handle_approve_requires_host() {
+    fn handle_approve_by_poster() {
         let (plugin, _tmp) = make_plugin();
         plugin.handle_post(&test_ctx("ba", &["post", "task"]));
         plugin.handle_claim(&test_ctx("agent", &["claim", "tb-001"]));
         plugin.handle_plan(&test_ctx("agent", &["plan", "tb-001", "my plan"]));
-        // Non-host approve should be caught in Plugin::handle, but test the method directly.
-        let (result, broadcast) = plugin.handle_approve(&test_ctx_with_host(
-            "ba",
-            &["approve", "tb-001"],
-            Some("ba"),
-        ));
+        // Poster (ba) can approve without being host.
+        let (result, broadcast) =
+            plugin.handle_approve(&test_ctx_with_host("ba", &["approve", "tb-001"], None));
         assert!(result.contains("approved"));
         assert!(broadcast);
         let board = plugin.board.lock().unwrap();
         assert_eq!(board[0].task.status, TaskStatus::Approved);
+    }
+
+    #[test]
+    fn handle_approve_by_host() {
+        let (plugin, _tmp) = make_plugin();
+        plugin.handle_post(&test_ctx("ba", &["post", "task"]));
+        plugin.handle_claim(&test_ctx("agent", &["claim", "tb-001"]));
+        plugin.handle_plan(&test_ctx("agent", &["plan", "tb-001", "my plan"]));
+        // Host can approve even if not the poster.
+        let (result, broadcast) = plugin.handle_approve(&test_ctx_with_host(
+            "joao",
+            &["approve", "tb-001"],
+            Some("joao"),
+        ));
+        assert!(result.contains("approved"));
+        assert!(broadcast);
+    }
+
+    #[test]
+    fn handle_approve_rejected_for_non_poster_non_host() {
+        let (plugin, _tmp) = make_plugin();
+        plugin.handle_post(&test_ctx("ba", &["post", "task"]));
+        plugin.handle_claim(&test_ctx("agent", &["claim", "tb-001"]));
+        plugin.handle_plan(&test_ctx("agent", &["plan", "tb-001", "my plan"]));
+        // Random user (not poster, not host) cannot approve.
+        let (result, broadcast) = plugin.handle_approve(&test_ctx_with_host(
+            "random",
+            &["approve", "tb-001"],
+            Some("joao"),
+        ));
+        assert!(result.contains("only the task poster or host"));
+        assert!(!broadcast);
     }
 
     #[test]
@@ -663,6 +726,35 @@ mod tests {
         let (plugin, _tmp) = make_plugin();
         let result = plugin.handle_list();
         assert_eq!(result, "taskboard is empty");
+    }
+
+    #[test]
+    fn handle_show_displays_full_detail() {
+        let (plugin, _tmp) = make_plugin();
+        plugin.handle_post(&test_ctx("ba", &["post", "build the feature"]));
+        plugin.handle_claim(&test_ctx("agent", &["claim", "tb-001"]));
+        plugin.handle_plan(&test_ctx("agent", &["plan", "tb-001", "add struct, tests"]));
+        let result = plugin.handle_show(&test_ctx("anyone", &["show", "tb-001"]));
+        assert!(result.contains("tb-001"));
+        assert!(result.contains("planned"));
+        assert!(result.contains("build the feature"));
+        assert!(result.contains("agent"));
+        assert!(result.contains("add struct, tests"));
+        assert!(result.contains("ba")); // posted by
+    }
+
+    #[test]
+    fn handle_show_not_found() {
+        let (plugin, _tmp) = make_plugin();
+        let result = plugin.handle_show(&test_ctx("a", &["show", "tb-999"]));
+        assert!(result.contains("not found"));
+    }
+
+    #[test]
+    fn handle_show_no_args() {
+        let (plugin, _tmp) = make_plugin();
+        let result = plugin.handle_show(&test_ctx("a", &["show"]));
+        assert!(result.contains("usage"));
     }
 
     #[test]
