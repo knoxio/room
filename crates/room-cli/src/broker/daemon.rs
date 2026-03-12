@@ -1015,6 +1015,10 @@ async fn dispatch_connection(
     // Dispatch based on the per-room handshake after the ROOM: prefix.
     let username = match parse_client_handshake(&rest) {
         ClientHandshake::Send(u) => {
+            eprintln!(
+                "[broker/daemon] DEPRECATED: SEND:{u} handshake used — \
+                 migrate to TOKEN:<uuid> (SEND: will be removed in a future version)"
+            );
             return handle_oneshot_send(u, reader, write_half, &state).await;
         }
         ClientHandshake::Token(token) => {

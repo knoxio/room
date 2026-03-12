@@ -186,6 +186,10 @@ async fn handle_client(
     use handshake::{parse_client_handshake, ClientHandshake};
     let username = match parse_client_handshake(first_line) {
         ClientHandshake::Send(u) => {
+            eprintln!(
+                "[broker] DEPRECATED: SEND:{u} handshake used — \
+                 migrate to TOKEN:<uuid> (SEND: will be removed in a future version)"
+            );
             return handle_oneshot_send(u, reader, write_half, state).await;
         }
         ClientHandshake::Token(token) => {

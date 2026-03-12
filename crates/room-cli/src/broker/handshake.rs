@@ -10,7 +10,7 @@
 //!
 //! | Prefix | Variant | Meaning |
 //! |---|---|---|
-//! | `SEND:<username>` | [`ClientHandshake::Send`] | Legacy unauthenticated one-shot send |
+//! | `SEND:<username>` | [`ClientHandshake::Send`] | **DEPRECATED** — unauthenticated one-shot send (use `TOKEN:` instead) |
 //! | `TOKEN:<uuid>` | [`ClientHandshake::Token`] | Token-authenticated one-shot send |
 //! | `JOIN:<username>` | [`ClientHandshake::Join`] | Register username, receive session token |
 //! | `<username>` | [`ClientHandshake::Interactive`] | Full interactive join |
@@ -29,7 +29,9 @@
 /// Typed result of parsing the first line of a per-room connection.
 #[derive(Debug, PartialEq)]
 pub(crate) enum ClientHandshake {
-    /// `SEND:<username>` — legacy unauthenticated one-shot send.
+    /// `SEND:<username>` — **deprecated** unauthenticated one-shot send.
+    ///
+    /// Will be removed in a future version. Use [`ClientHandshake::Token`] instead.
     Send(String),
     /// `TOKEN:<uuid>` — token-authenticated one-shot send.
     Token(String),

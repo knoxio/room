@@ -12,11 +12,12 @@ pub use poll::{
 };
 pub use subscribe::cmd_subscribe;
 pub use token::{cmd_join, username_from_token};
+#[allow(deprecated)]
+pub use transport::send_message;
 pub use transport::{create_room, destroy_room};
 pub use transport::{
     ensure_daemon_running, global_join_session, join_session, join_session_target,
-    resolve_socket_target, send_message, send_message_with_token, send_message_with_token_target,
-    SocketTarget,
+    resolve_socket_target, send_message_with_token, send_message_with_token_target, SocketTarget,
 };
 pub use who::cmd_who;
 

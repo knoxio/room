@@ -110,6 +110,10 @@ async fn run_ws_session(
             return ws_oneshot_join(&u, &mut ws_tx, state).await;
         }
         ClientHandshake::Send(u) => {
+            eprintln!(
+                "[broker/ws] DEPRECATED: SEND:{u} handshake used — \
+                 migrate to TOKEN:<uuid> (SEND: will be removed in a future version)"
+            );
             return ws_oneshot_send(u, &mut ws_rx, &mut ws_tx, state).await;
         }
         ClientHandshake::Token(token) => {

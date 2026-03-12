@@ -117,6 +117,7 @@ async fn who_responds_only_to_requester() {
 /// `send_message` delivers a message to connected clients without generating
 /// join or leave events for the sender.
 #[tokio::test]
+#[allow(deprecated)]
 async fn send_delivers_message_without_join_leave() {
     let broker = TestBroker::start("t_send_no_join").await;
 
@@ -149,6 +150,7 @@ async fn send_delivers_message_without_join_leave() {
 
 /// `send_message` returns a fully-populated Message with the correct fields.
 #[tokio::test]
+#[allow(deprecated)]
 async fn send_returns_echo_json() {
     let broker = TestBroker::start("t_send_echo").await;
 
@@ -276,6 +278,7 @@ async fn poll_with_no_broker_reads_file_directly() {
 
 /// `send_message` returns an error when no broker socket exists.
 #[tokio::test]
+#[allow(deprecated)]
 async fn send_fails_when_no_broker() {
     let dir = tempfile::tempdir().unwrap();
     let socket_path = dir.path().join("nonexistent.sock");
@@ -292,6 +295,7 @@ async fn send_fails_when_no_broker() {
 /// (Tests broker routing of a `{"type":"dm",...}` envelope over the one-shot SEND path;
 /// see `cmd_send` in `oneshot.rs` for the CLI layer that builds this envelope from `--to`.)
 #[tokio::test]
+#[allow(deprecated)]
 async fn oneshot_send_dm_is_routed_privately() {
     let broker = TestBroker::start("t_oneshot_dm").await;
 
@@ -722,5 +726,58 @@ async fn pull_messages_filters_dms_for_viewer() {
             .iter()
             .any(|m| matches!(m, Message::DirectMessage { content, .. } if content == "secret")),
         "alice should see the DM addressed to her"
+    );
+}
+
+// ── SEND: deprecation tests (#467) ──────────────────────────────────────────
+
+/// The deprecated `SEND:` handshake still delivers messages (backward compat).
+/// This test uses the raw UDS protocol to verify the broker still processes
+/// `SEND:<username>` connections correctly, even though the handshake is
+/// deprecated in favor of `TOKEN:<uuid>`.
+#[tokio::test]
+async fn deprecated_send_handshake_still_works() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixStream;
+
+    let broker = TestBroker::start("t_send_deprecated").await;
+
+    // Connect using raw SEND: handshake.
+    let stream = UnixStream::connect(&broker.socket_path).await.unwrap();
+    let (read_half, mut write_half) = stream.into_split();
+
+    write_half.write_all(b"SEND:legacy-bot\n").await.unwrap();
+    write_half
+        .write_all(b"hello from deprecated path\n")
+        .await
+        .unwrap();
+
+    let mut reader = BufReader::new(read_half);
+    let mut line = String::new();
+    reader.read_line(&mut line).await.unwrap();
+
+    let echo: Message = serde_json::from_str(line.trim()).unwrap();
+    assert_eq!(echo.user(), "legacy-bot");
+    assert!(
+        matches!(&echo, Message::Message { content, .. } if content == "hello from deprecated path"),
+        "SEND: handshake should still deliver messages"
+    );
+}
+
+/// The deprecated `send_message` function still works when called with
+/// `#[allow(deprecated)]`. Verifies backward compatibility is preserved.
+#[tokio::test]
+async fn deprecated_send_message_fn_still_delivers() {
+    let broker = TestBroker::start("t_send_fn_deprecated").await;
+
+    #[allow(deprecated)]
+    let msg = room_cli::oneshot::send_message(&broker.socket_path, "old-bot", "still works")
+        .await
+        .unwrap();
+
+    assert_eq!(msg.user(), "old-bot");
+    assert!(
+        matches!(&msg, Message::Message { content, .. } if content == "still works"),
+        "deprecated send_message should still deliver messages"
     );
 }

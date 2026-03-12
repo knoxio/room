@@ -194,6 +194,15 @@ async fn ensure_daemon_running_impl(socket: &Path, exe: &Path) -> anyhow::Result
 
 /// Connect to a running broker and deliver a single message without joining the room.
 /// Returns the broadcast echo (with broker-assigned id/ts) so callers have the message ID.
+///
+/// # Deprecation
+///
+/// Uses the `SEND:<username>` handshake which bypasses token authentication.
+/// Use [`send_message_with_token`] instead — obtain a token via `room join` first.
+#[deprecated(
+    since = "3.1.0",
+    note = "SEND: handshake is unauthenticated; use send_message_with_token instead"
+)]
 pub async fn send_message(
     socket_path: &Path,
     username: &str,

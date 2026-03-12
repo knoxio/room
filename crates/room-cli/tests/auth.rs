@@ -279,6 +279,7 @@ async fn admin_clear_tokens_blocks_all_sends() {
 
 /// `/clear` truncates the history file and broadcasts a system message.
 #[tokio::test]
+#[allow(deprecated)]
 async fn admin_clear_history() {
     let broker = TestBroker::start("t_clear_history").await;
     let mut admin = TestClient::connect(&broker.socket_path, "admin").await;
