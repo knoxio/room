@@ -6,7 +6,7 @@ use room_protocol::SubscriptionTier;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use super::widgets::{CommandPalette, MentionPicker};
+use super::widgets::{ChoicePicker, CommandPalette, MentionPicker};
 
 /// All mutable TUI input state. Pure data — no async context or I/O.
 pub(super) struct InputState {
@@ -16,6 +16,7 @@ pub(super) struct InputState {
     pub(super) scroll_offset: usize,
     pub(super) palette: CommandPalette,
     pub(super) mention: MentionPicker,
+    pub(super) choice: ChoicePicker,
 }
 
 impl InputState {
@@ -27,6 +28,7 @@ impl InputState {
             scroll_offset: 0,
             palette: CommandPalette::from_commands(crate::plugin::all_known_commands()),
             mention: MentionPicker::new(),
+            choice: ChoicePicker::new(),
         }
     }
 }
@@ -67,6 +69,7 @@ pub(super) fn handle_key(
 ) -> Option<Action> {
     match key.code {
         KeyCode::Esc => handle_esc(state),
+        KeyCode::Tab if state.choice.active => handle_tab_choice(state),
         KeyCode::Tab if state.mention.active => handle_tab_mention(state),
         KeyCode::Tab if state.palette.active => {
             complete_palette_selection(state, online_users);
@@ -128,9 +131,11 @@ pub(super) fn handle_key(
     None
 }
 
-/// Dismiss mention picker, command palette, or clear input on Esc.
+/// Dismiss choice picker, mention picker, command palette, or clear input on Esc.
 fn handle_esc(state: &mut InputState) {
-    if state.mention.active {
+    if state.choice.active {
+        state.choice.deactivate();
+    } else if state.mention.active {
         state.mention.deactivate();
     } else if state.palette.active {
         state.palette.deactivate();
@@ -139,6 +144,19 @@ fn handle_esc(state: &mut InputState) {
         state.cursor_pos = 0;
         state.input_row_scroll = 0;
     }
+}
+
+/// Complete the currently selected choice on Tab.
+fn handle_tab_choice(state: &mut InputState) {
+    if let Some(value) = state.choice.selected_value() {
+        let value = value.to_owned();
+        let start = state.choice.value_start;
+        let end = state.cursor_pos;
+        state.input.replace_range(start..end, &value);
+        state.cursor_pos = start + value.len();
+        state.input_row_scroll = 0;
+    }
+    state.choice.deactivate();
 }
 
 /// Complete the currently selected mention on Tab.
@@ -158,7 +176,17 @@ fn handle_tab_mention(state: &mut InputState) {
 /// Handle the Enter key: mention/palette completion, newline insertion, DM
 /// intercept, or message submission.
 fn handle_enter(key: KeyEvent, state: &mut InputState, online_users: &[String]) -> Option<Action> {
-    if state.mention.active {
+    if state.choice.active {
+        if let Some(value) = state.choice.selected_value() {
+            let value = value.to_owned();
+            let start = state.choice.value_start;
+            let end = state.cursor_pos;
+            state.input.replace_range(start..end, &value);
+            state.cursor_pos = start + value.len();
+            state.input_row_scroll = 0;
+        }
+        state.choice.deactivate();
+    } else if state.mention.active {
         if let Some(user) = state.mention.selected_user() {
             let user = user.to_owned();
             let replacement = format!("@{user} ");
@@ -197,7 +225,9 @@ fn handle_enter(key: KeyEvent, state: &mut InputState, online_users: &[String]) 
 /// Navigate mention/palette picker upward, move cursor up in multi-line input,
 /// or scroll the chat history.
 fn handle_up(state: &mut InputState, online_users: &[String], input_width: usize) {
-    if state.mention.active {
+    if state.choice.active {
+        state.choice.move_up();
+    } else if state.mention.active {
         state.mention.move_up();
     } else if state.palette.active {
         state.palette.move_up();
@@ -216,7 +246,9 @@ fn handle_up(state: &mut InputState, online_users: &[String], input_width: usize
 /// Navigate mention/palette picker downward, move cursor down in multi-line
 /// input, or scroll the chat history.
 fn handle_down(state: &mut InputState, online_users: &[String], input_width: usize) {
-    if state.mention.active {
+    if state.choice.active {
+        state.choice.move_down();
+    } else if state.mention.active {
         state.mention.move_down();
     } else if state.palette.active {
         state.palette.move_down();
@@ -252,6 +284,15 @@ fn handle_word_delete(state: &mut InputState, online_users: &[String]) {
 fn handle_char(c: char, state: &mut InputState, online_users: &[String]) {
     state.input.insert(state.cursor_pos, c);
     state.cursor_pos += c.len_utf8();
+    // Update choice picker filter when active.
+    if state.choice.active {
+        let query = &state.input[state.choice.value_start..state.cursor_pos];
+        state.choice.update_filter(query);
+        if state.choice.filtered.is_empty() {
+            state.choice.deactivate();
+        }
+        return;
+    }
     // Update mention picker state.
     if let Some((at_byte, query)) = find_at_context(&state.input, state.cursor_pos) {
         if state.mention.active || c == '@' {
@@ -288,6 +329,19 @@ fn handle_backspace(state: &mut InputState, online_users: &[String]) {
             .unwrap_or(0);
         state.input.remove(prev);
         state.cursor_pos = prev;
+        // Update choice picker on backspace.
+        if state.choice.active {
+            if state.cursor_pos < state.choice.value_start {
+                state.choice.deactivate();
+            } else {
+                let query = &state.input[state.choice.value_start..state.cursor_pos];
+                state.choice.update_filter(query);
+                if state.choice.filtered.is_empty() {
+                    state.choice.deactivate();
+                }
+            }
+            return;
+        }
         sync_mention_after_delete(state, online_users);
         sync_palette_after_delete(state);
     }
@@ -519,12 +573,18 @@ fn complete_palette_selection(state: &mut InputState, online_users: &[String]) {
                 state.mention.deactivate();
             }
         } else if has_choices {
-            // Set input to "/<cmd> " so the user can type/pick a choice.
+            // Set input to "/<cmd> " and activate choice picker.
+            let choices = state.palette.completions_at(&cmd_name, 0);
             let prefix = format!("/{cmd_name} ");
+            let value_start = prefix.len();
             state.input = prefix;
-            state.cursor_pos = state.input.len();
+            state.cursor_pos = value_start;
             state.input_row_scroll = 0;
             state.palette.deactivate();
+            state.choice.activate(&cmd_name, choices, value_start, "");
+            if state.choice.filtered.is_empty() {
+                state.choice.deactivate();
+            }
         } else if let Some(usage) = state.palette.selected_usage() {
             state.input = usage.to_owned();
             state.cursor_pos = state.input.len();
@@ -2105,10 +2165,18 @@ mod tests {
         }
         assert!(state.palette.active);
         handle_key(make_key(KeyCode::Tab), &mut state, &users, 10, 80);
-        // stats has Choice param — should set "/stats " for the user to type a number
+        // stats has Choice param — should set "/stats " and activate choice picker
         assert_eq!(state.input, "/stats ");
         assert!(!state.palette.active);
         assert!(!state.mention.active);
+        assert!(
+            state.choice.active,
+            "choice picker should activate for Choice params"
+        );
+        assert!(
+            !state.choice.filtered.is_empty(),
+            "choice picker should have filtered values"
+        );
     }
 
     #[test]
@@ -2183,5 +2251,151 @@ mod tests {
         let mut state = InputState::new();
         let action = handle_key(make_ctrl_key('c'), &mut state, &[], 10, 80);
         assert!(matches!(action, Some(Action::Quit)));
+    }
+
+    // ── ChoicePicker integration tests ──────────────────────────────────────
+
+    /// Helper: type a command and Tab to activate the choice picker.
+    fn activate_choice_picker(cmd: &str) -> InputState {
+        let mut state = InputState::new();
+        let users: Vec<String> = vec![];
+        for c in cmd.chars() {
+            handle_key(make_key(KeyCode::Char(c)), &mut state, &users, 10, 80);
+        }
+        handle_key(make_key(KeyCode::Tab), &mut state, &users, 10, 80);
+        state
+    }
+
+    #[test]
+    fn choice_picker_activates_on_subscribe_tab() {
+        let state = activate_choice_picker("/subscribe");
+        assert!(state.choice.active);
+        assert_eq!(state.input, "/subscribe ");
+        assert!(state.choice.filtered.contains(&"full".to_owned()));
+        assert!(state.choice.filtered.contains(&"mentions_only".to_owned()));
+    }
+
+    #[test]
+    fn choice_picker_tab_completes_selection() {
+        let mut state = activate_choice_picker("/subscribe");
+        assert!(state.choice.active);
+        // Default selection is first item
+        handle_key(make_key(KeyCode::Tab), &mut state, &[], 10, 80);
+        assert!(!state.choice.active);
+        // Input should contain the selected value
+        assert!(
+            state.input.starts_with("/subscribe "),
+            "input should start with '/subscribe '"
+        );
+        assert!(
+            state.input.len() > "/subscribe ".len(),
+            "input should contain the completed value"
+        );
+    }
+
+    #[test]
+    fn choice_picker_enter_completes_selection() {
+        let mut state = activate_choice_picker("/subscribe");
+        assert!(state.choice.active);
+        handle_key(make_key(KeyCode::Enter), &mut state, &[], 10, 80);
+        assert!(!state.choice.active);
+        assert!(state.input.starts_with("/subscribe "));
+    }
+
+    #[test]
+    fn choice_picker_up_down_navigates() {
+        let mut state = activate_choice_picker("/subscribe");
+        assert!(state.choice.active);
+        assert_eq!(state.choice.selected, 0);
+        handle_key(make_key(KeyCode::Down), &mut state, &[], 10, 80);
+        assert_eq!(state.choice.selected, 1);
+        handle_key(make_key(KeyCode::Up), &mut state, &[], 10, 80);
+        assert_eq!(state.choice.selected, 0);
+    }
+
+    #[test]
+    fn choice_picker_esc_dismisses() {
+        let mut state = activate_choice_picker("/subscribe");
+        assert!(state.choice.active);
+        handle_key(make_key(KeyCode::Esc), &mut state, &[], 10, 80);
+        assert!(!state.choice.active);
+    }
+
+    #[test]
+    fn choice_picker_typing_filters() {
+        let mut state = activate_choice_picker("/subscribe");
+        assert!(state.choice.active);
+        let initial_count = state.choice.filtered.len();
+        // Type 'f' to filter to "full"
+        handle_key(make_key(KeyCode::Char('f')), &mut state, &[], 10, 80);
+        assert!(state.choice.active);
+        assert!(state.choice.filtered.len() < initial_count);
+        assert!(state.choice.filtered.contains(&"full".to_owned()));
+    }
+
+    #[test]
+    fn choice_picker_typing_no_match_deactivates() {
+        let mut state = activate_choice_picker("/subscribe");
+        assert!(state.choice.active);
+        for c in "zzz".chars() {
+            handle_key(make_key(KeyCode::Char(c)), &mut state, &[], 10, 80);
+        }
+        assert!(
+            !state.choice.active,
+            "choice picker should deactivate when no matches"
+        );
+    }
+
+    #[test]
+    fn choice_picker_backspace_updates_filter() {
+        let mut state = activate_choice_picker("/subscribe");
+        assert!(state.choice.active);
+        // Type 'f' to filter
+        handle_key(make_key(KeyCode::Char('f')), &mut state, &[], 10, 80);
+        let filtered_count = state.choice.filtered.len();
+        // Backspace restores full list
+        handle_key(make_key(KeyCode::Backspace), &mut state, &[], 10, 80);
+        assert!(state.choice.active);
+        assert!(state.choice.filtered.len() >= filtered_count);
+    }
+
+    #[test]
+    fn choice_picker_backspace_past_value_start_deactivates() {
+        let mut state = activate_choice_picker("/subscribe");
+        assert!(state.choice.active);
+        // Backspace into the command prefix should deactivate
+        handle_key(make_key(KeyCode::Backspace), &mut state, &[], 10, 80);
+        assert!(
+            !state.choice.active,
+            "choice picker should deactivate when cursor moves before value_start"
+        );
+    }
+
+    #[test]
+    fn choice_picker_not_active_for_who() {
+        let state = activate_choice_picker("/who");
+        assert!(
+            !state.choice.active,
+            "who has no Choice params — picker should not activate"
+        );
+    }
+
+    #[test]
+    fn choice_picker_not_active_for_dm() {
+        let mut state = InputState::new();
+        let users = vec!["alice".to_owned()];
+        for c in "/dm".chars() {
+            handle_key(make_key(KeyCode::Char(c)), &mut state, &users, 10, 80);
+        }
+        handle_key(make_key(KeyCode::Tab), &mut state, &users, 10, 80);
+        // dm has Username param, not Choice — mention picker activates, not choice
+        assert!(
+            !state.choice.active,
+            "choice picker should not activate for Username params"
+        );
+        assert!(
+            state.mention.active,
+            "mention picker should activate for Username params"
+        );
     }
 }

@@ -180,6 +180,85 @@ impl MentionPicker {
     }
 }
 
+// ── Choice picker ────────────────────────────────────────────────────────────
+
+/// Autocomplete popup for `ParamType::Choice` parameters.
+///
+/// Mirrors [`MentionPicker`] but shows a filtered list of predefined choice
+/// values instead of online usernames. Activated when the user selects a
+/// command whose first parameter is `Choice` from the command palette.
+pub(super) struct ChoicePicker {
+    pub(super) active: bool,
+    pub(super) selected: usize,
+    /// Prefix-filtered list of matching choices.
+    pub(super) filtered: Vec<String>,
+    /// The full set of valid choices for the current parameter.
+    all_choices: Vec<String>,
+    /// The command name this picker is completing for.
+    pub(super) cmd_name: String,
+    /// Byte index in the input buffer where the choice value starts.
+    pub(super) value_start: usize,
+}
+
+impl ChoicePicker {
+    pub(super) fn new() -> Self {
+        Self {
+            active: false,
+            selected: 0,
+            filtered: Vec::new(),
+            all_choices: Vec::new(),
+            cmd_name: String::new(),
+            value_start: 0,
+        }
+    }
+
+    pub(super) fn activate(
+        &mut self,
+        cmd_name: &str,
+        choices: Vec<String>,
+        value_start: usize,
+        query: &str,
+    ) {
+        self.active = true;
+        self.selected = 0;
+        self.cmd_name = cmd_name.to_owned();
+        self.all_choices = choices;
+        self.value_start = value_start;
+        self.update_filter(query);
+    }
+
+    pub(super) fn deactivate(&mut self) {
+        self.active = false;
+    }
+
+    pub(super) fn update_filter(&mut self, query: &str) {
+        let q = query.to_ascii_lowercase();
+        self.filtered = self
+            .all_choices
+            .iter()
+            .filter(|c| c.to_ascii_lowercase().starts_with(q.as_str()))
+            .cloned()
+            .collect();
+        if self.selected >= self.filtered.len() {
+            self.selected = self.filtered.len().saturating_sub(1);
+        }
+    }
+
+    pub(super) fn move_up(&mut self) {
+        self.selected = self.selected.saturating_sub(1);
+    }
+
+    pub(super) fn move_down(&mut self) {
+        if !self.filtered.is_empty() {
+            self.selected = (self.selected + 1).min(self.filtered.len() - 1);
+        }
+    }
+
+    pub(super) fn selected_value(&self) -> Option<&str> {
+        self.filtered.get(self.selected).map(|s| s.as_str())
+    }
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -511,5 +590,110 @@ mod tests {
             online_users.push(user);
         }
         assert_eq!(online_users.len(), 1);
+    }
+
+    // ── ChoicePicker tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn choice_picker_starts_inactive() {
+        let p = ChoicePicker::new();
+        assert!(!p.active);
+        assert!(p.filtered.is_empty());
+    }
+
+    #[test]
+    fn choice_picker_activate_shows_all_choices() {
+        let mut p = ChoicePicker::new();
+        let choices = vec!["full".to_owned(), "mentions_only".to_owned()];
+        p.activate("subscribe", choices.clone(), 12, "");
+        assert!(p.active);
+        assert_eq!(p.filtered, choices);
+        assert_eq!(p.cmd_name, "subscribe");
+        assert_eq!(p.value_start, 12);
+    }
+
+    #[test]
+    fn choice_picker_filters_by_prefix() {
+        let mut p = ChoicePicker::new();
+        let choices = vec!["full".to_owned(), "mentions_only".to_owned()];
+        p.activate("subscribe", choices, 12, "f");
+        assert_eq!(p.filtered, vec!["full"]);
+    }
+
+    #[test]
+    fn choice_picker_filter_case_insensitive() {
+        let mut p = ChoicePicker::new();
+        let choices = vec!["Full".to_owned(), "MentionsOnly".to_owned()];
+        p.activate("subscribe", choices, 12, "m");
+        assert_eq!(p.filtered, vec!["MentionsOnly"]);
+    }
+
+    #[test]
+    fn choice_picker_filter_no_match() {
+        let mut p = ChoicePicker::new();
+        let choices = vec!["full".to_owned(), "mentions_only".to_owned()];
+        p.activate("subscribe", choices, 12, "zzz");
+        assert!(p.filtered.is_empty());
+    }
+
+    #[test]
+    fn choice_picker_navigate_up_down() {
+        let mut p = ChoicePicker::new();
+        let choices = vec!["a".to_owned(), "b".to_owned(), "c".to_owned()];
+        p.activate("test", choices, 0, "");
+        assert_eq!(p.selected, 0);
+        p.move_down();
+        assert_eq!(p.selected, 1);
+        p.move_down();
+        assert_eq!(p.selected, 2);
+        p.move_down(); // clamps
+        assert_eq!(p.selected, 2);
+        p.move_up();
+        assert_eq!(p.selected, 1);
+        p.move_up();
+        assert_eq!(p.selected, 0);
+        p.move_up(); // clamps
+        assert_eq!(p.selected, 0);
+    }
+
+    #[test]
+    fn choice_picker_selected_value() {
+        let mut p = ChoicePicker::new();
+        let choices = vec!["full".to_owned(), "mentions_only".to_owned()];
+        p.activate("subscribe", choices, 0, "");
+        assert_eq!(p.selected_value(), Some("full"));
+        p.move_down();
+        assert_eq!(p.selected_value(), Some("mentions_only"));
+    }
+
+    #[test]
+    fn choice_picker_selected_clamps_after_filter() {
+        let mut p = ChoicePicker::new();
+        let choices = vec!["alpha".to_owned(), "beta".to_owned(), "gamma".to_owned()];
+        p.activate("test", choices, 0, "");
+        p.move_down();
+        p.move_down();
+        assert_eq!(p.selected, 2);
+        p.update_filter("a"); // only "alpha"
+        assert_eq!(p.filtered.len(), 1);
+        assert_eq!(p.selected, 0);
+    }
+
+    #[test]
+    fn choice_picker_deactivate() {
+        let mut p = ChoicePicker::new();
+        let choices = vec!["a".to_owned()];
+        p.activate("test", choices, 0, "");
+        assert!(p.active);
+        p.deactivate();
+        assert!(!p.active);
+    }
+
+    #[test]
+    fn choice_picker_empty_choices() {
+        let mut p = ChoicePicker::new();
+        p.activate("test", vec![], 0, "");
+        assert!(p.filtered.is_empty());
+        assert_eq!(p.selected_value(), None);
     }
 }
