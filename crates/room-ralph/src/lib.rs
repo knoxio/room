@@ -11,6 +11,7 @@ fn parse_profile(s: &str) -> Result<claude::Profile, String> {
 }
 pub mod loop_runner;
 pub mod monitor;
+pub mod personalities;
 pub mod progress;
 pub mod prompt;
 pub mod room;
@@ -56,9 +57,15 @@ pub struct Cli {
     #[arg(long)]
     pub prompt: Option<PathBuf>,
 
-    /// Personality file — contents prepended to the system prompt
+    /// Personality — either a builtin name (coder, reviewer, researcher,
+    /// coordinator, documenter) or a file path whose contents are prepended
+    /// to the system prompt. Builtins also set profile and model defaults.
     #[arg(long)]
-    pub personality: Option<PathBuf>,
+    pub personality: Option<String>,
+
+    /// Print available builtin personalities and exit
+    #[arg(long)]
+    pub list_personalities: bool,
 
     /// Additional directories for claude --add-dir (repeatable)
     #[arg(long = "add-dir")]

@@ -64,6 +64,10 @@ fn launch_tmux(cli: &Cli) -> Result<(), String> {
         args.push("--prompt".into());
         args.push(prompt.display().to_string());
     }
+    if let Some(personality) = &cli.personality {
+        args.push("--personality".into());
+        args.push(personality.clone());
+    }
     for d in &cli.add_dirs {
         args.push("--add-dir".into());
         args.push(d.display().to_string());
@@ -128,6 +132,11 @@ async fn main() -> ExitCode {
         .with(stderr_layer)
         .with(file_appender)
         .init();
+
+    if cli.list_personalities {
+        print!("{}", room_ralph::personalities::format_list());
+        return ExitCode::SUCCESS;
+    }
 
     if let Err(e) = check_dependencies() {
         tracing::error!("{}", e);
@@ -196,16 +205,19 @@ async fn main() -> ExitCode {
         cli.username = join_result.username;
     }
 
-    let announce = if cli.allow_all {
-        format!(
-            "online (room-ralph, model={}, iter limit={}, allow-all)",
+    let announce = {
+        let mut parts = vec![format!(
+            "online (room-ralph, model={}, iter limit={}",
             cli.model, cli.max_iter
-        )
-    } else {
-        format!(
-            "online (room-ralph, model={}, iter limit={})",
-            cli.model, cli.max_iter
-        )
+        )];
+        if let Some(p) = &cli.personality {
+            parts.push(format!(", personality={p}"));
+        }
+        if cli.allow_all {
+            parts.push(", allow-all".to_string());
+        }
+        parts.push(")".to_string());
+        parts.concat()
     };
     room::send_message(&cli.room_id, &token, &announce, socket_ref).ok();
 

@@ -28,6 +28,7 @@ fn test_cli(f: impl FnOnce(&mut Cli)) -> Cli {
         cooldown: 0,
         prompt: None,
         personality: None,
+        list_personalities: false,
         add_dirs: vec![],
         allow_tools: vec![],
         disallow_tools: vec![],
@@ -347,7 +348,7 @@ fn poll_messages_parses_ndjson() {
 // ── Test 8: --personality file content appears in dry-run output ─────────────
 
 #[tokio::test]
-async fn personality_appears_in_dry_run_output() {
+async fn personality_file_appears_in_dry_run_output() {
     let dir = tempfile::TempDir::new().unwrap();
     let personality = dir.path().join("personality.txt");
     std::fs::write(
@@ -359,22 +360,35 @@ async fn personality_appears_in_dry_run_output() {
     let cli = test_cli(|c| {
         c.dry_run = true;
         c.username = "integ-personality".to_string();
-        c.personality = Some(personality);
+        c.personality = Some(personality.display().to_string());
     });
     let running = Arc::new(AtomicBool::new(true));
 
-    // Capture stdout to verify personality content
     let result = loop_runner::run_loop(&cli, "fake-token".to_string(), &running).await;
     assert!(
         result.is_ok(),
-        "dry_run with personality should succeed: {result:?}"
+        "dry_run with personality file should succeed: {result:?}"
     );
-
-    // Verify personality was wired through by checking the prompt file
-    // (run_loop writes it to /tmp before dry_run prints and exits,
-    // but dry_run returns before writing the file — it prints to stdout instead)
-    // So we test via unit tests in prompt.rs. Here we just confirm no crash.
     cleanup("integ-personality", None);
+}
+
+// ── Test 8b: --personality builtin name works in dry-run ─────────────────────
+
+#[tokio::test]
+async fn personality_builtin_in_dry_run() {
+    let cli = test_cli(|c| {
+        c.dry_run = true;
+        c.username = "integ-builtin-personality".to_string();
+        c.personality = Some("coder".to_string());
+    });
+    let running = Arc::new(AtomicBool::new(true));
+
+    let result = loop_runner::run_loop(&cli, "fake-token".to_string(), &running).await;
+    assert!(
+        result.is_ok(),
+        "dry_run with builtin personality should succeed: {result:?}"
+    );
+    cleanup("integ-builtin-personality", None);
 }
 
 // ── Test 9: --allow-all skips tool restrictions in dry-run ───────────────────

@@ -8,7 +8,8 @@ pub struct PromptConfig<'a> {
     pub username: &'a str,
     pub token: &'a str,
     pub custom_prompt_file: Option<&'a Path>,
-    pub personality_file: Option<&'a Path>,
+    /// Personality text to prepend — either from a builtin prompt or file contents.
+    pub personality_text: Option<&'a str>,
     pub progress_file: &'a Path,
     pub issue: Option<&'a str>,
 }
@@ -19,14 +20,12 @@ pub fn build_prompt(config: &PromptConfig<'_>, messages: &[Message]) -> String {
     let mut prompt = String::new();
 
     // Personality — prepended before all other content
-    if let Some(personality) = config.personality_file {
-        if let Ok(content) = std::fs::read_to_string(personality) {
-            prompt.push_str(&content);
-            if !content.ends_with('\n') {
-                prompt.push('\n');
-            }
+    if let Some(text) = config.personality_text {
+        prompt.push_str(text);
+        if !text.ends_with('\n') {
             prompt.push('\n');
         }
+        prompt.push('\n');
     }
 
     // System context
@@ -114,7 +113,7 @@ mod tests {
             username: "agent1",
             token: "tok-123",
             custom_prompt_file: None,
-            personality_file: None,
+            personality_text: None,
             progress_file: &progress,
             issue: Some("42"),
         };
@@ -134,7 +133,7 @@ mod tests {
             username: "u",
             token: "t",
             custom_prompt_file: None,
-            personality_file: None,
+            personality_text: None,
             progress_file: &progress,
             issue: None,
         };
@@ -153,7 +152,7 @@ mod tests {
             username: "u",
             token: "t",
             custom_prompt_file: None,
-            personality_file: None,
+            personality_text: None,
             progress_file: &progress,
             issue: None,
         };
@@ -171,7 +170,7 @@ mod tests {
             username: "u",
             token: "t",
             custom_prompt_file: None,
-            personality_file: None,
+            personality_text: None,
             progress_file: &progress,
             issue: None,
         };
@@ -182,18 +181,14 @@ mod tests {
     }
 
     #[test]
-    fn build_prompt_with_personality_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let personality = dir.path().join("personality.txt");
-        std::fs::write(&personality, "You are a grumpy robot who hates small talk.").unwrap();
-
+    fn build_prompt_with_personality_text() {
         let progress = PathBuf::from("/tmp/test-nonexistent-progress-personality.md");
         let config = PromptConfig {
             room_id: "r",
             username: "u",
             token: "t",
             custom_prompt_file: None,
-            personality_file: Some(&personality),
+            personality_text: Some("You are a grumpy robot who hates small talk."),
             progress_file: &progress,
             issue: None,
         };
@@ -208,8 +203,6 @@ mod tests {
     #[test]
     fn build_prompt_personality_with_custom_prompt() {
         let dir = tempfile::tempdir().unwrap();
-        let personality = dir.path().join("personality.txt");
-        std::fs::write(&personality, "Be sarcastic and dry.").unwrap();
         let custom = dir.path().join("custom_prompt.txt");
         std::fs::write(&custom, "Custom system instructions here.").unwrap();
 
@@ -219,7 +212,7 @@ mod tests {
             username: "u",
             token: "t",
             custom_prompt_file: Some(&custom),
-            personality_file: Some(&personality),
+            personality_text: Some("Be sarcastic and dry."),
             progress_file: &progress,
             issue: None,
         };
@@ -233,21 +226,20 @@ mod tests {
     }
 
     #[test]
-    fn build_prompt_personality_missing_file_is_ignored() {
+    fn build_prompt_no_personality_produces_default() {
         let progress = PathBuf::from("/tmp/test-nonexistent-progress-personality3.md");
-        let missing = PathBuf::from("/tmp/nonexistent-personality-file-abc123.txt");
         let config = PromptConfig {
             room_id: "r",
             username: "u",
             token: "t",
             custom_prompt_file: None,
-            personality_file: Some(&missing),
+            personality_text: None,
             progress_file: &progress,
             issue: None,
         };
         let prompt = build_prompt(&config, &[]);
 
-        // Should still produce the default prompt without error
+        // Should produce the default prompt
         assert!(prompt.contains("You are u, an autonomous agent"));
     }
 }
