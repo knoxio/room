@@ -49,7 +49,7 @@ Two commands, both routed through the plugin system:
 ```
 /agent <username> [--profile <profile>] [--model <model>] [--issue <N>]
        [--prompt <text>] [--personality <file>] [--max-iter <N>]
-       [--allow-tools <list>] [--disallow-tools <list>]
+       [--allow-tools <list>] [--disallow-tools <list>] [--allow-all]
 ```
 
 Every flag maps 1:1 to a `room-ralph` CLI argument. The room ID is implicit (the
@@ -182,10 +182,10 @@ Implementation: the plugin registers a `tokio::sync::watch` subscriber for the
 broker's shutdown signal (the existing `watch::channel<bool>` pattern). When shutdown
 fires, it runs the cleanup loop.
 
-On broker restart, stale entries in the spawn map are gone (in-memory only). Any
-orphaned processes from a previous broker session are not tracked — they will
-eventually exit on their own when `room poll` fails (connection refused). A future
-enhancement could persist the PID map to disk and reap on startup.
+On broker restart, the plugin loads the persisted PID map from
+`~/.room/state/agents-<room>.json` and reaps any orphaned processes (SIGTERM → grace
+→ SIGKILL). This prevents resource leaks from broker crashes. The PID file is written
+on every spawn/stop mutation and deleted when the last agent exits or is stopped.
 
 ### 4. Personality Registry
 
@@ -237,6 +237,17 @@ Built-in defaults ship with the binary so `/spawn` works out of the box:
 
 User-defined personalities in `~/.room/personalities/` override built-ins with the same
 name.
+
+#### Reconciliation with #439 (compiled-in defaults in room-ralph)
+
+Issue #439 adds compiled-in personality defaults to `room-ralph` itself. The layering
+is: room-ralph ships compiled-in defaults (used when ralph is invoked directly from
+CLI), while the `/spawn` plugin reads TOML overrides from `~/.room/personalities/`.
+When both exist for the same name, TOML wins. This means:
+
+- `room-ralph myroom bot --profile reviewer` uses ralph's compiled-in Reviewer profile.
+- `/spawn reviewer` checks TOML first, falls back to compiled-in defaults.
+- Users can customize personalities without rebuilding the binary.
 
 ### 5. TUI Integration
 
@@ -311,11 +322,19 @@ and room interactions.
 
 #### `--allow-all` flag
 
-If `/agent` is invoked with no `--disallow-tools`, the spawned ralph has its profile's
-default tool restrictions. There is no `--allow-all` bypass — the profile's disallow
-list always applies. If the host needs an unrestricted agent, they use
-`--profile coder` which has an empty disallow list, but all tool invocations are still
-logged to the agent's log file.
+`/agent <username> --allow-all` passes `--allow-all` through to `room-ralph`, which
+bypasses all tool restrictions (no `--allowedTools`, no `--disallowedTools` sent to
+claude). This gives the agent full unrestricted tool access in `-p` mode.
+
+When `--allow-all` is set:
+- `--profile`, `--allow-tools`, and `--disallow-tools` are silently ignored (ralph
+  logs a warning at startup).
+- The spawn system message includes `allow-all: true` so the audit trail is explicit.
+- All tool invocations are logged to the agent's log file regardless.
+
+This flag exists because some workflows (fast prototyping, trusted dev agents) need
+unrestricted access without composing the right profile + tool overrides. The host
+accepts the risk by explicitly passing the flag.
 
 ---
 
@@ -325,14 +344,17 @@ logged to the agent's log file.
 
 Files:
 - `crates/room-cli/src/plugin/agent.rs` — NEW: `AgentPlugin` struct, spawn/list/stop
-  handlers, `SpawnedAgent` tracking map
+  handlers, `SpawnedAgent` tracking map, PID persistence to
+  `~/.room/state/agents-<room>.json`, `--allow-all` passthrough
 - `crates/room-cli/src/plugin/mod.rs` — register `AgentPlugin` in default plugin set
 - `crates/room-cli/src/broker/mod.rs` — pass socket path to plugin context (extend
   `CommandContext` or `RoomMetadata` with socket info)
+- `crates/room-cli/src/paths.rs` — add `agents_state_path()` helper
 
 Tests:
-- Unit tests for personality TOML parsing, param validation, username collision checks
+- Unit tests for param validation, username collision checks, PID file round-trip
 - Integration test: spawn a ralph process via plugin, verify it joins the room, stop it
+- Unit test: `--allow-all` produces correct `Command` args (no --allowedTools/--disallowedTools)
 
 ### Phase 2: Personalities (/spawn + registry)
 
@@ -377,9 +399,9 @@ Tests:
    SIGKILL. Alternative: only SIGTERM, let ralph handle its own shutdown. Risk: a
    stuck claude subprocess could keep ralph alive indefinitely.
 
-3. **PID file persistence across restarts?** Current proposal: in-memory only (spawn
-   map lost on restart). Alternative: persist to `~/.room/state/agents-<room>.json`
-   so a restarted broker can reap orphans. Adds complexity but prevents leaks.
+3. **~~PID file persistence across restarts?~~** Resolved: persist to
+   `~/.room/state/agents-<room>.json`. On restart, load and reap orphans. Consensus
+   from r2d2 + ba: crash recovery is the real risk, not planned restarts.
 
 4. **Should agents auto-subscribe to the room they're spawned in?** Ralph already
    does `room join` + `room subscribe` in its loop startup. The spawn plugin just
