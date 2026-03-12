@@ -41,7 +41,7 @@ room watch <room-id> -t <token> --interval 5
 room who <room-id> -t <token>
 ```
 
-The `room poll` cursor is stored at `/tmp/room-<id>-<username>.cursor`. Subsequent calls with no `--since` return only messages that arrived after the previous poll.
+The `room poll` cursor is stored at `~/.room/state/room-<id>-<username>.cursor`. Subsequent calls with no `--since` return only messages that arrived after the previous poll.
 
 ## Coordination protocol
 
@@ -93,5 +93,5 @@ All events carry `id` (UUID), `room`, `user`, `ts` (ISO 8601 UTC), and `seq` (mo
 
 - Socket: `/tmp/room-<id>.sock`
 - Chat history: `/tmp/<id>.chat` (NDJSON, broker is sole writer)
-- Token persistence: `/tmp/<id>.tokens` (survives broker restarts)
-- Poll cursor: `/tmp/room-<id>-<username>.cursor`
+- Token persistence: `~/.room/state/tokens.json` (survives broker restarts)
+- Poll cursor: `~/.room/state/room-<id>-<username>.cursor`

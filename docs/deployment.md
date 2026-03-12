@@ -9,7 +9,7 @@ For users running `room` in production or custom environments.
 | Broker socket | `/tmp/room-<id>.sock` | Fixed (derived from room ID) |
 | Chat history | `/tmp/<id>.chat` | `-f <path>` flag when starting a new room |
 | Session tokens | `~/.room/state/room-<username>.token` | Fixed (global, not per-room) |
-| Poll cursor | `/tmp/room-<id>-<username>.cursor` | Fixed |
+| Poll cursor | `~/.room/state/room-<id>-<username>.cursor` | Fixed |
 
 ## Changing the chat file path
 

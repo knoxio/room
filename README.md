@@ -231,7 +231,15 @@ Prefix your input with `/` to send a command instead of a plain message:
 /set_status reviewing PRs
 /who
 /dm bob hey, can we sync?
+/taskboard post fix the login bug
+/queue add deploy staging
 ```
+
+Claims expire after 30 minutes of inactivity (TTL-based with lazy sweep). The `/claim` command returns your claim or replaces an existing one.
+
+The `/taskboard` plugin provides a full task lifecycle: `post`, `list`, `show`, `claim`, `plan`, `approve`, `update`, `release`, `finish`. Tasks move through statuses: open → claimed → planned → approved → done.
+
+The `/queue` plugin manages a shared FIFO queue: `add`, `list`, `remove`, `pop`.
 
 The command and its arguments are sent as a `command` message (see [Wire format](#wire-format)).
 
