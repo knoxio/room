@@ -10,6 +10,14 @@ For changes prior to the workspace restructure (v0.1.2 through v1.0.2), see the
 
 ## [Unreleased]
 
+### Fixed
+
+- Oneshot commands returning `CommandResult::Handled` (e.g. `/taskboard post`) now send a
+  system ack response instead of closing the socket with no reply, which caused EOF parse
+  errors and broker crashes. Affects UDS and WS oneshot transports.
+- UTF-8 panic in `/taskboard list` — byte-level string truncation replaced with char-level
+  truncation to prevent panics on multibyte characters at the slice boundary.
+
 ## [3.1.0] - 2026-03-13
 
 ### Added
