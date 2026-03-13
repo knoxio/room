@@ -11,6 +11,9 @@ use room_protocol::plugin::{
     BoxFuture, CommandContext, CommandInfo, ParamSchema, ParamType, Plugin, PluginResult,
 };
 
+/// Grace period in seconds before sending SIGKILL after SIGTERM.
+const STOP_GRACE_PERIOD_SECS: u64 = 5;
+
 /// A spawned agent process tracked by the plugin.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpawnedAgent {
@@ -249,12 +252,19 @@ impl AgentPlugin {
         lines.join("\n")
     }
 
-    fn handle_stop(&self, params: &[String]) -> Result<String, String> {
-        if params.len() < 2 {
+    fn handle_stop(&self, ctx: &CommandContext) -> Result<String, String> {
+        if ctx.params.len() < 2 {
             return Err("usage: /agent stop <username>".to_owned());
         }
 
-        let username = &params[1];
+        // Host-only permission check
+        if let Some(ref host) = ctx.metadata.host {
+            if ctx.sender != *host {
+                return Err("permission denied: only the host can stop agents".to_owned());
+            }
+        }
+
+        let username = &ctx.params[1];
 
         let agent = {
             let agents = self.agents.lock().unwrap();
@@ -265,8 +275,12 @@ impl AgentPlugin {
             return Err(format!("no agent named '{username}'"));
         };
 
-        // Send SIGTERM, then SIGKILL if still alive after 2s
-        stop_process(agent.pid);
+        // Check if already exited before attempting to stop
+        let was_alive = is_process_alive(agent.pid);
+        if was_alive {
+            // Send SIGTERM, then SIGKILL after 5s grace period
+            stop_process(agent.pid, STOP_GRACE_PERIOD_SECS);
+        }
 
         {
             let mut agents = self.agents.lock().unwrap();
@@ -274,10 +288,17 @@ impl AgentPlugin {
         }
         self.persist();
 
-        Ok(format!(
-            "agent {} stopped (was pid {})",
-            username, agent.pid
-        ))
+        if was_alive {
+            Ok(format!(
+                "agent {} stopped by {} (was pid {})",
+                username, ctx.sender, agent.pid
+            ))
+        } else {
+            Ok(format!(
+                "agent {} removed (already exited, was pid {})",
+                username, agent.pid
+            ))
+        }
     }
 }
 
@@ -304,7 +325,7 @@ impl Plugin for AgentPlugin {
                     Err(e) => Ok(PluginResult::Reply(e)),
                 },
                 "list" => Ok(PluginResult::Reply(self.handle_list())),
-                "stop" => match self.handle_stop(&ctx.params) {
+                "stop" => match self.handle_stop(&ctx) {
                     Ok(msg) => Ok(PluginResult::Broadcast(msg)),
                     Err(e) => Ok(PluginResult::Reply(e)),
                 },
@@ -330,14 +351,14 @@ fn is_process_alive(pid: u32) -> bool {
     }
 }
 
-/// Send SIGTERM to a process, wait 2 seconds, then SIGKILL if still alive.
-fn stop_process(pid: u32) {
+/// Send SIGTERM to a process, wait `grace_secs`, then SIGKILL if still alive.
+fn stop_process(pid: u32, grace_secs: u64) {
     #[cfg(unix)]
     {
         unsafe {
             libc::kill(pid as i32, libc::SIGTERM);
         }
-        std::thread::sleep(std::time::Duration::from_secs(2));
+        std::thread::sleep(std::time::Duration::from_secs(grace_secs));
         if is_process_alive(pid) {
             unsafe {
                 libc::kill(pid as i32, libc::SIGKILL);
@@ -346,7 +367,7 @@ fn stop_process(pid: u32) {
     }
     #[cfg(not(unix))]
     {
-        let _ = pid;
+        let _ = (pid, grace_secs);
     }
 }
 
@@ -543,7 +564,8 @@ mod tests {
     fn stop_missing_username() {
         let dir = tempfile::tempdir().unwrap();
         let plugin = test_plugin(dir.path());
-        let result = plugin.handle_stop(&["stop".to_owned()]);
+        let ctx = make_ctx(&plugin, vec!["stop"], vec![]);
+        let result = plugin.handle_stop(&ctx);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("usage"));
     }
@@ -552,9 +574,102 @@ mod tests {
     fn stop_unknown_agent() {
         let dir = tempfile::tempdir().unwrap();
         let plugin = test_plugin(dir.path());
-        let result = plugin.handle_stop(&["stop".to_owned(), "nobody".to_owned()]);
+        let ctx = make_ctx(&plugin, vec!["stop", "nobody"], vec![]);
+        let result = plugin.handle_stop(&ctx);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("no agent named"));
+    }
+
+    #[test]
+    fn stop_non_host_denied() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin = test_plugin(dir.path());
+
+        // Insert a fake agent
+        {
+            let mut agents = plugin.agents.lock().unwrap();
+            agents.insert(
+                "bot1".to_owned(),
+                SpawnedAgent {
+                    username: "bot1".to_owned(),
+                    pid: std::process::id(),
+                    model: "sonnet".to_owned(),
+                    spawned_at: Utc::now(),
+                    log_path: PathBuf::from("/tmp/test.log"),
+                    room_id: "test-room".to_owned(),
+                },
+            );
+        }
+
+        // Create context with sender != host
+        let mut ctx = make_ctx(&plugin, vec!["stop", "bot1"], vec![]);
+        ctx.sender = "not-host".to_owned();
+        let result = plugin.handle_stop(&ctx);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("permission denied"));
+    }
+
+    #[test]
+    fn stop_already_exited_agent() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin = test_plugin(dir.path());
+
+        // Insert an agent with a dead PID
+        {
+            let mut agents = plugin.agents.lock().unwrap();
+            agents.insert(
+                "dead-bot".to_owned(),
+                SpawnedAgent {
+                    username: "dead-bot".to_owned(),
+                    pid: 999_999_999,
+                    model: "haiku".to_owned(),
+                    spawned_at: Utc::now(),
+                    log_path: PathBuf::from("/tmp/test.log"),
+                    room_id: "test-room".to_owned(),
+                },
+            );
+        }
+
+        let ctx = make_ctx(&plugin, vec!["stop", "dead-bot"], vec![]);
+        let result = plugin.handle_stop(&ctx);
+        assert!(result.is_ok());
+        let msg = result.unwrap();
+        assert!(msg.contains("already exited"));
+        assert!(msg.contains("removed"));
+
+        // Agent should be removed from tracking
+        let agents = plugin.agents.lock().unwrap();
+        assert!(!agents.contains_key("dead-bot"));
+    }
+
+    #[test]
+    fn stop_host_can_stop_agent() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin = test_plugin(dir.path());
+
+        // Insert an agent with a dead PID (safe to "stop")
+        {
+            let mut agents = plugin.agents.lock().unwrap();
+            agents.insert(
+                "bot1".to_owned(),
+                SpawnedAgent {
+                    username: "bot1".to_owned(),
+                    pid: 999_999_999,
+                    model: "sonnet".to_owned(),
+                    spawned_at: Utc::now(),
+                    log_path: PathBuf::from("/tmp/test.log"),
+                    room_id: "test-room".to_owned(),
+                },
+            );
+        }
+
+        // Host (default sender) should be able to stop
+        let ctx = make_ctx(&plugin, vec!["stop", "bot1"], vec![]);
+        let result = plugin.handle_stop(&ctx);
+        assert!(result.is_ok());
+
+        let agents = plugin.agents.lock().unwrap();
+        assert!(!agents.contains_key("bot1"));
     }
 
     #[test]
