@@ -195,3 +195,147 @@ const ADMIN_CMD_NAMES: &[&str] = &["kick", "reauth", "clear-tokens", "exit", "cl
 | `clear-tokens` | Clears the full `TokenMap` and removes all token files from `~/.room/state/`. |
 | `exit` | Broadcasts a shutdown notice, then calls `shutdown.send(true)`. |
 | `clear` | Truncates the chat history file via `std::fs::write(path, "")`. |
+
+## Daemon mode
+
+The daemon (`room daemon`) manages multiple rooms in a single process. Instead of one
+broker per room, a single daemon accepts connections on a shared UDS socket and routes
+them to the appropriate room.
+
+### DaemonState
+
+| Field | Type | Description |
+|---|---|---|
+| `rooms` | `Arc<Mutex<HashMap<String, Arc<RoomState>>>>` | Active rooms by ID |
+| `config` | `DaemonConfig` | Socket path, data dir, state dir, WS port, grace period |
+| `next_client_id` | `Arc<AtomicU64>` | Global client ID counter (shared across rooms) |
+| `shutdown` | `Arc<watch::Sender<bool>>` | Daemon-level shutdown signal |
+| `system_token_map` | `Arc<Mutex<HashMap<String, String>>>` | Runtime token cache (shared across rooms) |
+| `user_registry` | `Arc<tokio::sync::Mutex<UserRegistry>>` | Persistent identity store — sole source of truth for tokens in daemon mode |
+| `connection_count` | `Arc<AtomicUsize>` | Active UDS connections; triggers grace period when zero |
+
+### DaemonConfig
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `socket_path` | `PathBuf` | Platform temp dir | UDS socket (`roomd.sock`) |
+| `data_dir` | `PathBuf` | `~/.room/data/` | Chat file directory |
+| `state_dir` | `PathBuf` | `~/.room/state/` | Tokens, cursors, subscriptions |
+| `ws_port` | `Option<u16>` | `None` | Optional WebSocket/REST port |
+| `grace_period_secs` | `u64` | 30 | Seconds to wait before shutdown when last connection closes |
+
+Helper methods: `chat_path(room_id)`, `token_map_path(room_id)`,
+`system_tokens_path()`, `subscription_map_path(room_id)`,
+`event_filter_map_path(room_id)`.
+
+### Daemon handshake protocol
+
+Connections to the daemon socket begin with a prefix that determines routing:
+
+| Prefix | Effect |
+|---|---|
+| `ROOM:<room_id>:<rest>` | Route `<rest>` to the named room (same per-room handshake: SEND, TOKEN, JOIN, SESSION, or username) |
+| `CREATE:<room_id>` | Create a new room. Config JSON follows on the next line |
+| `DESTROY:<room_id>` | Destroy a room. Token required on the next line |
+| `JOIN:<username>` | Global user registration — issues a daemon-level token (not per-room) |
+
+**Room creation** validates the room ID, builds a `RoomState`, inserts into the rooms map,
+loads persisted subscriptions, and writes a `.meta` file for auto-discovery. DM rooms
+auto-subscribe both participants at `Full`.
+
+**Room destruction** removes the room from the map, signals shutdown to connected clients,
+and deletes the `.meta` file.
+
+### Room auto-discovery
+
+Each room writes a `.meta` file on creation:
+
+```json
+{"chat_path": "/full/path/to/<room_id>.chat"}
+```
+
+Location: `$TMPDIR/room-<room_id>.meta` (platform runtime dir). The `discover_daemon_rooms()`
+function scans for `room-*.meta` files and extracts room IDs. `discover_joined_rooms(username)`
+further filters to rooms where the user has a `Full` or `MentionsOnly` subscription.
+
+### PID file
+
+The daemon writes `~/.room/roomd.pid` on startup (default socket only). `is_pid_alive()`
+checks liveness via POSIX `kill(pid, 0)`. Removed on clean shutdown.
+
+## WebSocket and REST transport
+
+The broker optionally serves a WS + REST API alongside UDS. Start with `--ws-port <port>`.
+
+### WS handshake
+
+Connect to `ws://host:port/ws/<room_id>`. The first text frame determines the session type:
+
+| First frame | Behaviour |
+|---|---|
+| `<username>` | Interactive session (deprecated — use `SESSION:`) |
+| `JOIN:<username>` | Register and receive a token, then close |
+| `TOKEN:<uuid>` | Authenticated one-shot — send message as next frame, receive echo, close |
+| `SESSION:<uuid>` | Authenticated interactive — resolve username from token, enter full session |
+| `SEND:<username>` | Legacy unauthenticated one-shot (deprecated) |
+
+After the interactive handshake (`SESSION:` or bare username), the connection becomes
+bidirectional — send plain text or JSON envelopes as text frames.
+
+### REST API
+
+| Method | Endpoint | Auth | Description |
+|---|---|---|---|
+| `POST` | `/api/<room_id>/join` | None | `{"username":"x"}` → token |
+| `POST` | `/api/<room_id>/send` | Bearer token | `{"content":"msg","to":"user"}` → broadcast JSON |
+| `GET` | `/api/<room_id>/poll` | Bearer token | `?since=<msg-id>` → `{"messages":[...]}` |
+| `GET` | `/api/<room_id>/query` | Bearer token | Filter params: user, n, since, before, content, regex, mention, public, asc |
+| `GET` | `/api/health` | None | `{"status":"ok","room":"<id>","users":<n>}` |
+| `GET` | `/api/rooms` | None | Daemon only: `{"rooms":["room1","room2"]}` |
+| `POST` | `/api/rooms` | Bearer token | Daemon only: create room with config |
+
+REST poll is stateless — no server-side cursor. The caller tracks the last seen message ID.
+
+### Daemon vs single-room routers
+
+Single-room mode uses `WsAppState` (holds one `Arc<RoomState>`). Daemon mode uses
+`DaemonWsState` (holds the `RoomMap` and looks up rooms by ID). Daemon REST endpoints
+additionally validate tokens against the `UserRegistry` fallback when the per-room token
+map does not match.
+
+## Subscription tiers
+
+Each user has a per-room subscription tier that controls message filtering during polling.
+
+### Tiers
+
+| Tier | Display | Behaviour |
+|---|---|---|
+| `Full` | `full` | All messages from the room |
+| `MentionsOnly` | `mentions_only` | Only messages that @mention the user |
+| `Unsubscribed` | `unsubscribed` | Excluded from default poll (still queryable with `--public`) |
+
+### Storage
+
+Subscriptions are stored in `~/.room/state/<room_id>.subscriptions` (NDJSON, one entry
+per line). Loaded on room creation and merged with initial subscriptions (e.g. DM rooms
+auto-subscribe both participants at `Full`). Missing subscriptions default to `Full`.
+
+### Commands
+
+| Command | Effect |
+|---|---|
+| `/subscribe [full\|mentions_only]` | Set subscription tier (default: `full`) |
+| `/unsubscribe` | Set tier to `Unsubscribed` |
+| `/subscribe_events <filter>` | Filter Event messages: `all`, `none`, or comma-separated types |
+| `/subscriptions` | Show all subscription tiers and event filters for the room |
+
+### Filtering
+
+`apply_tier_filter()` in `oneshot/poll.rs` applies per-room tier filtering:
+- **Full**: all messages pass
+- **MentionsOnly**: only messages where the user appears in `message.mentions()`
+- **Unsubscribed**: all messages dropped
+
+`apply_per_room_tier_filter()` handles multi-room polls — loads each room's subscription
+map from disk and filters independently.
