@@ -481,7 +481,7 @@ impl TaskboardPlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
+    use room_protocol::plugin::{HistoryAccess, MessageWriter, RoomMetadata, UserInfo};
 
     fn make_plugin() -> (TaskboardPlugin, tempfile::NamedTempFile) {
         let tmp = tempfile::NamedTempFile::new().unwrap();
@@ -1001,22 +1001,54 @@ mod tests {
 
     // -- Test helpers -----------------------------------------------------------
 
+    /// No-op MessageWriter for unit tests — taskboard handler tests never
+    /// call writer methods (emit_event is called in Plugin::handle, not in
+    /// the individual handlers).
+    struct NoopWriter;
+
+    impl MessageWriter for NoopWriter {
+        fn broadcast(&self, _content: &str) -> BoxFuture<'_, anyhow::Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
+        fn reply_to(&self, _username: &str, _content: &str) -> BoxFuture<'_, anyhow::Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
+        fn emit_event(
+            &self,
+            _event_type: room_protocol::EventType,
+            _content: &str,
+            _params: Option<serde_json::Value>,
+        ) -> BoxFuture<'_, anyhow::Result<()>> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    /// No-op HistoryAccess for unit tests — taskboard handlers never read history.
+    struct NoopHistory;
+
+    impl HistoryAccess for NoopHistory {
+        fn all(&self) -> BoxFuture<'_, anyhow::Result<Vec<room_protocol::Message>>> {
+            Box::pin(async { Ok(vec![]) })
+        }
+        fn tail(&self, _n: usize) -> BoxFuture<'_, anyhow::Result<Vec<room_protocol::Message>>> {
+            Box::pin(async { Ok(vec![]) })
+        }
+        fn since(
+            &self,
+            _message_id: &str,
+        ) -> BoxFuture<'_, anyhow::Result<Vec<room_protocol::Message>>> {
+            Box::pin(async { Ok(vec![]) })
+        }
+        fn count(&self) -> BoxFuture<'_, anyhow::Result<usize>> {
+            Box::pin(async { Ok(0) })
+        }
+    }
+
     fn test_ctx(sender: &str, params: &[&str]) -> CommandContext {
         test_ctx_with_host(sender, params, None)
     }
 
     fn test_ctx_with_host(sender: &str, params: &[&str], host: Option<&str>) -> CommandContext {
-        use std::collections::HashMap;
-        use std::sync::atomic::AtomicU64;
-
-        use crate::plugin::{ChatWriter, RoomMetadata, UserInfo};
-
-        let clients = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
-        let chat_path = Arc::new(PathBuf::from("/dev/null"));
-        let room_id = Arc::new("test-room".to_owned());
-        let seq_counter = Arc::new(AtomicU64::new(0));
-        let writer = ChatWriter::new(&clients, &chat_path, &room_id, &seq_counter, "taskboard");
-
         CommandContext {
             command: "taskboard".to_owned(),
             params: params.iter().map(|s| s.to_string()).collect(),
@@ -1024,11 +1056,8 @@ mod tests {
             room_id: "test-room".to_owned(),
             message_id: "msg-001".to_owned(),
             timestamp: chrono::Utc::now(),
-            history: Box::new(crate::plugin::HistoryReader::new(
-                std::path::Path::new("/dev/null"),
-                sender,
-            )),
-            writer: Box::new(writer),
+            history: Box::new(NoopHistory),
+            writer: Box::new(NoopWriter),
             metadata: RoomMetadata {
                 online_users: vec![UserInfo {
                     username: sender.to_owned(),

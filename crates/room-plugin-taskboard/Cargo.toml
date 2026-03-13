@@ -1,0 +1,20 @@
+[package]
+name = "room-plugin-taskboard"
+version = "3.1.0"
+edition = "2021"
+description = "Taskboard plugin for the room multi-user chat system"
+license = "MIT"
+repository = "https://github.com/knoxio/room"
+
+[dependencies]
+room-protocol = { path = "../room-protocol", version = "3.1.0" }
+chrono = { version = "0.4", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

@@ -7,11 +7,10 @@ use std::time::Duration;
 
 use task::{next_id, LiveTask, Task, TaskStatus};
 
-use room_protocol::EventType;
-
-use crate::plugin::{
+use room_protocol::plugin::{
     BoxFuture, CommandContext, CommandInfo, ParamSchema, ParamType, Plugin, PluginResult,
 };
+use room_protocol::EventType;
 
 /// Default lease TTL in seconds (10 minutes).
 const DEFAULT_LEASE_TTL_SECS: u64 = 600;
@@ -225,7 +224,7 @@ mod tests {
             let mut board = plugin.board.lock().unwrap();
             let stale = std::time::Instant::now() - std::time::Duration::from_secs(700);
             for i in 1..=3 {
-                let mut t = task::Task {
+                let t = task::Task {
                     id: format!("tb-{i:03}"),
                     description: format!("expiry test {i}"),
                     status: TaskStatus::Claimed,
@@ -239,12 +238,12 @@ mod tests {
                     updated_at: None,
                     notes: None,
                 };
-                let mut lt = LiveTask::new(t.clone());
+                let mut lt = LiveTask::new(t);
                 lt.lease_start = Some(stale);
                 board.push(lt);
             }
             // Finished task with a stale lease — must NOT be swept.
-            let mut finished = task::Task {
+            let finished = task::Task {
                 id: "tb-004".to_owned(),
                 description: "finished task".to_owned(),
                 status: TaskStatus::Finished,
@@ -258,7 +257,7 @@ mod tests {
                 updated_at: None,
                 notes: None,
             };
-            let mut lt_finished = LiveTask::new(finished.clone());
+            let mut lt_finished = LiveTask::new(finished);
             // Manually inject stale lease to simulate edge case.
             lt_finished.lease_start = Some(stale);
             board.push(lt_finished);

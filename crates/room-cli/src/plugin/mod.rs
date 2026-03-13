@@ -2,7 +2,9 @@ pub mod bridge;
 pub mod queue;
 pub mod schema;
 pub mod stats;
-pub mod taskboard;
+
+/// Re-export the taskboard plugin from its own crate.
+pub use room_plugin_taskboard as taskboard;
 
 use std::{collections::HashMap, path::Path};
 
