@@ -1,3 +1,6 @@
+use std::panic::AssertUnwindSafe;
+
+use futures_util::FutureExt;
 use room_protocol::{EventFilter, SubscriptionTier};
 
 use room_protocol::{make_system, Message};
@@ -676,7 +679,27 @@ async fn dispatch_plugin(
         team_access,
     };
 
-    let result = plugin.handle(ctx).await?;
+    let result = AssertUnwindSafe(plugin.handle(ctx)).catch_unwind().await;
+
+    let result = match result {
+        Ok(Ok(r)) => r,
+        Ok(Err(e)) => return Err(e),
+        Err(panic_info) => {
+            let msg = panic_info
+                .downcast_ref::<String>()
+                .map(|s| s.as_str())
+                .or_else(|| panic_info.downcast_ref::<&str>().copied())
+                .unwrap_or("unknown panic");
+            eprintln!("[broker] plugin {} panicked: {msg}", plugin.name());
+            let sys = make_system(
+                &state.room_id,
+                "broker",
+                format!("plugin:{} panicked: {msg}", plugin.name()),
+            );
+            let json = serde_json::to_string(&sys)?;
+            return Ok(CommandResult::Reply(json));
+        }
+    };
 
     Ok(match result {
         PluginResult::Reply(text) => {
@@ -2761,6 +2784,77 @@ mod tests {
         assert!(
             !matches!(result, CommandResult::Passthrough(_)),
             "cross-room dispatch should not fall through to Passthrough"
+        );
+    }
+
+    // ── plugin panic safety ───────────────────────────────────────────────
+
+    mod panic_plugin {
+        use futures_util::future::FutureExt;
+        use room_protocol::plugin::{BoxFuture, CommandContext, CommandInfo, Plugin, PluginResult};
+
+        pub struct PanickingPlugin;
+
+        impl Plugin for PanickingPlugin {
+            fn name(&self) -> &str {
+                "panicker"
+            }
+            fn commands(&self) -> Vec<CommandInfo> {
+                vec![CommandInfo {
+                    name: "panic_test".to_owned(),
+                    description: "always panics".to_owned(),
+                    usage: "/panic_test".to_owned(),
+                    params: vec![],
+                }]
+            }
+            fn handle(&self, _ctx: CommandContext) -> BoxFuture<'_, anyhow::Result<PluginResult>> {
+                async { panic!("intentional test panic") }.boxed()
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_plugin_catches_panic() {
+        use super::dispatch_plugin;
+        use room_protocol::make_command;
+
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+        let plugin = panic_plugin::PanickingPlugin;
+        let msg = make_command("test-room", "alice", "panic_test", vec![]);
+        let result = dispatch_plugin(&plugin, &msg, "alice", &state).await;
+        // Should not panic — should return Ok(Reply) with error message
+        let result = result.expect("dispatch_plugin should not propagate panic");
+        match &result {
+            CommandResult::Reply(json) => {
+                assert!(
+                    json.contains("panicked"),
+                    "reply should mention panic: {json}"
+                );
+                assert!(
+                    json.contains("intentional test panic"),
+                    "reply should contain panic message: {json}"
+                );
+            }
+            _ => panic!("expected Reply"),
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_plugin_normal_plugin_still_works() {
+        use super::dispatch_plugin;
+        use room_protocol::make_command;
+
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+        // Use the stats plugin which is already registered
+        let plugin = state.plugin_registry.resolve("stats").unwrap();
+        let msg = make_command("test-room", "alice", "stats", vec![]);
+        let result = dispatch_plugin(plugin, &msg, "alice", &state).await;
+        assert!(
+            result.is_ok(),
+            "normal plugin dispatch should succeed: {:?}",
+            result.err()
         );
     }
 }
