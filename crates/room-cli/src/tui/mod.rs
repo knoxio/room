@@ -1305,4 +1305,44 @@ mod tests {
         tab.process_message(make_leave("alice"), &mut cm, true);
         assert!(tab.subscription_tiers.get("alice").is_none());
     }
+
+    // ── kick removes user from member panel (#505) ───────────────────────
+
+    #[tokio::test]
+    async fn process_kick_broadcast_removes_user() {
+        let (_, rx) = mpsc::unbounded_channel();
+        let (_, wh) = tokio::net::UnixStream::pair().unwrap().1.into_split();
+        let mut tab = RoomTab {
+            room_id: "test".into(),
+            messages: Vec::new(),
+            online_users: vec!["alice".into(), "bob".into()],
+            user_statuses: HashMap::from([("bob".to_owned(), "working".to_owned())]),
+            subscription_tiers: HashMap::from([("bob".to_owned(), SubscriptionTier::Full)]),
+            unread_count: 0,
+            scroll_offset: 0,
+            msg_rx: rx,
+            write_half: wh,
+        };
+        let mut cm = ColorMap::new();
+
+        tab.process_message(
+            make_system("alice kicked bob (token invalidated)"),
+            &mut cm,
+            true,
+        );
+        assert!(
+            !tab.online_users.contains(&"bob".to_owned()),
+            "kicked user must be removed from online_users"
+        );
+        assert!(
+            tab.user_statuses.get("bob").is_none(),
+            "kicked user's status must be cleared"
+        );
+        assert!(
+            tab.subscription_tiers.get("bob").is_none(),
+            "kicked user's subscription tier must be cleared"
+        );
+        // alice should still be online
+        assert!(tab.online_users.contains(&"alice".to_owned()));
+    }
 }

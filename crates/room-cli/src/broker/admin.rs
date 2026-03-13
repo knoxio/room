@@ -51,7 +51,7 @@ pub(crate) async fn handle_admin_cmd(
             if arg.is_empty() {
                 return None;
             }
-            let target = arg.to_owned();
+            let target = arg.strip_prefix('@').unwrap_or(arg).to_owned();
             let mut map = token_map.lock().await;
             // Remove all existing tokens for this username, then insert a per-user sentinel
             // so the username stays reserved. Using KICKED:<username> as the key ensures
@@ -79,7 +79,7 @@ pub(crate) async fn handle_admin_cmd(
             if arg.is_empty() {
                 return None;
             }
-            let target = arg.to_owned();
+            let target = arg.strip_prefix('@').unwrap_or(arg).to_owned();
             let mut map = token_map.lock().await;
             map.retain(|_, u| u != &target);
             if let Err(e) = save_token_map(&map, &state.token_map_path) {
@@ -454,6 +454,72 @@ mod tests {
             "KICKED sentinel must not authenticate after restart"
         );
     }
+
+    // ── @-prefix stripping (#505) ──────────────────────────────────────────
+
+    #[tokio::test]
+    async fn kick_at_prefix_strips_and_invalidates() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+        *state.host_user.lock().await = Some("alice".to_owned());
+        state
+            .token_map
+            .lock()
+            .await
+            .insert("tok-bob".to_owned(), "bob".to_owned());
+        // User types `/kick @bob` — the @ must be stripped.
+        let err = handle_admin_cmd("kick @bob", "alice", &state).await;
+        assert!(err.is_none(), "kick @bob should succeed");
+        let map = state.token_map.lock().await;
+        assert!(
+            !map.contains_key("tok-bob"),
+            "bob's token should be removed even with @ prefix"
+        );
+        assert!(
+            map.get("KICKED:bob").is_some(),
+            "sentinel must use bare username, not @bob"
+        );
+    }
+
+    #[tokio::test]
+    async fn reauth_at_prefix_strips_and_clears() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+        *state.host_user.lock().await = Some("alice".to_owned());
+        {
+            let mut guard = state.token_map.lock().await;
+            guard.insert("uuid-bob".to_owned(), "bob".to_owned());
+            guard.insert("KICKED:bob".to_owned(), "bob".to_owned());
+        }
+        // User types `/reauth @bob` — the @ must be stripped.
+        let err = handle_admin_cmd("reauth @bob", "alice", &state).await;
+        assert!(err.is_none(), "reauth @bob should succeed");
+        let guard = state.token_map.lock().await;
+        assert!(
+            !guard.values().any(|u| u == "bob"),
+            "all bob entries must be removed even with @ prefix"
+        );
+    }
+
+    #[tokio::test]
+    async fn kick_without_at_prefix_still_works() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+        *state.host_user.lock().await = Some("alice".to_owned());
+        state
+            .token_map
+            .lock()
+            .await
+            .insert("tok-carol".to_owned(), "carol".to_owned());
+        let err = handle_admin_cmd("kick carol", "alice", &state).await;
+        assert!(err.is_none(), "kick carol should succeed");
+        assert!(
+            state.token_map.lock().await.get("KICKED:carol").is_some(),
+            "kick without @ must still work"
+        );
+    }
+
+    // ── registry-aware admin commands ─────────────────────────────────────────
 
     #[tokio::test]
     async fn reauth_revokes_token_from_registry_in_daemon_mode() {
