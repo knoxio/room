@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use axum::{
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
@@ -5,10 +7,12 @@ use axum::{
     Json,
 };
 use serde::Deserialize;
+use tokio::sync::Mutex;
 
 use crate::{
     message::{make_dm, make_message, Message},
     query::{has_narrowing_filter, QueryFilter},
+    registry::UserRegistry,
 };
 
 use super::super::{
@@ -56,6 +60,48 @@ fn dispatch_to_response(result: anyhow::Result<DispatchResult>) -> axum::respons
         )
             .into_response(),
     }
+}
+
+/// Validate a bearer token against the room's local token map, then optionally
+/// fall back to a global [`UserRegistry`] (daemon mode).
+async fn validate_token_with_fallback(
+    token: &str,
+    room: &RoomState,
+    registry: Option<&Arc<Mutex<UserRegistry>>>,
+) -> Option<String> {
+    if let Some(u) = room.validate_token(token).await {
+        return Some(u);
+    }
+    if let Some(reg) = registry {
+        let reg = reg.lock().await;
+        return reg.validate_token(token).map(|u| u.to_owned());
+    }
+    None
+}
+
+/// Extract and validate a bearer token from headers, returning the username.
+async fn require_auth(
+    headers: &HeaderMap,
+    room: &RoomState,
+    registry: Option<&Arc<Mutex<UserRegistry>>>,
+) -> Result<String, axum::response::Response> {
+    let token = extract_bearer_token(headers).ok_or_else(|| {
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"type":"error","code":"missing_token"})),
+        )
+            .into_response()
+    })?;
+
+    validate_token_with_fallback(token, room, registry)
+        .await
+        .ok_or_else(|| {
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"type":"error","code":"invalid_token"})),
+            )
+                .into_response()
+        })
 }
 
 // ── Request/query structs ───────────────────────────────────────────────
@@ -182,129 +228,53 @@ pub(super) fn apply_query_filter(
     messages
 }
 
-// ── Single-room REST endpoints ──────────────────────────────────────────
+// ── Shared endpoint logic ───────────────────────────────────────────────
 
-pub(super) async fn api_join(
-    Path(room_id): Path<String>,
-    State(state): State<WsAppState>,
-    Json(body): Json<JoinRequest>,
-) -> impl IntoResponse {
-    let rs = &*state.room_state;
-    if room_id != rs.room_id() {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"type":"error","code":"room_not_found"})),
-        )
-            .into_response();
-    }
-    if let Err(reason) = rs.check_join(&body.username) {
+async fn join_inner(room: &RoomState, username: &str) -> axum::response::Response {
+    if let Err(reason) = room.check_join(username) {
         return (
             StatusCode::FORBIDDEN,
             Json(serde_json::json!({"type":"error","code":"join_denied","message": reason})),
         )
             .into_response();
     }
-    match rs.issue_token(&body.username).await {
+    match room.issue_token(username).await {
         Ok(token) => {
             let resp = serde_json::json!({
-                "type":"token","token": token, "username": body.username
+                "type":"token","token": token, "username": username
             });
             (StatusCode::OK, Json(resp)).into_response()
         }
         Err(_) => {
             let err = serde_json::json!({
-                "type":"error","code":"username_taken","username": body.username
+                "type":"error","code":"username_taken","username": username
             });
             (StatusCode::CONFLICT, Json(err)).into_response()
         }
     }
 }
 
-pub(super) async fn api_send(
-    Path(room_id): Path<String>,
-    State(state): State<WsAppState>,
-    headers: HeaderMap,
-    Json(body): Json<SendRequest>,
-) -> impl IntoResponse {
-    let rs = &*state.room_state;
-    if room_id != rs.room_id() {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"type":"error","code":"room_not_found"})),
-        )
-            .into_response();
-    }
-
-    let token = match extract_bearer_token(&headers) {
-        Some(t) => t,
-        None => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(serde_json::json!({"type":"error","code":"missing_token"})),
-            )
-                .into_response()
-        }
-    };
-
-    let username = match rs.validate_token(token).await {
-        Some(u) => u,
-        None => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(serde_json::json!({"type":"error","code":"invalid_token"})),
-            )
-                .into_response()
-        }
-    };
-
+async fn send_inner(
+    room: &RoomState,
+    username: &str,
+    body: SendRequest,
+) -> axum::response::Response {
     let msg = if let Some(ref to) = body.to {
-        make_dm(rs.room_id(), &username, to, &body.content)
+        make_dm(room.room_id(), username, to, &body.content)
     } else {
-        make_message(rs.room_id(), &username, &body.content)
+        make_message(room.room_id(), username, &body.content)
     };
 
-    dispatch_to_response(rs.route_and_dispatch(msg, &username).await)
+    dispatch_to_response(room.route_and_dispatch(msg, username).await)
 }
 
-pub(super) async fn api_poll(
-    Path(room_id): Path<String>,
-    State(state): State<WsAppState>,
-    headers: HeaderMap,
-    Query(query): Query<PollQuery>,
-) -> impl IntoResponse {
-    let rs = &*state.room_state;
-    if room_id != rs.room_id() {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"type":"error","code":"room_not_found"})),
-        )
-            .into_response();
-    }
-
-    let token = match extract_bearer_token(&headers) {
-        Some(t) => t,
-        None => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(serde_json::json!({"type":"error","code":"missing_token"})),
-            )
-                .into_response()
-        }
-    };
-
-    let username = match rs.validate_token(token).await {
-        Some(u) => u,
-        None => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(serde_json::json!({"type":"error","code":"invalid_token"})),
-            )
-                .into_response()
-        }
-    };
-
-    let history = rs.load_history().await;
-    let host_name = rs.host_name().await;
+async fn poll_inner(
+    room: &RoomState,
+    username: &str,
+    query: PollQuery,
+) -> axum::response::Response {
+    let history = room.load_history().await;
+    let host_name = room.host_name().await;
 
     // Filter messages after the `since` ID (stateless — no server-side cursor).
     let mut found_since = query.since.is_none();
@@ -317,7 +287,7 @@ pub(super) async fn api_poll(
                 }
                 return false;
             }
-            msg.is_visible_to(&username, host_name.as_deref())
+            msg.is_visible_to(username, host_name.as_deref())
         })
         .filter_map(|msg| serde_json::to_value(&msg).ok())
         .collect();
@@ -329,44 +299,13 @@ pub(super) async fn api_poll(
         .into_response()
 }
 
-pub(super) async fn api_query(
-    Path(room_id): Path<String>,
-    State(state): State<WsAppState>,
-    headers: HeaderMap,
-    Query(params): Query<QueryParams>,
-) -> impl IntoResponse {
-    let rs = &*state.room_state;
-    if room_id != rs.room_id() {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"type":"error","code":"room_not_found"})),
-        )
-            .into_response();
-    }
-
-    let token = match extract_bearer_token(&headers) {
-        Some(t) => t,
-        None => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(serde_json::json!({"type":"error","code":"missing_token"})),
-            )
-                .into_response()
-        }
-    };
-
-    let username = match rs.validate_token(token).await {
-        Some(u) => u,
-        None => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(serde_json::json!({"type":"error","code":"invalid_token"})),
-            )
-                .into_response()
-        }
-    };
-
-    let filter = match build_query_filter(&params, &room_id) {
+async fn query_inner(
+    room: &RoomState,
+    username: &str,
+    room_id: &str,
+    params: QueryParams,
+) -> axum::response::Response {
+    let filter = match build_query_filter(&params, room_id) {
         Ok(f) => f,
         Err(msg) => {
             return (
@@ -394,15 +333,88 @@ pub(super) async fn api_query(
             .into_response();
     }
 
-    let history = rs.load_history().await;
-    let host_name = rs.host_name().await;
-    let messages = apply_query_filter(history, &filter, &room_id, &username, host_name.as_deref());
+    let history = room.load_history().await;
+    let host_name = room.host_name().await;
+    let messages = apply_query_filter(history, &filter, room_id, username, host_name.as_deref());
 
     (
         StatusCode::OK,
         Json(serde_json::json!({ "messages": messages })),
     )
         .into_response()
+}
+
+fn room_not_found() -> axum::response::Response {
+    (
+        StatusCode::NOT_FOUND,
+        Json(serde_json::json!({"type":"error","code":"room_not_found"})),
+    )
+        .into_response()
+}
+
+// ── Single-room REST endpoints ──────────────────────────────────────────
+
+pub(super) async fn api_join(
+    Path(room_id): Path<String>,
+    State(state): State<WsAppState>,
+    Json(body): Json<JoinRequest>,
+) -> impl IntoResponse {
+    let rs = &*state.room_state;
+    if room_id != rs.room_id() {
+        return room_not_found();
+    }
+    join_inner(rs, &body.username).await
+}
+
+pub(super) async fn api_send(
+    Path(room_id): Path<String>,
+    State(state): State<WsAppState>,
+    headers: HeaderMap,
+    Json(body): Json<SendRequest>,
+) -> impl IntoResponse {
+    let rs = &*state.room_state;
+    if room_id != rs.room_id() {
+        return room_not_found();
+    }
+    let username = match require_auth(&headers, rs, state.user_registry.as_ref()).await {
+        Ok(u) => u,
+        Err(resp) => return resp,
+    };
+    send_inner(rs, &username, body).await
+}
+
+pub(super) async fn api_poll(
+    Path(room_id): Path<String>,
+    State(state): State<WsAppState>,
+    headers: HeaderMap,
+    Query(query): Query<PollQuery>,
+) -> impl IntoResponse {
+    let rs = &*state.room_state;
+    if room_id != rs.room_id() {
+        return room_not_found();
+    }
+    let username = match require_auth(&headers, rs, state.user_registry.as_ref()).await {
+        Ok(u) => u,
+        Err(resp) => return resp,
+    };
+    poll_inner(rs, &username, query).await
+}
+
+pub(super) async fn api_query(
+    Path(room_id): Path<String>,
+    State(state): State<WsAppState>,
+    headers: HeaderMap,
+    Query(params): Query<QueryParams>,
+) -> impl IntoResponse {
+    let rs = &*state.room_state;
+    if room_id != rs.room_id() {
+        return room_not_found();
+    }
+    let username = match require_auth(&headers, rs, state.user_registry.as_ref()).await {
+        Ok(u) => u,
+        Err(resp) => return resp,
+    };
+    query_inner(rs, &username, &room_id, params).await
 }
 
 pub(super) async fn api_health(State(state): State<WsAppState>) -> impl IntoResponse {
@@ -416,23 +428,6 @@ pub(super) async fn api_health(State(state): State<WsAppState>) -> impl IntoResp
     }))
 }
 
-// ── Daemon helpers ──────────────────────────────────────────────────────
-
-/// Validate a bearer token against the room's local token map first, then fall
-/// back to the global [`UserRegistry`] (daemon mode). This mirrors the UDS
-/// `TOKEN:` fallback added in #415.
-async fn daemon_validate_token(
-    token: &str,
-    room: &RoomState,
-    state: &DaemonWsState,
-) -> Option<String> {
-    if let Some(u) = room.validate_token(token).await {
-        return Some(u);
-    }
-    let reg = state.user_registry.lock().await;
-    reg.validate_token(token).map(|u| u.to_owned())
-}
-
 // ── Daemon REST endpoints ────────────────────────────────────────────────
 
 pub(super) async fn daemon_api_join(
@@ -442,35 +437,9 @@ pub(super) async fn daemon_api_join(
 ) -> impl IntoResponse {
     let room = match state.get_room(&room_id).await {
         Some(r) => r,
-        None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"type":"error","code":"room_not_found"})),
-            )
-                .into_response();
-        }
+        None => return room_not_found(),
     };
-    if let Err(reason) = room.check_join(&body.username) {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(serde_json::json!({"type":"error","code":"join_denied","message": reason})),
-        )
-            .into_response();
-    }
-    match room.issue_token(&body.username).await {
-        Ok(token) => {
-            let resp = serde_json::json!({
-                "type":"token","token": token, "username": body.username
-            });
-            (StatusCode::OK, Json(resp)).into_response()
-        }
-        Err(_) => {
-            let err = serde_json::json!({
-                "type":"error","code":"username_taken","username": body.username
-            });
-            (StatusCode::CONFLICT, Json(err)).into_response()
-        }
-    }
+    join_inner(&room, &body.username).await
 }
 
 pub(super) async fn daemon_api_send(
@@ -481,44 +450,13 @@ pub(super) async fn daemon_api_send(
 ) -> impl IntoResponse {
     let room = match state.get_room(&room_id).await {
         Some(r) => r,
-        None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"type":"error","code":"room_not_found"})),
-            )
-                .into_response();
-        }
+        None => return room_not_found(),
     };
-
-    let token = match extract_bearer_token(&headers) {
-        Some(t) => t,
-        None => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(serde_json::json!({"type":"error","code":"missing_token"})),
-            )
-                .into_response()
-        }
+    let username = match require_auth(&headers, &room, Some(&state.user_registry)).await {
+        Ok(u) => u,
+        Err(resp) => return resp,
     };
-
-    let username = match daemon_validate_token(token, &room, &state).await {
-        Some(u) => u,
-        None => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(serde_json::json!({"type":"error","code":"invalid_token"})),
-            )
-                .into_response()
-        }
-    };
-
-    let msg = if let Some(ref to) = body.to {
-        make_dm(room.room_id(), &username, to, &body.content)
-    } else {
-        make_message(room.room_id(), &username, &body.content)
-    };
-
-    dispatch_to_response(room.route_and_dispatch(msg, &username).await)
+    send_inner(&room, &username, body).await
 }
 
 pub(super) async fn daemon_api_poll(
@@ -529,60 +467,30 @@ pub(super) async fn daemon_api_poll(
 ) -> impl IntoResponse {
     let room = match state.get_room(&room_id).await {
         Some(r) => r,
-        None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"type":"error","code":"room_not_found"})),
-            )
-                .into_response();
-        }
+        None => return room_not_found(),
     };
-
-    let token = match extract_bearer_token(&headers) {
-        Some(t) => t,
-        None => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(serde_json::json!({"type":"error","code":"missing_token"})),
-            )
-                .into_response()
-        }
+    let username = match require_auth(&headers, &room, Some(&state.user_registry)).await {
+        Ok(u) => u,
+        Err(resp) => return resp,
     };
+    poll_inner(&room, &username, query).await
+}
 
-    let username = match daemon_validate_token(token, &room, &state).await {
-        Some(u) => u,
-        None => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(serde_json::json!({"type":"error","code":"invalid_token"})),
-            )
-                .into_response()
-        }
+pub(super) async fn daemon_api_query(
+    Path(room_id): Path<String>,
+    State(state): State<DaemonWsState>,
+    headers: HeaderMap,
+    Query(params): Query<QueryParams>,
+) -> impl IntoResponse {
+    let room = match state.get_room(&room_id).await {
+        Some(r) => r,
+        None => return room_not_found(),
     };
-
-    let history = room.load_history().await;
-    let host_name = room.host_name().await;
-
-    let mut found_since = query.since.is_none();
-    let messages: Vec<serde_json::Value> = history
-        .into_iter()
-        .filter(|msg| {
-            if !found_since {
-                if msg.id() == query.since.as_deref().unwrap_or_default() {
-                    found_since = true;
-                }
-                return false;
-            }
-            msg.is_visible_to(&username, host_name.as_deref())
-        })
-        .filter_map(|msg| serde_json::to_value(&msg).ok())
-        .collect();
-
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({ "messages": messages })),
-    )
-        .into_response()
+    let username = match require_auth(&headers, &room, Some(&state.user_registry)).await {
+        Ok(u) => u,
+        Err(resp) => return resp,
+    };
+    query_inner(&room, &username, &room_id, params).await
 }
 
 pub(super) async fn daemon_api_health(State(state): State<DaemonWsState>) -> impl IntoResponse {
@@ -709,82 +617,4 @@ pub(super) async fn daemon_api_create_room(
         )
             .into_response(),
     }
-}
-
-pub(super) async fn daemon_api_query(
-    Path(room_id): Path<String>,
-    State(state): State<DaemonWsState>,
-    headers: HeaderMap,
-    Query(params): Query<QueryParams>,
-) -> impl IntoResponse {
-    let room = match state.get_room(&room_id).await {
-        Some(r) => r,
-        None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"type":"error","code":"room_not_found"})),
-            )
-                .into_response();
-        }
-    };
-
-    let token = match extract_bearer_token(&headers) {
-        Some(t) => t,
-        None => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(serde_json::json!({"type":"error","code":"missing_token"})),
-            )
-                .into_response()
-        }
-    };
-
-    let username = match daemon_validate_token(token, &room, &state).await {
-        Some(u) => u,
-        None => {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(serde_json::json!({"type":"error","code":"invalid_token"})),
-            )
-                .into_response()
-        }
-    };
-
-    let filter = match build_query_filter(&params, &room_id) {
-        Ok(f) => f,
-        Err(msg) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({
-                    "type": "error",
-                    "code": "invalid_regex",
-                    "message": msg
-                })),
-            )
-                .into_response()
-        }
-    };
-
-    // `public=true` alone is not a valid query — require at least one narrowing param.
-    if filter.public_only && !has_narrowing_filter(&filter, false) {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
-                "type": "error",
-                "code": "public_requires_filter",
-                "message": "public=true requires at least one narrowing filter (user, content, regex, mention, since, before, n)"
-            })),
-        )
-            .into_response();
-    }
-
-    let history = room.load_history().await;
-    let host_name = room.host_name().await;
-    let messages = apply_query_filter(history, &filter, &room_id, &username, host_name.as_deref());
-
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({ "messages": messages })),
-    )
-        .into_response()
 }
