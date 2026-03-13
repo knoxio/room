@@ -610,7 +610,7 @@ pub(crate) async fn handle_oneshot_send(
         Err(e) => {
             let err = serde_json::json!({
                 "type": "error",
-                "code": "plugin_error",
+                "code": "route_error",
                 "message": format!("{e:#}")
             });
             write_half.write_all(format!("{err}\n").as_bytes()).await?;

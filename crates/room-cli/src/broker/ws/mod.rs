@@ -451,7 +451,7 @@ async fn ws_oneshot_send(
         Err(e) => {
             let err = serde_json::json!({
                 "type": "error",
-                "code": "plugin_error",
+                "code": "route_error",
                 "message": format!("{e:#}")
             });
             let _ = ws_tx.send(WsMessage::Text(err.to_string().into())).await;

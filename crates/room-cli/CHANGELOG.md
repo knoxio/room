@@ -12,6 +12,9 @@ For changes prior to the workspace restructure (v0.1.2 through v1.0.2), see the
 
 ### Fixed
 
+- Oneshot send paths now return structured JSON error responses (`parse_error`, `route_error`)
+  instead of dropping the connection (EOF) when `parse_client_line` or `route_command` fails.
+  Affects both UDS and WS oneshot transports. (#601)
 - Oneshot commands returning `CommandResult::Handled` (e.g. `/taskboard post`) now send a
   system ack response instead of closing the socket with no reply, which caused EOF parse
   errors and broker crashes. Affects UDS and WS oneshot transports.

@@ -859,7 +859,75 @@ async fn oneshot_malformed_json_returns_error_not_eof() {
     assert_eq!(parsed["type"], "error");
     assert_eq!(parsed["code"], "parse_error");
     assert!(
-        parsed["message"].as_str().unwrap().len() > 0,
+        !parsed["message"].as_str().unwrap().is_empty(),
+        "error message should not be empty"
+    );
+}
+
+/// Regression test for #601: when `route_command` fails due to an infrastructure
+/// error (e.g. chat file unwritable), the oneshot client must receive a
+/// `{"type":"error","code":"route_error",...}` JSON response, not EOF.
+#[tokio::test]
+async fn oneshot_route_error_returns_json_not_eof() {
+    use std::os::unix::fs::PermissionsExt;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixStream;
+
+    let broker = TestBroker::start("t_oneshot_route_err").await;
+
+    // Join to get a valid token.
+    let (_, token) = room_cli::oneshot::join_session(&broker.socket_path, "agent")
+        .await
+        .expect("join_session failed");
+
+    // Send a message to create the chat file, then make it read-only so
+    // broadcast_and_persist fails when /set_status tries to append.
+    room_cli::oneshot::send_message_with_token(
+        &broker.socket_path,
+        &token,
+        r#"{"type":"message","content":"seed"}"#,
+    )
+    .await
+    .expect("seed message failed");
+
+    std::fs::set_permissions(&broker.chat_path, std::fs::Permissions::from_mode(0o444))
+        .expect("failed to chmod chat file");
+
+    // Send /set_status — it calls broadcast_and_persist which will fail.
+    let stream = UnixStream::connect(&broker.socket_path).await.unwrap();
+    let (read_half, mut write_half) = stream.into_split();
+
+    write_half
+        .write_all(format!("TOKEN:{token}\n").as_bytes())
+        .await
+        .unwrap();
+    let cmd = serde_json::json!({
+        "type": "command",
+        "cmd": "set_status",
+        "params": ["testing"]
+    });
+    write_half
+        .write_all(format!("{cmd}\n").as_bytes())
+        .await
+        .unwrap();
+
+    let mut reader = BufReader::new(read_half);
+    let mut line = String::new();
+    let n = timeout(Duration::from_secs(2), reader.read_line(&mut line))
+        .await
+        .expect("timed out waiting for error response")
+        .expect("read_line failed");
+
+    // Restore permissions for cleanup.
+    let _ = std::fs::set_permissions(&broker.chat_path, std::fs::Permissions::from_mode(0o644));
+
+    assert!(n > 0, "expected error JSON response, got EOF");
+    let parsed: serde_json::Value = serde_json::from_str(line.trim())
+        .unwrap_or_else(|_| panic!("response is not valid JSON: {line}"));
+    assert_eq!(parsed["type"], "error");
+    assert_eq!(parsed["code"], "route_error");
+    assert!(
+        !parsed["message"].as_str().unwrap().is_empty(),
         "error message should not be empty"
     );
 }
