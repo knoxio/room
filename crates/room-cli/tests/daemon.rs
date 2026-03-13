@@ -253,6 +253,137 @@ async fn dm_room_id_both_directions_same() {
     );
 }
 
+/// DM room ID is symmetric end-to-end: creating the room with
+/// `dm_room_id("bob","alice")` (reversed order) still lets both alice and bob
+/// join and exchange messages through the daemon.
+#[tokio::test]
+async fn dm_room_symmetric_id_join_and_message() {
+    // Use reversed argument order to verify symmetry at the daemon level.
+    let dm_id = dm_room_id("bob", "alice").unwrap();
+    let config = RoomConfig::dm("bob", "alice");
+    let td = TestDaemon::start_with_configs(vec![(&dm_id, Some(config))]).await;
+
+    // Both participants can join regardless of argument order.
+    let token_a = daemon_join(&td.socket_path, &dm_id, "alice").await;
+    assert!(!token_a.is_empty());
+    let token_b = daemon_join(&td.socket_path, &dm_id, "bob").await;
+    assert!(!token_b.is_empty());
+
+    // Alice sends, bob sends — both succeed and reference the same room.
+    let resp_a = daemon_send(&td.socket_path, &dm_id, &token_a, "hi bob").await;
+    assert_eq!(resp_a["type"], "message");
+    assert_eq!(resp_a["room"], dm_id);
+
+    let resp_b = daemon_send(&td.socket_path, &dm_id, &token_b, "hi alice").await;
+    assert_eq!(resp_b["type"], "message");
+    assert_eq!(resp_b["room"], dm_id);
+}
+
+/// A non-participant with an injected token can poll a DM room but DirectMessage-type
+/// messages are filtered by `is_visible_to`. Regular messages pass through because the
+/// join/send gate is the primary security layer for DM rooms.
+#[tokio::test]
+async fn dm_non_participant_poll_filters_direct_messages() {
+    let dm_id = dm_room_id("alice", "bob").unwrap();
+    let dm_config = RoomConfig::dm("alice", "bob");
+    let (td, port) =
+        TestDaemon::start_with_ws_configs(vec![(dm_id.as_str(), Some(dm_config))]).await;
+
+    let base = format!("http://127.0.0.1:{port}");
+    let client = reqwest::Client::new();
+
+    // Alice joins and sends a regular message + a DirectMessage to bob.
+    let token_a = rest_join(&client, &base, &dm_id, "alice").await;
+    rest_send(&client, &base, &dm_id, &token_a, "public in dm room").await;
+
+    let dm_resp = client
+        .post(format!("{base}/api/{dm_id}/send"))
+        .header("Authorization", format!("Bearer {token_a}"))
+        .json(&serde_json::json!({"content": "secret dm", "to": "bob"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(dm_resp.status(), 200);
+
+    // Inject a token for eve (non-participant) — bypasses join gate.
+    let eve_token = "test-eve-injected-token";
+    td.state
+        .test_inject_token(&dm_id, "eve", eve_token)
+        .await
+        .unwrap();
+
+    // Eve polls — should see the regular message but NOT the DirectMessage.
+    let poll_resp = client
+        .get(format!("{base}/api/{dm_id}/poll"))
+        .header("Authorization", format!("Bearer {eve_token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(poll_resp.status(), 200);
+    let body: serde_json::Value = poll_resp.json().await.unwrap();
+    let messages = body["messages"].as_array().unwrap();
+
+    let has_public = messages.iter().any(|m| m["content"] == "public in dm room");
+    let has_dm = messages.iter().any(|m| m["content"] == "secret dm");
+
+    assert!(
+        has_public,
+        "non-participant should see regular messages (join/send is the gate, not poll)"
+    );
+    assert!(
+        !has_dm,
+        "non-participant must NOT see DirectMessage-type messages: {messages:?}"
+    );
+}
+
+/// Messages sent in a DM room while one participant is offline are persisted
+/// and visible to that participant when they join later and poll.
+#[tokio::test]
+async fn dm_offline_recipient_sees_messages_on_rejoin() {
+    let dm_id = dm_room_id("alice", "bob").unwrap();
+    let dm_config = RoomConfig::dm("alice", "bob");
+    let (_td, port) =
+        TestDaemon::start_with_ws_configs(vec![(dm_id.as_str(), Some(dm_config))]).await;
+
+    let base = format!("http://127.0.0.1:{port}");
+    let client = reqwest::Client::new();
+
+    // Alice joins and sends messages while bob is offline.
+    let token_a = rest_join(&client, &base, &dm_id, "alice").await;
+    rest_send(&client, &base, &dm_id, &token_a, "msg while bob offline 1").await;
+    rest_send(&client, &base, &dm_id, &token_a, "msg while bob offline 2").await;
+
+    // Bob joins later.
+    let token_b = rest_join(&client, &base, &dm_id, "bob").await;
+
+    // Bob polls — should see both messages alice sent while he was offline.
+    let poll_resp = client
+        .get(format!("{base}/api/{dm_id}/poll"))
+        .header("Authorization", format!("Bearer {token_b}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(poll_resp.status(), 200);
+    let body: serde_json::Value = poll_resp.json().await.unwrap();
+    let messages = body["messages"].as_array().unwrap();
+
+    let msg1 = messages
+        .iter()
+        .any(|m| m["content"] == "msg while bob offline 1");
+    let msg2 = messages
+        .iter()
+        .any(|m| m["content"] == "msg while bob offline 2");
+
+    assert!(
+        msg1,
+        "bob should see first message sent while offline: {messages:?}"
+    );
+    assert!(
+        msg2,
+        "bob should see second message sent while offline: {messages:?}"
+    );
+}
+
 // ── Scripted multi-agent test sequences (#180) ──────────────────────────────
 //
 // Deterministic, pre-scripted coordination scenarios that exercise the exact

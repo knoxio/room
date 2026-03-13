@@ -23,6 +23,9 @@ For changes prior to the workspace restructure (v0.1.2 through v1.0.2), see the
   other rooms, dynamically created rooms are fully functional and isolated. (#578)
 - 4 plugin registration edge-case tests: failed register atomicity, builtin schema
   validation, duplicate plugin names, Number param completions. (#577)
+- 3 DM room semantics integration tests: symmetric ID join+message,
+  non-participant poll DirectMessage filtering, offline recipient message
+  visibility on rejoin. (#581)
 
 ### Changed
 
