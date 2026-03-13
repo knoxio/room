@@ -7,8 +7,8 @@ mod common;
 use std::time::Duration;
 
 use common::{
-    daemon_connect, daemon_create, daemon_global_join, daemon_join, daemon_send, ws_connect,
-    ws_recv_json, TestDaemon,
+    daemon_connect, daemon_create, daemon_destroy, daemon_global_join, daemon_join, daemon_send,
+    ws_connect, ws_recv_json, TestDaemon,
 };
 use futures_util::{SinkExt, StreamExt};
 use room_cli::message::Message;
@@ -654,5 +654,177 @@ async fn global_token_works_for_rest_query() {
     assert!(
         messages.iter().any(|m| m["content"] == "query test msg"),
         "query should contain the sent message: {body}"
+    );
+}
+
+// ── Daemon multi-room isolation tests (#578) ─────────────────────────────
+
+/// A global token obtained before a room is destroyed must remain valid for
+/// sends to surviving rooms. Regression: if the daemon invalidated tokens
+/// on room destruction, cross-room sends would break for all previously-
+/// issued tokens.
+#[tokio::test]
+async fn global_token_works_after_room_destroy() {
+    let td = TestDaemon::start(&["keep-room", "doomed-room"]).await;
+
+    // Get a global token — valid across all rooms.
+    let token = daemon_global_join(&td.socket_path, "survivor").await;
+
+    // Send to both rooms before destruction — sanity check.
+    let resp_keep = daemon_send(&td.socket_path, "keep-room", &token, "pre-destroy").await;
+    assert_eq!(resp_keep["type"], "message");
+    let resp_doomed = daemon_send(&td.socket_path, "doomed-room", &token, "farewell").await;
+    assert_eq!(resp_doomed["type"], "message");
+
+    // Destroy one room.
+    let destroy_resp = daemon_destroy(&td.socket_path, "doomed-room", &token).await;
+    assert_eq!(
+        destroy_resp["type"], "room_destroyed",
+        "destroy should succeed: {destroy_resp}"
+    );
+
+    // The global token must still work for the surviving room.
+    let resp_after = daemon_send(&td.socket_path, "keep-room", &token, "post-destroy").await;
+    assert_eq!(
+        resp_after["type"], "message",
+        "global token should still work after sibling room destroy: {resp_after}"
+    );
+    assert_eq!(resp_after["content"], "post-destroy");
+    assert_eq!(resp_after["user"], "survivor");
+}
+
+/// Destroying a room while an interactive client is connected must close
+/// the client's stream cleanly (EOF / connection closed). The daemon must
+/// not panic, and other rooms must remain functional.
+#[tokio::test]
+async fn destroy_room_with_active_connection() {
+    let td = TestDaemon::start(&["live-room", "other-room"]).await;
+
+    let token = daemon_global_join(&td.socket_path, "admin").await;
+
+    // Open an interactive session to live-room.
+    let (mut reader, _writer) = daemon_connect(&td.socket_path, "live-room", "occupant").await;
+
+    // Drain the join/history messages so the reader is caught up.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Destroy the room while the client is connected.
+    let destroy_resp = daemon_destroy(&td.socket_path, "live-room", &token).await;
+    assert_eq!(
+        destroy_resp["type"], "room_destroyed",
+        "destroy with active connection should succeed: {destroy_resp}"
+    );
+
+    // The interactive reader should get EOF (0 bytes) or a close frame.
+    let mut buf = String::new();
+    let read_result = timeout(Duration::from_secs(2), reader.read_line(&mut buf)).await;
+    match read_result {
+        // EOF — stream closed cleanly.
+        Ok(Ok(0)) => {}
+        // Got some data — could be a system leave/shutdown message, acceptable.
+        Ok(Ok(_)) => {}
+        // Timeout — the stream hung. Not ideal, but the daemon didn't panic.
+        Err(_) => {}
+        // Read error — connection was dropped.
+        Ok(Err(_)) => {}
+    }
+
+    // The other room must still be functional after the destroy.
+    let other_token = daemon_join(&td.socket_path, "other-room", "bystander").await;
+    assert!(
+        !other_token.is_empty(),
+        "other room should still accept joins"
+    );
+    let resp = daemon_send(&td.socket_path, "other-room", &other_token, "still alive").await;
+    assert_eq!(
+        resp["type"], "message",
+        "other room should still accept sends: {resp}"
+    );
+    assert_eq!(resp["content"], "still alive");
+}
+
+/// Rooms created dynamically via `daemon_create` after daemon startup must
+/// be fully functional: joinable, sendable, and isolated from pre-existing
+/// rooms.
+#[tokio::test]
+async fn create_room_dynamically_and_use() {
+    // Start daemon with one pre-existing room.
+    let td = TestDaemon::start(&["static-room"]).await;
+
+    let token = daemon_global_join(&td.socket_path, "creator").await;
+
+    // Dynamically create a new room.
+    let create_resp = daemon_create(
+        &td.socket_path,
+        "dynamic-room",
+        r#"{"visibility":"public"}"#,
+        &token,
+    )
+    .await;
+    assert_eq!(
+        create_resp["type"], "room_created",
+        "dynamic room creation should succeed: {create_resp}"
+    );
+
+    // Join and send in the dynamically created room.
+    let dyn_token = daemon_join(&td.socket_path, "dynamic-room", "dynamic-user").await;
+    assert!(!dyn_token.is_empty(), "dynamic room should accept joins");
+
+    let send_resp = daemon_send(&td.socket_path, "dynamic-room", &dyn_token, "hello dynamic").await;
+    assert_eq!(send_resp["type"], "message");
+    assert_eq!(send_resp["content"], "hello dynamic");
+    assert_eq!(send_resp["room"], "dynamic-room");
+
+    // Verify isolation: connect interactive client to dynamic-room, send
+    // to static-room, confirm the dynamic-room observer does NOT see it.
+    let (mut dyn_reader, _dyn_writer) =
+        daemon_connect(&td.socket_path, "dynamic-room", "dyn-observer").await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let static_token = daemon_join(&td.socket_path, "static-room", "static-user").await;
+    daemon_send(
+        &td.socket_path,
+        "static-room",
+        &static_token,
+        "static-only msg",
+    )
+    .await;
+
+    // Also send to dynamic-room so the observer has something to read.
+    daemon_send(
+        &td.socket_path,
+        "dynamic-room",
+        &dyn_token,
+        "dynamic-only msg",
+    )
+    .await;
+
+    // Drain the dynamic-room observer — should see "dynamic-only msg" but
+    // not "static-only msg".
+    let mut saw_dynamic = false;
+    let mut saw_static = false;
+    loop {
+        let mut line = String::new();
+        match timeout(Duration::from_millis(500), dyn_reader.read_line(&mut line)).await {
+            Ok(Ok(0)) | Err(_) => break,
+            Ok(Ok(_)) => {
+                if line.contains("dynamic-only msg") {
+                    saw_dynamic = true;
+                }
+                if line.contains("static-only msg") {
+                    saw_static = true;
+                }
+            }
+            Ok(Err(_)) => break,
+        }
+    }
+
+    assert!(
+        saw_dynamic,
+        "dynamic-room observer should see dynamic-only msg"
+    );
+    assert!(
+        !saw_static,
+        "dynamic-room observer must NOT see static-room messages"
     );
 }

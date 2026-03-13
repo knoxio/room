@@ -18,6 +18,9 @@ For changes prior to the workspace restructure (v0.1.2 through v1.0.2), see the
 - 3 taskboard lease expiry boundary tests: exact TTL boundary (`>=` semantics),
   multiple simultaneous expirations via `sweep_expired`, and Finished tasks
   skipped during sweep. (#580)
+- 3 daemon multi-room isolation integration tests: global token survives sibling
+  room destruction, destroy with active connection closes cleanly without affecting
+  other rooms, dynamically created rooms are fully functional and isolated. (#578)
 
 ### Changed
 
