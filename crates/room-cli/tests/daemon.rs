@@ -1117,3 +1117,153 @@ async fn cross_room_nonexistent_target_returns_error() {
         "should report room not found, got: {content}"
     );
 }
+
+// ── /team command integration tests (#514) ───────────────────────────────
+
+/// Send a command envelope via daemon oneshot. `daemon_send` sends raw text,
+/// but slash commands must be JSON envelopes for `parse_client_line`.
+async fn daemon_cmd(
+    socket_path: &std::path::PathBuf,
+    room_id: &str,
+    token: &str,
+    cmd: &str,
+    params: &[&str],
+) -> serde_json::Value {
+    let envelope = serde_json::json!({"type": "command", "cmd": cmd, "params": params});
+    daemon_send(socket_path, room_id, token, &envelope.to_string()).await
+}
+
+/// `/team join` creates a team, `/team show` lists members, `/team leave`
+/// removes the member and deletes the team when empty.
+#[tokio::test]
+async fn team_join_show_leave_lifecycle() {
+    let td = TestDaemon::start(&["team-room"]).await;
+    let token = daemon_global_join(&td.socket_path, "alice").await;
+
+    // Join a team.
+    let resp = daemon_cmd(
+        &td.socket_path,
+        "team-room",
+        &token,
+        "team",
+        &["join", "backend"],
+    )
+    .await;
+    assert_eq!(resp["type"], "system", "team join should broadcast: {resp}");
+    assert!(
+        resp["content"]
+            .as_str()
+            .unwrap()
+            .contains("alice joined team backend"),
+        "unexpected content: {}",
+        resp["content"]
+    );
+
+    // Add a second member.
+    let token_bob = daemon_global_join(&td.socket_path, "bob").await;
+    let resp = daemon_cmd(
+        &td.socket_path,
+        "team-room",
+        &token_bob,
+        "team",
+        &["join", "backend"],
+    )
+    .await;
+    assert!(resp["content"]
+        .as_str()
+        .unwrap()
+        .contains("bob joined team backend"),);
+
+    // Show the team — should list both members.
+    let resp = daemon_cmd(
+        &td.socket_path,
+        "team-room",
+        &token,
+        "team",
+        &["show", "backend"],
+    )
+    .await;
+    let content = resp["content"].as_str().unwrap();
+    assert!(
+        content.contains("alice"),
+        "show should list alice: {content}"
+    );
+    assert!(content.contains("bob"), "show should list bob: {content}");
+
+    // Leave the team.
+    let resp = daemon_cmd(
+        &td.socket_path,
+        "team-room",
+        &token,
+        "team",
+        &["leave", "backend"],
+    )
+    .await;
+    assert!(resp["content"]
+        .as_str()
+        .unwrap()
+        .contains("alice left team backend"));
+
+    // Bob leaves too — team should be deleted.
+    daemon_cmd(
+        &td.socket_path,
+        "team-room",
+        &token_bob,
+        "team",
+        &["leave", "backend"],
+    )
+    .await;
+
+    // Show should now report not found.
+    let resp = daemon_cmd(
+        &td.socket_path,
+        "team-room",
+        &token,
+        "team",
+        &["show", "backend"],
+    )
+    .await;
+    assert!(
+        resp["content"].as_str().unwrap().contains("team not found"),
+        "empty team should be deleted: {}",
+        resp["content"]
+    );
+}
+
+/// `/team join <team> <user>` allows adding another user to a team,
+/// `/team list` shows all teams, teams persist across rooms.
+#[tokio::test]
+async fn team_cross_room_and_add_other_user() {
+    let td = TestDaemon::start(&["room-a", "room-b"]).await;
+    let token = daemon_global_join(&td.socket_path, "admin").await;
+
+    // Add another user to a team from room-a.
+    let resp = daemon_cmd(
+        &td.socket_path,
+        "room-a",
+        &token,
+        "team",
+        &["join", "devs", "agent-1"],
+    )
+    .await;
+    assert!(resp["content"]
+        .as_str()
+        .unwrap()
+        .contains("agent-1 joined team devs"),);
+
+    // The team should be visible from room-b (daemon-level).
+    let resp = daemon_cmd(&td.socket_path, "room-b", &token, "team", &["show", "devs"]).await;
+    assert!(
+        resp["content"].as_str().unwrap().contains("agent-1"),
+        "team should be visible cross-room: {}",
+        resp["content"]
+    );
+
+    // List teams — should show devs.
+    let resp = daemon_cmd(&td.socket_path, "room-a", &token, "team", &["list"]).await;
+    assert!(
+        resp["content"].as_str().unwrap().contains("devs"),
+        "team list should include devs: {}",
+        resp["content"]
+    );
+}

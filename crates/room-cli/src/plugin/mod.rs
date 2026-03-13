@@ -43,6 +43,7 @@ const RESERVED_COMMANDS: &[&str] = &[
     "set_event_filter",
     "set_status",
     "subscriptions",
+    "team",
 ];
 
 /// Central registry of plugins. The broker uses this to dispatch `/` commands.

@@ -22,12 +22,26 @@ pub struct User {
     pub status: Option<String>,
 }
 
+/// A daemon-level team grouping.
+///
+/// Teams are cross-room — they exist at the daemon level, not per-room.
+/// Create-on-first-join, delete-on-empty lifecycle.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Team {
+    pub name: String,
+    pub members: HashSet<String>,
+    pub created_at: DateTime<Utc>,
+}
+
 /// Persistent storage format — serialized to `users.json`.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct RegistryData {
     users: HashMap<String, User>,
     /// Maps token UUID string → username.
     tokens: HashMap<String, String>,
+    /// Daemon-level teams. Absent in legacy files — `Default` fills with empty map.
+    #[serde(default)]
+    teams: HashMap<String, Team>,
 }
 
 /// Daemon-level user registry with persistent storage.
@@ -207,6 +221,80 @@ impl UserRegistry {
     /// Return the path to the backing JSON file.
     pub fn data_path(&self) -> PathBuf {
         self.data_dir.join(REGISTRY_FILE)
+    }
+
+    // ── Teams ──────────────────────────────────────────────────────
+
+    /// Add a user to a team. Creates the team if it does not exist.
+    ///
+    /// Returns `true` if the user was newly added (not already a member).
+    pub fn join_team(&mut self, team_name: &str, username: &str) -> Result<bool, String> {
+        if team_name.is_empty() {
+            return Err("team name cannot be empty".into());
+        }
+        if username.is_empty() {
+            return Err("username cannot be empty".into());
+        }
+        let team = self
+            .data
+            .teams
+            .entry(team_name.to_owned())
+            .or_insert_with(|| Team {
+                name: team_name.to_owned(),
+                members: HashSet::new(),
+                created_at: Utc::now(),
+            });
+        let added = team.members.insert(username.to_owned());
+        self.save()?;
+        Ok(added)
+    }
+
+    /// Remove a user from a team. Deletes the team if it becomes empty.
+    ///
+    /// Returns `true` if the user was a member and was removed.
+    pub fn leave_team(&mut self, team_name: &str, username: &str) -> Result<bool, String> {
+        let team = match self.data.teams.get_mut(team_name) {
+            Some(t) => t,
+            None => return Err(format!("team not found: {team_name}")),
+        };
+        let removed = team.members.remove(username);
+        if team.members.is_empty() {
+            self.data.teams.remove(team_name);
+        }
+        if removed {
+            self.save()?;
+        }
+        Ok(removed)
+    }
+
+    /// Look up a team by name.
+    pub fn get_team(&self, team_name: &str) -> Option<&Team> {
+        self.data.teams.get(team_name)
+    }
+
+    /// List all teams.
+    pub fn list_teams(&self) -> Vec<&Team> {
+        let mut teams: Vec<&Team> = self.data.teams.values().collect();
+        teams.sort_by_key(|t| &t.name);
+        teams
+    }
+
+    /// Return all team names (sorted). Used for TUI autocomplete.
+    pub fn team_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.data.teams.keys().cloned().collect();
+        names.sort();
+        names
+    }
+
+    /// Expand a mention to team members if it matches a team name.
+    ///
+    /// Returns `None` if the mention is not a team. Returns `Some(members)`
+    /// if it is — the caller can then treat each member as an individual mention.
+    pub fn expand_team_mention(&self, mention: &str) -> Option<Vec<String>> {
+        self.data
+            .teams
+            .get(mention)
+            .map(|t| t.members.iter().cloned().collect())
     }
 
     /// Return `true` if any token is currently associated with `username`.
@@ -576,5 +664,146 @@ mod tests {
         let loaded = UserRegistry::load(dir.path().to_owned()).unwrap();
         assert!(loaded.get_user("alice").is_none());
         assert!(loaded.get_user("bob").is_some());
+    }
+
+    // ── Team CRUD ─────────────────────────────────────────────────
+
+    #[test]
+    fn join_team_creates_and_adds_member() {
+        let (mut reg, _dir) = tmp_registry();
+        assert!(reg.join_team("backend", "alice").unwrap());
+        let team = reg.get_team("backend").unwrap();
+        assert!(team.members.contains("alice"));
+        assert_eq!(team.name, "backend");
+    }
+
+    #[test]
+    fn join_team_idempotent_returns_false() {
+        let (mut reg, _dir) = tmp_registry();
+        assert!(reg.join_team("backend", "alice").unwrap());
+        assert!(!reg.join_team("backend", "alice").unwrap());
+    }
+
+    #[test]
+    fn join_team_multiple_members() {
+        let (mut reg, _dir) = tmp_registry();
+        reg.join_team("backend", "alice").unwrap();
+        reg.join_team("backend", "bob").unwrap();
+        let team = reg.get_team("backend").unwrap();
+        assert_eq!(team.members.len(), 2);
+        assert!(team.members.contains("alice"));
+        assert!(team.members.contains("bob"));
+    }
+
+    #[test]
+    fn join_team_empty_name_rejected() {
+        let (mut reg, _dir) = tmp_registry();
+        let err = reg.join_team("", "alice").unwrap_err();
+        assert!(err.contains("team name cannot be empty"));
+    }
+
+    #[test]
+    fn join_team_empty_username_rejected() {
+        let (mut reg, _dir) = tmp_registry();
+        let err = reg.join_team("backend", "").unwrap_err();
+        assert!(err.contains("username cannot be empty"));
+    }
+
+    #[test]
+    fn leave_team_removes_member() {
+        let (mut reg, _dir) = tmp_registry();
+        reg.join_team("backend", "alice").unwrap();
+        reg.join_team("backend", "bob").unwrap();
+        assert!(reg.leave_team("backend", "alice").unwrap());
+        let team = reg.get_team("backend").unwrap();
+        assert!(!team.members.contains("alice"));
+        assert!(team.members.contains("bob"));
+    }
+
+    #[test]
+    fn leave_team_deletes_on_empty() {
+        let (mut reg, _dir) = tmp_registry();
+        reg.join_team("backend", "alice").unwrap();
+        reg.leave_team("backend", "alice").unwrap();
+        assert!(reg.get_team("backend").is_none());
+    }
+
+    #[test]
+    fn leave_team_nonexistent_returns_error() {
+        let (mut reg, _dir) = tmp_registry();
+        let err = reg.leave_team("nope", "alice").unwrap_err();
+        assert!(err.contains("team not found"));
+    }
+
+    #[test]
+    fn leave_team_non_member_returns_false() {
+        let (mut reg, _dir) = tmp_registry();
+        reg.join_team("backend", "alice").unwrap();
+        assert!(!reg.leave_team("backend", "bob").unwrap());
+    }
+
+    #[test]
+    fn list_teams_sorted_by_name() {
+        let (mut reg, _dir) = tmp_registry();
+        reg.join_team("zeta", "alice").unwrap();
+        reg.join_team("alpha", "bob").unwrap();
+        let teams = reg.list_teams();
+        assert_eq!(teams.len(), 2);
+        assert_eq!(teams[0].name, "alpha");
+        assert_eq!(teams[1].name, "zeta");
+    }
+
+    #[test]
+    fn team_names_returns_sorted_vec() {
+        let (mut reg, _dir) = tmp_registry();
+        reg.join_team("zeta", "alice").unwrap();
+        reg.join_team("alpha", "bob").unwrap();
+        let names = reg.team_names();
+        assert_eq!(names, vec!["alpha", "zeta"]);
+    }
+
+    #[test]
+    fn expand_team_mention_returns_members() {
+        let (mut reg, _dir) = tmp_registry();
+        reg.join_team("backend", "alice").unwrap();
+        reg.join_team("backend", "bob").unwrap();
+        let members = reg.expand_team_mention("backend").unwrap();
+        assert_eq!(members.len(), 2);
+        assert!(members.contains(&"alice".to_owned()));
+        assert!(members.contains(&"bob".to_owned()));
+    }
+
+    #[test]
+    fn expand_team_mention_nonexistent_returns_none() {
+        let (reg, _dir) = tmp_registry();
+        assert!(reg.expand_team_mention("nonexistent").is_none());
+    }
+
+    #[test]
+    fn teams_persist_across_save_and_load() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let mut reg = UserRegistry::new(dir.path().to_owned());
+            reg.join_team("backend", "alice").unwrap();
+            reg.join_team("backend", "bob").unwrap();
+            reg.join_team("frontend", "carol").unwrap();
+        }
+
+        let loaded = UserRegistry::load(dir.path().to_owned()).unwrap();
+        let backend = loaded.get_team("backend").unwrap();
+        assert_eq!(backend.members.len(), 2);
+        assert!(backend.members.contains("alice"));
+        let frontend = loaded.get_team("frontend").unwrap();
+        assert!(frontend.members.contains("carol"));
+    }
+
+    #[test]
+    fn legacy_registry_without_teams_loads_cleanly() {
+        let dir = tempfile::tempdir().unwrap();
+        // Simulate a legacy users.json without the "teams" field.
+        let legacy_json = r#"{"users":{},"tokens":{}}"#;
+        std::fs::write(dir.path().join(REGISTRY_FILE), legacy_json).unwrap();
+        let reg = UserRegistry::load(dir.path().to_owned()).unwrap();
+        assert!(reg.list_teams().is_empty());
     }
 }

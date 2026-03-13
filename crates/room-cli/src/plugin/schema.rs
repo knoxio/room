@@ -185,6 +185,30 @@ pub fn builtin_command_infos() -> Vec<CommandInfo> {
             params: vec![],
         },
         CommandInfo {
+            name: "team".to_owned(),
+            description: "Manage teams — join, leave, list, show".to_owned(),
+            usage: "/team <action> [args...]".to_owned(),
+            params: vec![
+                ParamSchema {
+                    name: "action".to_owned(),
+                    param_type: ParamType::Choice(vec![
+                        "join".to_owned(),
+                        "leave".to_owned(),
+                        "list".to_owned(),
+                        "show".to_owned(),
+                    ]),
+                    required: true,
+                    description: "Subcommand".to_owned(),
+                },
+                ParamSchema {
+                    name: "args".to_owned(),
+                    param_type: ParamType::Text,
+                    required: false,
+                    description: "Team name and optional username".to_owned(),
+                },
+            ],
+        },
+        CommandInfo {
             name: "help".to_owned(),
             description: "List available commands or get help for a specific command".to_owned(),
             usage: "/help [command]".to_owned(),
@@ -242,6 +266,7 @@ mod tests {
             "subscribe_events",
             "set_event_filter",
             "subscriptions",
+            "team",
         ] {
             assert!(
                 names.contains(expected),
