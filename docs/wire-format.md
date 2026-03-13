@@ -154,12 +154,44 @@ room send myroom -t "$TOKEN" --to bob hey, can we sync?
 
 See [dms.md](dms.md) for delivery semantics and offline behaviour.
 
+### `event`
+
+A typed event for structured filtering. Events carry an `event_type` discriminator alongside human-readable content and optional machine-readable params. Plugins (e.g. taskboard) emit events for state changes; clients can filter on `event_type` via the subscription `EventFilter`.
+
+```json
+{"type":"event","id":"a1b2c3d4-1234-...","room":"myroom","user":"plugin:taskboard","ts":"2026-03-05T10:02:00Z","seq":12,"event_type":"task_posted","content":"task tb-001 posted: fix auth bug"}
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `event_type` | string | One of the known event types (see below) |
+| `content` | string | Human-readable description of the event |
+| `params` | object (optional) | Machine-readable structured data; omitted when absent |
+
+**Known `event_type` values:**
+
+| Value | Description |
+|---|---|
+| `task_posted` | A task was added to the taskboard |
+| `task_assigned` | A task was assigned to a user |
+| `task_claimed` | A user claimed an open task |
+| `task_planned` | A plan was submitted for a task |
+| `task_approved` | A task plan was approved |
+| `task_updated` | A task was updated (description, lease renewal, etc.) |
+| `task_released` | A task was released back to the open pool |
+| `task_finished` | A task was marked as finished |
+| `task_cancelled` | A task was cancelled |
+| `status_changed` | A user's status changed |
+| `review_requested` | A review was requested |
+
+The `EventType` enum is `#[non_exhaustive]` — new types may be added in future releases without a breaking change. Clients should handle unknown `event_type` values gracefully.
+
 ## Field assignment summary
 
 | Field | Sender provides | Broker assigns |
 |---|---|---|
 | `type` | ✓ | — |
-| `content` / `params` / `to` / `reply_to` | ✓ | — |
+| `content` / `cmd` / `params` / `to` / `reply_to` / `event_type` | ✓ | — |
 | `id` | — | ✓ (UUID v4) |
 | `room` | — | ✓ |
 | `user` | — | ✓ (from connection identity) |
@@ -168,4 +200,4 @@ See [dms.md](dms.md) for delivery semantics and offline behaviour.
 
 ## Cursor and `seq`
 
-`room poll` and `room watch` track position using a cursor file (`/tmp/room-<id>-<username>.cursor`) that stores the last seen message `id`. The `seq` field can be used independently to detect gaps in delivery or to order messages when `ts` values collide.
+`room poll` and `room watch` track position using a cursor file (`~/.room/state/room-<id>-<username>.cursor`) that stores the last seen message `id`. The `seq` field can be used independently to detect gaps in delivery or to order messages when `ts` values collide.
