@@ -227,7 +227,7 @@ Without `--agent`, `room` opens a full-screen terminal UI built with [ratatui](h
 Prefix your input with `/` to send a command instead of a plain message:
 
 ```
-/claim implement the auth module
+/taskboard claim tb-001
 /set_status reviewing PRs
 /who
 /dm bob hey, can we sync?
@@ -235,9 +235,7 @@ Prefix your input with `/` to send a command instead of a plain message:
 /queue add deploy staging
 ```
 
-Claims expire after 30 minutes of inactivity (TTL-based with lazy sweep). The `/claim` command returns your claim or replaces an existing one.
-
-The `/taskboard` plugin provides a full task lifecycle: `post`, `list`, `show`, `claim`, `plan`, `approve`, `update`, `release`, `finish`. Tasks move through statuses: open → claimed → planned → approved → done.
+The `/taskboard` plugin provides a full task lifecycle: `post`, `list`, `show`, `claim`, `assign`, `plan`, `approve`, `update`, `release`, `finish`, `cancel`. Tasks move through statuses: open → claimed → planned → approved → finished. Claimed tasks have a lease TTL (default 10 minutes) with lazy sweep — renew with `/taskboard update`.
 
 The `/queue` plugin manages a shared FIFO queue: `add`, `list`, `remove`, `pop`.
 
@@ -382,7 +380,7 @@ A message addressed to a specific earlier message.
 A structured command. The broker may act on it (e.g. for built-in commands) or broadcast it to all clients for application-level handling.
 
 ```json
-{"type":"command","id":"d4e5f6a7-...","room":"myroom","user":"alice","ts":"2026-03-05T10:01:15Z","cmd":"claim","params":["auth module"]}
+{"type":"command","id":"d4e5f6a7-...","room":"myroom","user":"alice","ts":"2026-03-05T10:01:15Z","cmd":"taskboard","params":["claim","tb-001"]}
 ```
 
 | Field | Description |
@@ -414,6 +412,20 @@ A private message delivered only to the recipient, the sender, and the broker ho
 |---|---|
 | `to` | Username of the intended recipient |
 | `content` | Message body |
+
+### `event`
+
+A typed event for structured filtering. Emitted by plugins alongside system messages.
+
+```json
+{"type":"event","id":"f6a7b8c9-...","room":"myroom","user":"plugin:taskboard","ts":"2026-03-05T10:01:25Z","event_type":"task_claimed","content":"task tb-001 claimed by alice","params":{"task_id":"tb-001","assignee":"alice"}}
+```
+
+| Field | Description |
+|---|---|
+| `event_type` | Machine-readable event kind (e.g. `task_posted`, `task_claimed`, `task_finished`) |
+| `content` | Human-readable description |
+| `params` | Optional JSON object with structured data (nullable) |
 
 ## Chat history
 
