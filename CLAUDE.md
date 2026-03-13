@@ -494,8 +494,10 @@ scripts/                  — shell scripts (pre-push, tests, legacy ralph wrapp
 
 ```
 crates/room-protocol/src/
-  lib.rs               — Message enum, constructors, serde impls, parse_client_line,
-                          parse_mentions, Message::content/mentions accessors
+  lib.rs               — Message enum (Join, Leave, Message, Reply, Command, System,
+                          DirectMessage, Event), constructors (make_system, make_event),
+                          EventType enum (TaskPosted, TaskClaimed, etc.), serde impls,
+                          parse_client_line, parse_mentions, Message::content/mentions accessors
 
 crates/room-cli/src/
   main.rs              — CLI parsing, subcommand dispatch (join / send / query / poll / pull / watch / who / list / daemon / create / destroy)
@@ -512,7 +514,8 @@ crates/room-cli/src/
     auth.rs            — Token issuance (issue_token), validation (validate_token),
                           token persistence (save/load_token_map, token_file_path)
     admin.rs           — Admin command handlers (/kick, /reauth, /clear-tokens, /exit, /clear)
-    commands.rs        — Unified command routing (route_command, dispatch_plugin, validate_params)
+    commands.rs        — Unified command routing (route_command, dispatch_plugin, validate_params),
+                          builtin /help (#509), /info (#507), /set_status, /who handlers
     daemon.rs          — Multi-room daemon (DaemonState, room lifecycle, UDS dispatch)
     fanout.rs          — broadcast_and_persist, dm_and_persist
     handshake.rs       — ClientHandshake + DaemonPrefix enums, parse_client_handshake, parse_daemon_prefix
@@ -521,15 +524,14 @@ crates/room-cli/src/
       mod.rs           — WebSocket upgrade, WS session lifecycle, create_router/create_daemon_router
       rest.rs          — REST endpoints (join, send, poll, query, health, daemon room create)
   plugin/
-    mod.rs             — Plugin trait, PluginRegistry, CommandContext, HistoryReader, ChatWriter,
-                          ParamSchema, ParamType, builtin_command_infos, all_known_commands
-    help.rs            — Built-in /help plugin
+    mod.rs             — Plugin trait, PluginRegistry, CommandContext, HistoryReader, ChatWriter
+                          (emit_event for typed events), ParamSchema, ParamType,
+                          builtin_command_infos, all_known_commands
     stats.rs           — Built-in /stats plugin
-    status.rs          — Built-in /set_status plugin (PluginResult::SetStatus variant)
     queue.rs           — Built-in /queue plugin (push, pop, peek, list, clear) with NDJSON persistence
     taskboard/
-      mod.rs           — Built-in /taskboard plugin (post, list, claim, plan, approve, update, finish,
-                          release, show) with lease-based TTL and plan/approve gates
+      mod.rs           — Built-in /taskboard plugin (post, list, claim, assign, plan, approve, update,
+                          finish, release, cancel, show) with lease-based TTL and plan/approve gates
       task.rs          — TaskEntry struct, status types, NDJSON task persistence
   oneshot/
     mod.rs             — Re-exports, subcommand dispatch, slash command routing (build_wire_payload)
@@ -552,6 +554,7 @@ crates/room-cli/tests/
   auth.rs              — Token and authentication tests
   broker.rs            — UDS broker lifecycle tests
   daemon.rs            — Daemon multi-room tests
+  events.rs            — Event system integration tests
   oneshot.rs           — One-shot command tests (join, send, poll)
   rest_query.rs        — REST query endpoint tests
   room_lifecycle.rs    — Room create/destroy tests
@@ -694,15 +697,15 @@ All tests must remain green. Add tests for any new behaviour.
 
 ## Baseline test count
 
-**Current baseline: 1206 Rust tests + 107 shell tests**
+**Current baseline: 1371 Rust tests + 107 shell tests**
 
 Rust breakdown:
-- room-protocol: 79 unit tests
-- room-cli: 792 unit + 161 integration (26 auth + 28 broker + 25 daemon + 19 oneshot + 11 rest_query + 29 room_lifecycle + 8 scripted + 15 ws + 7 ws_smoke ignored) = 953 tests
+- room-protocol: 116 unit tests
+- room-cli: 888 unit + 193 integration (33 auth + 37 broker + 25 daemon + 10 events + 20 oneshot + 11 rest_query + 29 room_lifecycle + 8 scripted + 20 ws + 7 ws_smoke ignored) = 1081 tests
 - room-ralph: 164 unit + 10 integration = 174 tests
 
 Note: integration tests are split into focused modules under `tests/` (auth, broker, daemon,
-oneshot, rest_query, room_lifecycle, scripted, ws, ws_smoke). No single `integration.rs` file.
+events, oneshot, rest_query, room_lifecycle, scripted, ws, ws_smoke). No single `integration.rs` file.
 
 Shell breakdown:
 - test-context-monitor.sh: 48 tests
