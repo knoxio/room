@@ -2190,9 +2190,8 @@ mod tests {
         let state = make_state(tmp.path().to_path_buf());
 
         // Create a UserRegistry with multiple users.
-        let reg_tmp = NamedTempFile::new().unwrap();
-        let mut registry =
-            crate::registry::UserRegistry::new(reg_tmp.path().to_path_buf()).unwrap();
+        let reg_dir = tempfile::tempdir().unwrap();
+        let mut registry = crate::registry::UserRegistry::new(reg_dir.path().to_path_buf());
         registry.register_user("alice").unwrap();
         registry.register_user("bob").unwrap();
         registry.register_user("charlie").unwrap();

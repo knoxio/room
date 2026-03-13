@@ -748,7 +748,7 @@ mod tests {
     fn mention_picker_deref_exposes_picker_state() {
         let mut picker = MentionPicker::new();
         let users = vec!["alice".to_owned(), "bob".to_owned()];
-        picker.activate(5, &users, "");
+        picker.activate(5, &users, &[], "");
         assert!(picker.active);
         assert_eq!(picker.filtered.len(), 2);
         assert_eq!(picker.at_byte, 5);
