@@ -14,6 +14,10 @@ For changes prior to the workspace restructure (v0.1.2 through v1.0.2), see the
 
 - Integration tests: REST/WS global daemon token fallback and kicked user WS reconnection rejection. (#490, #492)
 
+### Fixed
+
+- Standalone broker now registers all plugins (queue, taskboard) — previously only help, stats, status were available outside daemon mode. (#513)
+
 ## [3.0.1] - 2026-03-12
 
 ### Added
