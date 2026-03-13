@@ -569,4 +569,130 @@ mod tests {
             "reauth must remove all registry tokens for bob so rejoin is unblocked"
         );
     }
+
+    // ── edge-case coverage (#572) ─────────────────────────────────────────
+
+    #[tokio::test]
+    async fn kick_with_empty_arg_is_noop() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+        *state.host_user.lock().await = Some("alice".to_owned());
+        state
+            .auth
+            .token_map
+            .lock()
+            .await
+            .insert("tok-bob".to_owned(), "bob".to_owned());
+
+        let err = handle_admin_cmd("kick ", "alice", &state).await;
+        assert!(err.is_none(), "kick with empty arg should return None");
+        // Token map must be untouched.
+        assert_eq!(
+            state.auth.token_map.lock().await.len(),
+            1,
+            "token map must be untouched when kick target is empty"
+        );
+    }
+
+    #[tokio::test]
+    async fn reauth_with_empty_arg_is_noop() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+        *state.host_user.lock().await = Some("alice".to_owned());
+        {
+            let mut map = state.auth.token_map.lock().await;
+            map.insert("tok-bob".to_owned(), "bob".to_owned());
+            map.insert("KICKED:bob".to_owned(), "bob".to_owned());
+        }
+
+        let err = handle_admin_cmd("reauth ", "alice", &state).await;
+        assert!(err.is_none(), "reauth with empty arg should return None");
+        assert_eq!(
+            state.auth.token_map.lock().await.len(),
+            2,
+            "token map must be untouched when reauth target is empty"
+        );
+    }
+
+    #[tokio::test]
+    async fn kick_removes_target_from_status_map() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+        *state.host_user.lock().await = Some("alice".to_owned());
+        state
+            .auth
+            .token_map
+            .lock()
+            .await
+            .insert("tok-bob".to_owned(), "bob".to_owned());
+        state.set_status("bob", "working".to_owned()).await;
+        assert_eq!(state.status_count().await, 1);
+
+        handle_admin_cmd("kick bob", "alice", &state).await;
+
+        assert_eq!(
+            state.status_count().await,
+            0,
+            "kick must remove the target from the status map"
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_admin_command_returns_none() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+        *state.host_user.lock().await = Some("alice".to_owned());
+
+        let err = handle_admin_cmd("nonexistent-command", "alice", &state).await;
+        assert!(
+            err.is_none(),
+            "unknown admin command should return None (logged via eprintln, not an error)"
+        );
+    }
+
+    #[tokio::test]
+    async fn clear_tokens_broadcasts_notice_with_issuer() {
+        let dir = tempfile::tempdir().unwrap();
+        let chat_path = dir.path().join("test.chat");
+        std::fs::write(&chat_path, "").unwrap();
+        let state = make_state(chat_path.clone());
+        *state.host_user.lock().await = Some("alice".to_owned());
+        state
+            .auth
+            .token_map
+            .lock()
+            .await
+            .insert("t1".to_owned(), "bob".to_owned());
+
+        handle_admin_cmd("clear-tokens", "alice", &state).await;
+
+        let contents = std::fs::read_to_string(&chat_path).unwrap();
+        assert!(
+            contents.contains("alice cleared all tokens"),
+            "broadcast must mention the issuer who cleared tokens"
+        );
+    }
+
+    #[tokio::test]
+    async fn kick_broadcasts_notice_with_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let chat_path = dir.path().join("test.chat");
+        std::fs::write(&chat_path, "").unwrap();
+        let state = make_state(chat_path.clone());
+        *state.host_user.lock().await = Some("alice".to_owned());
+        state
+            .auth
+            .token_map
+            .lock()
+            .await
+            .insert("tok-bob".to_owned(), "bob".to_owned());
+
+        handle_admin_cmd("kick bob", "alice", &state).await;
+
+        let contents = std::fs::read_to_string(&chat_path).unwrap();
+        assert!(
+            contents.contains("alice kicked bob"),
+            "broadcast must mention both issuer and target"
+        );
+    }
 }

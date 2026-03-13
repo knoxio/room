@@ -43,6 +43,9 @@ For changes prior to the workspace restructure (v0.1.2 through v1.0.2), see the
   `input.rs` prod code reduced to ~497 lines. (#583)
 - Split `main.rs` (897 lines) into `cli.rs` (Cmd enum + Args struct) and `cmd_daemon.rs`
   (run_daemon function). main.rs drops to ~490 lines. No logic changes. (#582)
+- Added 6 edge-case unit tests for `broker/admin.rs`: empty-arg no-ops for kick/reauth,
+  status map cleanup on kick, unknown command handling, broadcast content verification
+  for kick and clear-tokens. Total admin tests: 15 → 21. (#572)
 
 ### Fixed
 
