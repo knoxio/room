@@ -183,7 +183,7 @@ When Hive is present, it owns personality management:
 
 ### Files
 
-- `crates/room-cli/src/plugin/agent.rs` — personality registry, TOML loading, built-in
+- `crates/room-daemon/src/plugin/agent.rs` — personality registry, TOML loading, built-in
   defaults
 - `crates/room-ralph/src/personalities.rs` — built-in personality definitions (already
   exists for profiles, extend with full personality schema)

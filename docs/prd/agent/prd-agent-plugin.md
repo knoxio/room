@@ -268,11 +268,11 @@ consumers (Hive, scripts, other agents). This pattern applies to all plugin resp
 ### Phase 1: Spawn MVP
 
 Files:
-- `crates/room-cli/src/plugin/agent.rs` — NEW: `AgentPlugin` struct, spawn/list/stop
+- `crates/room-daemon/src/plugin/agent.rs` — NEW: `AgentPlugin` struct, spawn/list/stop
   handlers, `SpawnedAgent` tracking, PID persistence, `--allow-all` passthrough
-- `crates/room-cli/src/plugin/mod.rs` — register `AgentPlugin`
-- `crates/room-cli/src/broker/mod.rs` — expose socket path in `CommandContext`
-- `crates/room-cli/src/paths.rs` — add `agents_state_path()`, `agent_log_dir()`
+- `crates/room-daemon/src/plugin/mod.rs` — register `AgentPlugin`
+- `crates/room-daemon/src/broker/mod.rs` — expose socket path in `CommandContext`
+- `crates/room-daemon/src/paths.rs` — add `agents_state_path()`, `agent_log_dir()`
 - `crates/room-ralph/src/room.rs` — check `ROOM_TOKEN` env var, skip join/subscribe
   if set
 
@@ -284,7 +284,7 @@ Tests:
 ### Phase 2: Personalities and /spawn
 
 Files:
-- `crates/room-cli/src/plugin/agent.rs` — personality registry, TOML loading,
+- `crates/room-daemon/src/plugin/agent.rs` — personality registry, TOML loading,
   built-in defaults, `/spawn` handler
 - `crates/room-ralph/src/personalities.rs` — extend with full personality schema
 
@@ -296,7 +296,7 @@ Tests:
 ### Phase 3: Lifecycle hardening
 
 Files:
-- `crates/room-cli/src/plugin/agent.rs` — orphan cleanup on shutdown, `/agent logs`,
+- `crates/room-daemon/src/plugin/agent.rs` — orphan cleanup on shutdown, `/agent logs`,
   exit code tracking, structured response `data` field
 
 Tests:
@@ -308,7 +308,7 @@ Tests:
 
 Files:
 - `crates/room-cli/src/tui/widgets.rs` — personality name completion in palette
-- `crates/room-cli/src/plugin/agent.rs` — dynamic `CommandInfo` with personality names
+- `crates/room-daemon/src/plugin/agent.rs` — dynamic `CommandInfo` with personality names
 
 Tests:
 - Unit: palette filters personality names on keystroke

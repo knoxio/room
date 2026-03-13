@@ -20,9 +20,19 @@ The README covers installation and basic usage. This folder contains deep-dive d
 | [troubleshooting.md](troubleshooting.md) | FAQ and common errors |
 | [contributing.md](contributing.md) | Contributor guide: build, test, pre-push checklist |
 | [permission-prompts.md](permission-prompts.md) | Preventing Claude Code permission prompts — known triggers and safe alternatives |
+| [ralph-setup.md](ralph-setup.md) | room-ralph setup: permissions, personality, memory |
 
-## Hive (product layer)
+## Design documents
+
+| File | Description |
+|------|-------------|
+| [design-253-room-visibility.md](design-253-room-visibility.md) | Design doc for room visibility and ACLs |
+| [design-agent-spawn.md](design-agent-spawn.md) | Design doc for `/agent` and `/spawn` commands (#434) |
+| [design-shared-knowledge.md](design-shared-knowledge.md) | Design doc for shared knowledge system (#480) |
+
+## PRDs
 
 | Folder | Description |
 |--------|-------------|
-| [hive/](hive/) | PRDs for the Hive orchestration layer — workspaces, teams, agent discovery |
+| [prd/hive/](prd/hive/) | PRDs for the Hive orchestration layer — workspaces, teams, agent discovery |
+| [prd/agent/](prd/agent/) | PRDs for agent autonomy — personality system, `/agent` plugin, agent health |

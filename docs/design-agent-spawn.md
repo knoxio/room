@@ -343,13 +343,13 @@ accepts the risk by explicitly passing the flag.
 ### Phase 1: Spawn MVP (plugin + /agent + /agent list + /agent stop)
 
 Files:
-- `crates/room-cli/src/plugin/agent.rs` — NEW: `AgentPlugin` struct, spawn/list/stop
+- `crates/room-daemon/src/plugin/agent.rs` — NEW: `AgentPlugin` struct, spawn/list/stop
   handlers, `SpawnedAgent` tracking map, PID persistence to
   `~/.room/state/agents-<room>.json`, `--allow-all` passthrough
-- `crates/room-cli/src/plugin/mod.rs` — register `AgentPlugin` in default plugin set
-- `crates/room-cli/src/broker/mod.rs` — pass socket path to plugin context (extend
+- `crates/room-daemon/src/plugin/mod.rs` — register `AgentPlugin` in default plugin set
+- `crates/room-daemon/src/broker/mod.rs` — pass socket path to plugin context (extend
   `CommandContext` or `RoomMetadata` with socket info)
-- `crates/room-cli/src/paths.rs` — add `agents_state_path()` helper
+- `crates/room-daemon/src/paths.rs` — add `agents_state_path()` helper
 
 Tests:
 - Unit tests for param validation, username collision checks, PID file round-trip
@@ -359,7 +359,7 @@ Tests:
 ### Phase 2: Personalities (/spawn + registry)
 
 Files:
-- `crates/room-cli/src/plugin/agent.rs` — add personality registry, TOML loading,
+- `crates/room-daemon/src/plugin/agent.rs` — add personality registry, TOML loading,
   built-in defaults, `/spawn` command handler
 - `~/.room/personalities/*.toml` — user-defined personalities (not in repo)
 
@@ -370,9 +370,9 @@ Tests:
 ### Phase 3: Lifecycle hardening
 
 Files:
-- `crates/room-cli/src/plugin/agent.rs` — orphan cleanup on shutdown, `/agent logs`,
+- `crates/room-daemon/src/plugin/agent.rs` — orphan cleanup on shutdown, `/agent logs`,
   exit code tracking
-- `crates/room-cli/src/paths.rs` — add `agent_log_dir()` path helper
+- `crates/room-daemon/src/paths.rs` — add `agent_log_dir()` path helper
 
 Tests:
 - Integration test: broker shutdown reaps spawned agents
@@ -382,7 +382,7 @@ Tests:
 
 Files:
 - `crates/room-cli/src/tui/widgets.rs` — personality name completion in palette
-- `crates/room-cli/src/plugin/agent.rs` — dynamic `CommandInfo` with personality names
+- `crates/room-daemon/src/plugin/agent.rs` — dynamic `CommandInfo` with personality names
 
 Tests:
 - Unit test: palette filters personality names on keystroke

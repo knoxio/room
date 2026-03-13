@@ -44,17 +44,20 @@ cargo test broadcast
 crates/room-protocol/src/
   lib.rs                — unit tests for Message serde, parse_client_line, parse_mentions
 
-crates/room-cli/src/
+crates/room-daemon/src/
   history.rs            — unit tests for NDJSON load/append
   broker/auth.rs        — unit tests for token issuance, persistence, join permissions
   broker/commands.rs    — unit tests for route_command, validate_params, built-in commands
   broker/fanout.rs      — unit tests for broadcast_and_persist, dm_and_persist
-  plugin/mod.rs         — unit tests for PluginRegistry, builtin_command_infos
-  plugin/help.rs        — unit tests for /help output
+  plugin/mod.rs         — unit tests for PluginRegistry, builtin_command_infos, /help output
   plugin/stats.rs       — unit tests for /stats output
   plugin/queue.rs       — unit tests for /queue NDJSON persistence and subcommands
-  plugin/taskboard/mod.rs — unit tests for /taskboard subcommands, approve permissions, lifecycle
-  plugin/taskboard/task.rs — unit tests for Task model, LiveTask lease, NDJSON round-trip
+
+crates/room-plugin-taskboard/src/
+  lib.rs                — unit tests for /taskboard subcommands, approve permissions, lifecycle
+  task.rs               — unit tests for Task model, LiveTask lease, NDJSON round-trip
+
+crates/room-cli/src/
   tui/input.rs          — unit tests for handle_key, cursor, key bindings
   tui/render.rs         — unit tests for wrap_words, format_message
   tui/widgets.rs        — unit tests for CommandPalette, MentionPicker
@@ -193,11 +196,13 @@ async fn my_feature_works() {
 
 ## Test baseline
 
-**Current: 1373 Rust tests + 107 shell tests** (as of v3.1.0)
+**Current: 1517 Rust tests + 107 shell tests** (as of v3.1.0)
 
 | Crate | Unit | Integration | Total |
 |-------|------|-------------|-------|
 | room-protocol | 116 | — | 116 |
+| room-daemon | — | — | (counted via room-cli) |
+| room-plugin-taskboard | — | — | (counted via room-cli) |
 | room-cli | 888 | 195 | 1083 |
 | room-ralph | 164 | 10 | 174 |
 

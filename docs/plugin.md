@@ -10,7 +10,7 @@ protocol).
 ## Broker plugin system
 
 The broker has a compiled-in plugin system defined in
-`crates/room-cli/src/plugin/mod.rs`. Plugins can register slash commands,
+`crates/room-daemon/src/plugin/mod.rs`. Plugins can register slash commands,
 react to user join/leave events, read chat history, and write messages back
 to the room.
 
