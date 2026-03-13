@@ -1474,3 +1474,78 @@ async fn queue_remove_oneshot_returns_response() {
         "response should show the original index: {content}"
     );
 }
+
+// ── taskboard oneshot tests ──────────────────────────────────────────────
+
+fn taskboard_cmd_wire(action: &str, args: &[&str]) -> String {
+    let mut params: Vec<serde_json::Value> = vec![serde_json::Value::String(action.to_owned())];
+    for arg in args {
+        params.push(serde_json::Value::String((*arg).to_owned()));
+    }
+    serde_json::json!({"type": "command", "cmd": "taskboard", "params": params}).to_string()
+}
+
+/// Oneshot `/taskboard list` returns a system message (even if empty).
+#[tokio::test]
+async fn taskboard_list_oneshot_returns_response() {
+    let td = common::TestDaemon::start(&["tb-os-list"]).await;
+    let token = common::daemon_join(&td.socket_path, "tb-os-list", "agent").await;
+
+    let wire = taskboard_cmd_wire("list", &[]);
+    let resp = common::daemon_send(&td.socket_path, "tb-os-list", &token, &wire).await;
+
+    assert_eq!(
+        resp["type"], "system",
+        "expected system message, got: {resp}"
+    );
+}
+
+/// Oneshot `/taskboard post` returns a broadcast with the posted task.
+#[tokio::test]
+async fn taskboard_post_oneshot_returns_response() {
+    let td = common::TestDaemon::start(&["tb-os-post"]).await;
+    let token = common::daemon_join(&td.socket_path, "tb-os-post", "agent").await;
+
+    let wire = taskboard_cmd_wire("post", &["fix", "the", "bug"]);
+    let resp = common::daemon_send(&td.socket_path, "tb-os-post", &token, &wire).await;
+
+    assert_eq!(
+        resp["type"], "system",
+        "expected system message, got: {resp}"
+    );
+    let content = resp["content"].as_str().unwrap();
+    assert!(
+        content.contains("fix the bug"),
+        "response should contain the task description: {content}"
+    );
+}
+
+/// Oneshot `/taskboard show` returns a system reply for a posted task.
+#[tokio::test]
+async fn taskboard_show_oneshot_returns_response() {
+    let td = common::TestDaemon::start(&["tb-os-show"]).await;
+    let token = common::daemon_join(&td.socket_path, "tb-os-show", "agent").await;
+
+    // Post a task first
+    let post_wire = taskboard_cmd_wire("post", &["show-me-task"]);
+    let post_resp = common::daemon_send(&td.socket_path, "tb-os-show", &token, &post_wire).await;
+    let post_content = post_resp["content"].as_str().unwrap();
+    // Extract task ID from "task tb-001 posted: show-me-task"
+    let task_id = post_content
+        .split_whitespace()
+        .nth(1)
+        .expect("should have task ID");
+
+    let show_wire = taskboard_cmd_wire("show", &[task_id]);
+    let resp = common::daemon_send(&td.socket_path, "tb-os-show", &token, &show_wire).await;
+
+    assert_eq!(
+        resp["type"], "system",
+        "expected system message, got: {resp}"
+    );
+    let content = resp["content"].as_str().unwrap();
+    assert!(
+        content.contains("show-me-task"),
+        "show should include the task description: {content}"
+    );
+}
