@@ -49,6 +49,9 @@ For changes prior to the workspace restructure (v0.1.2 through v1.0.2), see the
 - Added 6 edge-case unit tests for `broker/admin.rs`: empty-arg no-ops for kick/reauth,
   status map cleanup on kick, unknown command handling, broadcast content verification
   for kick and clear-tokens. Total admin tests: 15 → 21. (#572)
+- Split `tui/mod.rs` (1353 lines) into 4 modules: `tui/dm.rs` (DM room handling),
+  `tui/frame.rs` (terminal draw logic), `tui/event_loop.rs` (main run loop + stderr
+  redirect). `mod.rs` prod code reduced to ~119 lines. (#584)
 
 ### Fixed
 
