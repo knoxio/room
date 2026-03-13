@@ -26,6 +26,8 @@ For changes prior to the workspace restructure (v0.1.2 through v1.0.2), see the
   `ChatWriter`/`HistoryReader` implementations moved to `plugin/bridge.rs`.
   `plugin/mod.rs` has zero broker imports. External crates can now implement
   `Plugin` by depending only on `room-protocol`. (#558)
+- Extracted `builtin_command_infos()` and `all_known_commands()` to `plugin/schema.rs`.
+  `plugin/mod.rs` now contains only `PluginRegistry` and re-exports. (#587)
 
 ### Fixed
 
