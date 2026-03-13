@@ -1474,3 +1474,97 @@ async fn queue_remove_oneshot_returns_response() {
         "response should show the original index: {content}"
     );
 }
+
+// ── Taskboard oneshot tests ─────────────────────────────────────────────────
+//
+// Verify that `/taskboard` subcommands via oneshot (room send) return a
+// response instead of EOF.
+
+/// Build a taskboard command JSON envelope for oneshot sends.
+fn taskboard_cmd_wire(action: &str, args: &[&str]) -> String {
+    let mut params: Vec<serde_json::Value> = vec![serde_json::Value::String(action.to_owned())];
+    for arg in args {
+        params.push(serde_json::Value::String((*arg).to_owned()));
+    }
+    serde_json::json!({"type": "command", "cmd": "taskboard", "params": params}).to_string()
+}
+
+/// Oneshot `/taskboard post` returns a system message echo to the sender.
+#[tokio::test]
+async fn taskboard_post_oneshot_returns_response() {
+    let td = common::TestDaemon::start(&["tb-os-post"]).await;
+    let token = common::daemon_join(&td.socket_path, "tb-os-post", "bot").await;
+
+    let wire = taskboard_cmd_wire("post", &["fix", "the", "flaky", "test"]);
+    let resp = common::daemon_send(&td.socket_path, "tb-os-post", &token, &wire).await;
+
+    assert_eq!(
+        resp["type"], "system",
+        "expected system message, got: {resp}"
+    );
+    let content = resp["content"].as_str().unwrap();
+    assert!(
+        content.contains("tb-001"),
+        "response should contain task ID: {content}"
+    );
+    assert!(
+        content.contains("fix the flaky test"),
+        "response should echo the task description: {content}"
+    );
+}
+
+/// Oneshot `/taskboard list` returns a reply to the sender.
+#[tokio::test]
+async fn taskboard_list_oneshot_returns_response() {
+    let td = common::TestDaemon::start(&["tb-os-list"]).await;
+    let token = common::daemon_join(&td.socket_path, "tb-os-list", "bot").await;
+
+    // Post a task first.
+    let post_wire = taskboard_cmd_wire("post", &["list-test-task"]);
+    common::daemon_send(&td.socket_path, "tb-os-list", &token, &post_wire).await;
+
+    let list_wire = taskboard_cmd_wire("list", &[]);
+    let resp = common::daemon_send(&td.socket_path, "tb-os-list", &token, &list_wire).await;
+
+    assert_eq!(
+        resp["type"], "system",
+        "expected system message, got: {resp}"
+    );
+    let content = resp["content"].as_str().unwrap();
+    assert!(
+        content.contains("tb-001"),
+        "list should show the posted task: {content}"
+    );
+}
+
+/// Oneshot `/taskboard claim` + `/taskboard finish` lifecycle.
+#[tokio::test]
+async fn taskboard_claim_finish_oneshot_returns_response() {
+    let td = common::TestDaemon::start(&["tb-os-fin"]).await;
+    let token = common::daemon_join(&td.socket_path, "tb-os-fin", "bot").await;
+
+    // Post → claim → finish.
+    let post_wire = taskboard_cmd_wire("post", &["finish-test"]);
+    common::daemon_send(&td.socket_path, "tb-os-fin", &token, &post_wire).await;
+
+    let claim_wire = taskboard_cmd_wire("claim", &["tb-001"]);
+    let resp = common::daemon_send(&td.socket_path, "tb-os-fin", &token, &claim_wire).await;
+    assert_eq!(resp["type"], "system", "claim should return system: {resp}");
+    let content = resp["content"].as_str().unwrap();
+    assert!(
+        content.contains("claimed by bot"),
+        "claim response: {content}"
+    );
+
+    let finish_wire = taskboard_cmd_wire("finish", &["tb-001"]);
+    let resp = common::daemon_send(&td.socket_path, "tb-os-fin", &token, &finish_wire).await;
+    assert_eq!(
+        resp["type"], "system",
+        "finish should return system: {resp}"
+    );
+    let content = resp["content"].as_str().unwrap();
+    assert!(
+        content.contains("finished by bot"),
+        "finish response: {content}"
+    );
+}

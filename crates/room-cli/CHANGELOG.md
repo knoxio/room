@@ -20,6 +20,7 @@ For changes prior to the workspace restructure (v0.1.2 through v1.0.2), see the
 - Integration tests: REST/WS global daemon token fallback and kicked user WS reconnection rejection. (#490, #492)
 - Integration tests: queue plugin oneshot response — add, pop (FIFO), and remove return system echo to oneshot senders. (#494)
 - `/taskboard assign <task-id> <username>` subcommand — poster or host can assign an open task to a specific user. (#502)
+- Integration tests: taskboard oneshot response — post, list, and claim+finish lifecycle return system echo to oneshot senders. (#534)
 - `/info [username]` command — shows room metadata (no args) or user info (status,
   subscription tier, host flag, online status). `/room-info` is now an alias. (#507)
 
