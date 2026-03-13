@@ -87,12 +87,18 @@ impl RoomService for RoomState {
     }
 
     async fn validate_token(&self, token: &str) -> Option<String> {
-        validate_token(token, &self.token_map).await
+        validate_token(token, &self.auth.token_map).await
     }
 
     async fn issue_token(&self, username: &str) -> Result<String, String> {
-        let token = issue_token(username, &self.token_map, Some(&self.token_map_path)).await?;
-        self.subscription_map
+        let token = issue_token(
+            username,
+            &self.auth.token_map,
+            Some(&self.auth.token_map_path),
+        )
+        .await?;
+        self.filters
+            .subscription_map
             .lock()
             .await
             .insert(username.to_owned(), SubscriptionTier::Full);
@@ -229,7 +235,13 @@ mod tests {
         let tmp = NamedTempFile::new().unwrap();
         let state = make_state(tmp.path().to_path_buf());
         state.issue_token("alice").await.unwrap();
-        let tier = state.subscription_map.lock().await.get("alice").copied();
+        let tier = state
+            .filters
+            .subscription_map
+            .lock()
+            .await
+            .get("alice")
+            .copied();
         assert_eq!(
             tier,
             Some(SubscriptionTier::Full),

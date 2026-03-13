@@ -145,18 +145,22 @@ impl Broker {
             clients: Arc::new(Mutex::new(HashMap::new())),
             status_map: Arc::new(Mutex::new(HashMap::new())),
             host_user: Arc::new(Mutex::new(None)),
-            token_map: Arc::new(Mutex::new(persisted_tokens)),
-            subscription_map: Arc::new(Mutex::new(persisted_subs)),
+            auth: state::AuthState {
+                token_map: Arc::new(Mutex::new(persisted_tokens)),
+                token_map_path: Arc::new(self.token_map_path.clone()),
+                registry: std::sync::OnceLock::new(),
+            },
+            filters: state::FilterState {
+                subscription_map: Arc::new(Mutex::new(persisted_subs)),
+                subscription_map_path: Arc::new(self.subscription_map_path.clone()),
+                event_filter_state: std::sync::OnceLock::new(),
+            },
             chat_path: Arc::new(self.chat_path.clone()),
-            token_map_path: Arc::new(self.token_map_path.clone()),
-            subscription_map_path: Arc::new(self.subscription_map_path.clone()),
             room_id: Arc::new(self.room_id.clone()),
             shutdown: Arc::new(shutdown_tx),
             seq_counter: Arc::new(AtomicU64::new(0)),
             plugin_registry: Arc::new(registry),
             config: None,
-            registry: std::sync::OnceLock::new(),
-            event_filter_state: std::sync::OnceLock::new(),
         });
         // Attach event filter map (parallel to subscription map).
         {
@@ -228,7 +232,7 @@ async fn handle_client(
     own_tx: broadcast::Sender<String>,
     state: &Arc<RoomState>,
 ) -> anyhow::Result<()> {
-    let token_map = state.token_map.clone();
+    let token_map = state.auth.token_map.clone();
 
     let (read_half, mut write_half) = stream.into_split();
     let mut reader = BufReader::new(read_half);
@@ -264,9 +268,9 @@ async fn handle_client(
                 u,
                 write_half,
                 &token_map,
-                &state.subscription_map,
+                &state.filters.subscription_map,
                 state.config.as_ref(),
-                Some(&state.token_map_path),
+                Some(&state.auth.token_map_path),
             )
             .await;
             // Persist auto-subscription from join so it survives broker restart.
@@ -695,11 +699,11 @@ async fn subscribe_mentioned(msg: &Message, state: &RoomState) -> Vec<String> {
 
     // Collect users to auto-subscribe (brief lock hold).
     let newly_subscribed = {
-        let token_map = state.token_map.lock().await;
+        let token_map = state.auth.token_map.lock().await;
         let registered: std::collections::HashSet<&str> =
             token_map.values().map(String::as_str).collect();
 
-        let mut sub_map = state.subscription_map.lock().await;
+        let mut sub_map = state.filters.subscription_map.lock().await;
         let mut newly = Vec::new();
 
         for username in &mentioned {
@@ -756,18 +760,22 @@ mod tests {
             clients: Arc::new(Mutex::new(HashMap::new())),
             status_map: Arc::new(Mutex::new(HashMap::new())),
             host_user: Arc::new(Mutex::new(None)),
-            token_map: Arc::new(Mutex::new(HashMap::new())),
-            subscription_map: Arc::new(Mutex::new(HashMap::new())),
+            auth: state::AuthState {
+                token_map: Arc::new(Mutex::new(HashMap::new())),
+                token_map_path: Arc::new(chat_path.with_extension("tokens")),
+                registry: std::sync::OnceLock::new(),
+            },
+            filters: state::FilterState {
+                subscription_map: Arc::new(Mutex::new(HashMap::new())),
+                subscription_map_path: Arc::new(chat_path.with_extension("subscriptions")),
+                event_filter_state: std::sync::OnceLock::new(),
+            },
             chat_path: Arc::new(chat_path.clone()),
-            token_map_path: Arc::new(chat_path.with_extension("tokens")),
-            subscription_map_path: Arc::new(chat_path.with_extension("subscriptions")),
             room_id: Arc::new("test-room".to_owned()),
             shutdown: Arc::new(shutdown_tx),
             seq_counter: Arc::new(AtomicU64::new(0)),
             plugin_registry: Arc::new(PluginRegistry::new()),
             config: None,
-            registry: std::sync::OnceLock::new(),
-            event_filter_state: std::sync::OnceLock::new(),
         })
     }
 
@@ -778,7 +786,7 @@ mod tests {
         // Message mentions @alice but alice has no token — should not auto-subscribe.
         let msg = make_message("test-room", "bob", "hey @alice check this");
         subscribe_mentioned(&msg, &state).await;
-        assert!(state.subscription_map.lock().await.is_empty());
+        assert!(state.filters.subscription_map.lock().await.is_empty());
     }
 
     #[tokio::test]
@@ -787,6 +795,7 @@ mod tests {
         let state = make_test_state(tmp.path().to_path_buf());
         // Register alice in token map.
         state
+            .auth
             .token_map
             .lock()
             .await
@@ -794,7 +803,13 @@ mod tests {
         let msg = make_message("test-room", "bob", "hey @alice check this");
         subscribe_mentioned(&msg, &state).await;
         assert_eq!(
-            *state.subscription_map.lock().await.get("alice").unwrap(),
+            *state
+                .filters
+                .subscription_map
+                .lock()
+                .await
+                .get("alice")
+                .unwrap(),
             SubscriptionTier::MentionsOnly
         );
     }
@@ -804,11 +819,13 @@ mod tests {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let state = make_test_state(tmp.path().to_path_buf());
         state
+            .auth
             .token_map
             .lock()
             .await
             .insert("tok-alice".to_owned(), "alice".to_owned());
         state
+            .filters
             .subscription_map
             .lock()
             .await
@@ -817,7 +834,13 @@ mod tests {
         subscribe_mentioned(&msg, &state).await;
         // Should remain Full, not downgraded to MentionsOnly.
         assert_eq!(
-            *state.subscription_map.lock().await.get("alice").unwrap(),
+            *state
+                .filters
+                .subscription_map
+                .lock()
+                .await
+                .get("alice")
+                .unwrap(),
             SubscriptionTier::Full
         );
     }
@@ -827,11 +850,13 @@ mod tests {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let state = make_test_state(tmp.path().to_path_buf());
         state
+            .auth
             .token_map
             .lock()
             .await
             .insert("tok-alice".to_owned(), "alice".to_owned());
         state
+            .filters
             .subscription_map
             .lock()
             .await
@@ -839,7 +864,13 @@ mod tests {
         let msg = make_message("test-room", "bob", "@alice ping");
         subscribe_mentioned(&msg, &state).await;
         assert_eq!(
-            *state.subscription_map.lock().await.get("alice").unwrap(),
+            *state
+                .filters
+                .subscription_map
+                .lock()
+                .await
+                .get("alice")
+                .unwrap(),
             SubscriptionTier::MentionsOnly
         );
     }
@@ -849,11 +880,13 @@ mod tests {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let state = make_test_state(tmp.path().to_path_buf());
         state
+            .auth
             .token_map
             .lock()
             .await
             .insert("tok-alice".to_owned(), "alice".to_owned());
         state
+            .filters
             .subscription_map
             .lock()
             .await
@@ -861,7 +894,13 @@ mod tests {
         let msg = make_message("test-room", "bob", "@alice come back");
         subscribe_mentioned(&msg, &state).await;
         assert_eq!(
-            *state.subscription_map.lock().await.get("alice").unwrap(),
+            *state
+                .filters
+                .subscription_map
+                .lock()
+                .await
+                .get("alice")
+                .unwrap(),
             SubscriptionTier::MentionsOnly
         );
     }
@@ -871,13 +910,13 @@ mod tests {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let state = make_test_state(tmp.path().to_path_buf());
         {
-            let mut tokens = state.token_map.lock().await;
+            let mut tokens = state.auth.token_map.lock().await;
             tokens.insert("tok-alice".to_owned(), "alice".to_owned());
             tokens.insert("tok-carol".to_owned(), "carol".to_owned());
         }
         let msg = make_message("test-room", "bob", "@alice @carol @unknown review this");
         subscribe_mentioned(&msg, &state).await;
-        let sub_map = state.subscription_map.lock().await;
+        let sub_map = state.filters.subscription_map.lock().await;
         assert_eq!(
             *sub_map.get("alice").unwrap(),
             SubscriptionTier::MentionsOnly
@@ -894,13 +933,14 @@ mod tests {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let state = make_test_state(tmp.path().to_path_buf());
         state
+            .auth
             .token_map
             .lock()
             .await
             .insert("tok-alice".to_owned(), "alice".to_owned());
         let msg = make_message("test-room", "bob", "hello everyone");
         subscribe_mentioned(&msg, &state).await;
-        assert!(state.subscription_map.lock().await.is_empty());
+        assert!(state.filters.subscription_map.lock().await.is_empty());
     }
 
     #[tokio::test]
@@ -908,6 +948,7 @@ mod tests {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let state = make_test_state(tmp.path().to_path_buf());
         state
+            .auth
             .token_map
             .lock()
             .await
@@ -927,6 +968,7 @@ mod tests {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let state = make_test_state(tmp.path().to_path_buf());
         state
+            .auth
             .token_map
             .lock()
             .await
@@ -934,7 +976,7 @@ mod tests {
         let msg = make_message("test-room", "bob", "hey @alice");
         subscribe_mentioned(&msg, &state).await;
         // Verify subscriptions were persisted to the .subscriptions file.
-        let loaded = persistence::load_subscription_map(&state.subscription_map_path);
+        let loaded = persistence::load_subscription_map(&state.filters.subscription_map_path);
         assert_eq!(loaded.get("alice"), Some(&SubscriptionTier::MentionsOnly));
     }
 
@@ -946,6 +988,7 @@ mod tests {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let state = make_test_state(tmp.path().to_path_buf());
         state
+            .auth
             .token_map
             .lock()
             .await
@@ -957,7 +1000,7 @@ mod tests {
         assert_eq!(newly, vec!["alice"]);
 
         // Verify subscription is persisted BEFORE any message is in the chat file.
-        let loaded = persistence::load_subscription_map(&state.subscription_map_path);
+        let loaded = persistence::load_subscription_map(&state.filters.subscription_map_path);
         assert_eq!(loaded.get("alice"), Some(&SubscriptionTier::MentionsOnly));
         // Chat file should still be empty (broadcast hasn't happened yet).
         let chat_content = std::fs::read_to_string(tmp.path()).unwrap();

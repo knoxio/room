@@ -38,7 +38,7 @@ pub(crate) async fn handle_admin_cmd(
 
     let room_id = state.room_id.as_str();
     let clients = &state.clients;
-    let token_map = &state.token_map;
+    let token_map = &state.auth.token_map;
     let chat_path = &state.chat_path;
     let shutdown = &state.shutdown;
     let seq_counter = &state.seq_counter;
@@ -58,13 +58,13 @@ pub(crate) async fn handle_admin_cmd(
             // kicking multiple users does not overwrite each other's sentinel entries.
             map.retain(|_, u| u != &target);
             map.insert(format!("KICKED:{target}"), target.clone());
-            if let Err(e) = save_token_map(&map, &state.token_map_path) {
+            if let Err(e) = save_token_map(&map, &state.auth.token_map_path) {
                 eprintln!("[admin] kick token persist failed: {e}");
             }
             drop(map);
             // In daemon mode, also revoke from the UserRegistry so the kicked user
             // cannot rejoin via issue_token_via_registry (which checks has_token_for_user).
-            if let Some(reg) = state.registry.get() {
+            if let Some(reg) = state.auth.registry.get() {
                 if let Err(e) = reg.lock().await.revoke_user_tokens(&target) {
                     eprintln!("[admin] registry revoke failed for {target}: {e}");
                 }
@@ -82,13 +82,13 @@ pub(crate) async fn handle_admin_cmd(
             let target = arg.strip_prefix('@').unwrap_or(arg).to_owned();
             let mut map = token_map.lock().await;
             map.retain(|_, u| u != &target);
-            if let Err(e) = save_token_map(&map, &state.token_map_path) {
+            if let Err(e) = save_token_map(&map, &state.auth.token_map_path) {
                 eprintln!("[admin] reauth token persist failed: {e}");
             }
             drop(map);
             // In daemon mode, also revoke from the UserRegistry so the reauthed user
             // can obtain a fresh token via issue_token_via_registry.
-            if let Some(reg) = state.registry.get() {
+            if let Some(reg) = state.auth.registry.get() {
                 if let Err(e) = reg.lock().await.revoke_user_tokens(&target) {
                     eprintln!("[admin] registry revoke failed for {target}: {e}");
                 }
@@ -113,7 +113,7 @@ pub(crate) async fn handle_admin_cmd(
         "clear-tokens" => {
             let mut map = token_map.lock().await;
             map.clear();
-            if let Err(e) = save_token_map(&map, &state.token_map_path) {
+            if let Err(e) = save_token_map(&map, &state.auth.token_map_path) {
                 eprintln!("[admin] clear-tokens persist failed: {e}");
             }
             drop(map);
@@ -189,13 +189,13 @@ mod tests {
         let state = make_state(tmp.path().to_path_buf());
         *state.host_user.lock().await = Some("alice".to_owned());
         {
-            let mut guard = state.token_map.lock().await;
+            let mut guard = state.auth.token_map.lock().await;
             guard.insert("uuid-bob".to_owned(), "bob".to_owned());
             guard.insert("KICKED:bob".to_owned(), "bob".to_owned());
         }
         let err = handle_admin_cmd("reauth bob", "alice", &state).await;
         assert!(err.is_none(), "reauth should succeed");
-        let guard = state.token_map.lock().await;
+        let guard = state.auth.token_map.lock().await;
         assert!(
             !guard.values().any(|u| u == "bob"),
             "all bob entries must be removed after reauth"
@@ -208,14 +208,14 @@ mod tests {
         let state = make_state(tmp.path().to_path_buf());
         *state.host_user.lock().await = Some("alice".to_owned());
         {
-            let mut guard = state.token_map.lock().await;
+            let mut guard = state.auth.token_map.lock().await;
             guard.insert("t1".to_owned(), "alice".to_owned());
             guard.insert("t2".to_owned(), "bob".to_owned());
         }
         let err = handle_admin_cmd("clear-tokens", "alice", &state).await;
         assert!(err.is_none(), "clear-tokens should succeed");
         assert!(
-            state.token_map.lock().await.is_empty(),
+            state.auth.token_map.lock().await.is_empty(),
             "token map must be empty after clear-tokens"
         );
     }
@@ -256,13 +256,14 @@ mod tests {
         let state = make_state(tmp.path().to_path_buf());
         *state.host_user.lock().await = Some("alice".to_owned());
         state
+            .auth
             .token_map
             .lock()
             .await
             .insert("tok-bob".to_owned(), "bob".to_owned());
         let err = handle_admin_cmd("kick bob", "alice", &state).await;
         assert!(err.is_none(), "kick should succeed");
-        let map = state.token_map.lock().await;
+        let map = state.auth.token_map.lock().await;
         assert!(
             !map.contains_key("tok-bob"),
             "bob's token should be removed"
@@ -327,6 +328,7 @@ mod tests {
         let state = make_state_with_registry(tmp.path().to_path_buf(), registry.clone());
         *state.host_user.lock().await = Some("alice".to_owned());
         state
+            .auth
             .token_map
             .lock()
             .await
@@ -357,6 +359,7 @@ mod tests {
         let state = make_state(chat_path);
         *state.host_user.lock().await = Some("alice".to_owned());
         state
+            .auth
             .token_map
             .lock()
             .await
@@ -365,7 +368,7 @@ mod tests {
         handle_admin_cmd("kick bob", "alice", &state).await;
 
         // Load from disk — KICKED sentinel must be persisted
-        let loaded = crate::broker::auth::load_token_map(&state.token_map_path);
+        let loaded = crate::broker::auth::load_token_map(&state.auth.token_map_path);
         assert!(
             loaded.contains_key("KICKED:bob"),
             "KICKED sentinel must be persisted to disk"
@@ -384,14 +387,14 @@ mod tests {
         let state = make_state(chat_path);
         *state.host_user.lock().await = Some("alice".to_owned());
         {
-            let mut map = state.token_map.lock().await;
+            let mut map = state.auth.token_map.lock().await;
             map.insert("tok-bob".to_owned(), "bob".to_owned());
             map.insert("KICKED:bob".to_owned(), "bob".to_owned());
         }
 
         handle_admin_cmd("reauth bob", "alice", &state).await;
 
-        let loaded = crate::broker::auth::load_token_map(&state.token_map_path);
+        let loaded = crate::broker::auth::load_token_map(&state.auth.token_map_path);
         assert!(
             !loaded.values().any(|u| u == "bob"),
             "bob must be fully removed from disk after reauth"
@@ -406,14 +409,14 @@ mod tests {
         let state = make_state(chat_path);
         *state.host_user.lock().await = Some("alice".to_owned());
         {
-            let mut map = state.token_map.lock().await;
+            let mut map = state.auth.token_map.lock().await;
             map.insert("t1".to_owned(), "alice".to_owned());
             map.insert("t2".to_owned(), "bob".to_owned());
         }
 
         handle_admin_cmd("clear-tokens", "alice", &state).await;
 
-        let loaded = crate::broker::auth::load_token_map(&state.token_map_path);
+        let loaded = crate::broker::auth::load_token_map(&state.auth.token_map_path);
         assert!(
             loaded.is_empty(),
             "token map on disk must be empty after clear-tokens"
@@ -428,6 +431,7 @@ mod tests {
         let state = make_state(chat_path.clone());
         *state.host_user.lock().await = Some("alice".to_owned());
         state
+            .auth
             .token_map
             .lock()
             .await
@@ -436,7 +440,7 @@ mod tests {
         handle_admin_cmd("kick bob", "alice", &state).await;
 
         // Simulate broker restart: load token map from disk into fresh state
-        let loaded = crate::broker::auth::load_token_map(&state.token_map_path);
+        let loaded = crate::broker::auth::load_token_map(&state.auth.token_map_path);
         let new_map: super::super::state::TokenMap = Arc::new(Mutex::new(loaded));
 
         // The original token must be invalid
@@ -463,6 +467,7 @@ mod tests {
         let state = make_state(tmp.path().to_path_buf());
         *state.host_user.lock().await = Some("alice".to_owned());
         state
+            .auth
             .token_map
             .lock()
             .await
@@ -470,7 +475,7 @@ mod tests {
         // User types `/kick @bob` — the @ must be stripped.
         let err = handle_admin_cmd("kick @bob", "alice", &state).await;
         assert!(err.is_none(), "kick @bob should succeed");
-        let map = state.token_map.lock().await;
+        let map = state.auth.token_map.lock().await;
         assert!(
             !map.contains_key("tok-bob"),
             "bob's token should be removed even with @ prefix"
@@ -487,14 +492,14 @@ mod tests {
         let state = make_state(tmp.path().to_path_buf());
         *state.host_user.lock().await = Some("alice".to_owned());
         {
-            let mut guard = state.token_map.lock().await;
+            let mut guard = state.auth.token_map.lock().await;
             guard.insert("uuid-bob".to_owned(), "bob".to_owned());
             guard.insert("KICKED:bob".to_owned(), "bob".to_owned());
         }
         // User types `/reauth @bob` — the @ must be stripped.
         let err = handle_admin_cmd("reauth @bob", "alice", &state).await;
         assert!(err.is_none(), "reauth @bob should succeed");
-        let guard = state.token_map.lock().await;
+        let guard = state.auth.token_map.lock().await;
         assert!(
             !guard.values().any(|u| u == "bob"),
             "all bob entries must be removed even with @ prefix"
@@ -507,6 +512,7 @@ mod tests {
         let state = make_state(tmp.path().to_path_buf());
         *state.host_user.lock().await = Some("alice".to_owned());
         state
+            .auth
             .token_map
             .lock()
             .await
@@ -514,7 +520,13 @@ mod tests {
         let err = handle_admin_cmd("kick carol", "alice", &state).await;
         assert!(err.is_none(), "kick carol should succeed");
         assert!(
-            state.token_map.lock().await.get("KICKED:carol").is_some(),
+            state
+                .auth
+                .token_map
+                .lock()
+                .await
+                .get("KICKED:carol")
+                .is_some(),
             "kick without @ must still work"
         );
     }
@@ -537,6 +549,7 @@ mod tests {
         let state = make_state_with_registry(tmp.path().to_path_buf(), registry.clone());
         *state.host_user.lock().await = Some("alice".to_owned());
         state
+            .auth
             .token_map
             .lock()
             .await

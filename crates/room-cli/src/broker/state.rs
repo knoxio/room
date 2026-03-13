@@ -36,47 +36,53 @@ pub(crate) type SubscriptionMap = Arc<Mutex<HashMap<String, SubscriptionTier>>>;
 /// broker/daemon startup. Default for users with no entry is `EventFilter::All`.
 pub(crate) type EventFilterMap = Arc<Mutex<HashMap<String, EventFilter>>>;
 
+/// Token and identity state grouped together.
+///
+/// Contains the per-room token map, its persistence path, and the optional
+/// daemon-level user registry. The registry uses `OnceLock` so it can be
+/// set after construction without exceeding the clippy argument threshold.
+pub(crate) struct AuthState {
+    /// Maps token UUID → username. Populated by one-shot JOIN requests.
+    pub(crate) token_map: TokenMap,
+    /// Path to the persisted token-map file (e.g. `~/.room/state/<room_id>.tokens`).
+    pub(crate) token_map_path: Arc<PathBuf>,
+    /// Daemon-level user registry for cross-room identity. Unset in
+    /// single-room mode.
+    pub(crate) registry: OnceLock<Arc<Mutex<UserRegistry>>>,
+}
+
+/// Subscription and event-filter state grouped together.
+///
+/// Contains the per-room subscription map, its persistence path, and the
+/// optional per-user event filter map. The event filter uses `OnceLock` so
+/// it can be set after construction.
+pub(crate) struct FilterState {
+    /// Maps username → subscription tier for this room.
+    pub(crate) subscription_map: SubscriptionMap,
+    /// Path to the persisted subscription-map file (e.g. `~/.room/state/<room_id>.subscriptions`).
+    pub(crate) subscription_map_path: Arc<PathBuf>,
+    /// Per-user event type filter. Set via [`RoomState::set_event_filter_map`]
+    /// after construction. If unset, all event types pass through.
+    pub(crate) event_filter_state: OnceLock<(EventFilterMap, Arc<PathBuf>)>,
+}
+
 /// Shared broker state passed to every client handler.
 pub(crate) struct RoomState {
     pub(crate) clients: ClientMap,
     pub(crate) status_map: StatusMap,
     pub(crate) host_user: HostUser,
-    pub(crate) token_map: TokenMap,
-    pub(crate) subscription_map: SubscriptionMap,
+    pub(crate) auth: AuthState,
+    pub(crate) filters: FilterState,
     pub(crate) chat_path: Arc<PathBuf>,
-    /// Path to the persisted token-map file (e.g. `~/.room/state/<room_id>.tokens`).
-    pub(crate) token_map_path: Arc<PathBuf>,
-    /// Path to the persisted subscription-map file (e.g. `~/.room/state/<room_id>.subscriptions`).
-    pub(crate) subscription_map_path: Arc<PathBuf>,
     pub(crate) room_id: Arc<String>,
     /// Set to `true` by the `/exit` admin command to shut down the broker.
-    /// Using watch so receivers that check after the fact see `true` immediately
-    /// — unlike `Notify`, this avoids the race where `notify_waiters()` fires
-    /// before a task's `.notified()` future is registered.
     pub(crate) shutdown: Arc<watch::Sender<bool>>,
-    /// Monotonically-increasing sequence counter. Incremented for every message
-    /// broadcast or persisted by the broker, starting at 1.
+    /// Monotonically-increasing sequence counter.
     pub(crate) seq_counter: Arc<AtomicU64>,
     /// Plugin registry for dispatching `/` commands to plugins.
     pub(crate) plugin_registry: Arc<PluginRegistry>,
     /// Room visibility and access control configuration.
-    /// `None` for rooms created without explicit config (backward compat).
     pub(crate) config: Option<RoomConfig>,
-    /// Daemon-level user registry for cross-room identity. Unset in
-    /// single-room mode. When set, admin commands (`/kick`, `/reauth`)
-    /// also revoke tokens from the registry so users can rejoin after reauth.
-    ///
-    /// Uses `OnceLock` so it can be set after [`RoomState::new`] without
-    /// requiring an extra constructor parameter (which would exceed the
-    /// clippy `too-many-arguments` threshold).
-    pub(crate) registry: OnceLock<Arc<Mutex<UserRegistry>>>,
-    /// Per-user event type filter. Uses `OnceLock` for the same reason as
-    /// `registry` — avoids exceeding the 7-argument constructor limit.
-    ///
-    /// Set via [`RoomState::set_event_filter_map`] after construction.
-    /// If unset, all event types pass through (equivalent to `EventFilter::All`
-    /// for every user).
-    pub(crate) event_filter_state: OnceLock<(EventFilterMap, Arc<PathBuf>)>,
 }
 
 impl RoomState {
@@ -118,18 +124,22 @@ impl RoomState {
             clients: Arc::new(Mutex::new(HashMap::new())),
             status_map: Arc::new(Mutex::new(HashMap::new())),
             host_user: Arc::new(Mutex::new(None)),
-            token_map,
-            subscription_map,
+            auth: AuthState {
+                token_map,
+                token_map_path: Arc::new(token_map_path),
+                registry: OnceLock::new(),
+            },
+            filters: FilterState {
+                subscription_map,
+                subscription_map_path: Arc::new(subscription_map_path),
+                event_filter_state: OnceLock::new(),
+            },
             chat_path: Arc::new(chat_path),
-            token_map_path: Arc::new(token_map_path),
-            subscription_map_path: Arc::new(subscription_map_path),
             room_id: Arc::new(room_id),
             shutdown: Arc::new(shutdown_tx),
             seq_counter: Arc::new(AtomicU64::new(0)),
             plugin_registry: Arc::new(plugins),
             config,
-            registry: OnceLock::new(),
-            event_filter_state: OnceLock::new(),
         }))
     }
 
@@ -141,7 +151,7 @@ impl RoomState {
     /// `Arc<RoomState>` is shared with other tasks. Silently no-ops if called
     /// a second time (consistent with `OnceLock` semantics).
     pub(crate) fn set_registry(&self, registry: Arc<Mutex<UserRegistry>>) {
-        let _ = self.registry.set(registry);
+        let _ = self.auth.registry.set(registry);
     }
 
     // ── event_filter_map ─────────────────────────────────────────────────────
@@ -151,7 +161,7 @@ impl RoomState {
     /// Must be called at most once, immediately after construction. Silently
     /// no-ops if called a second time (consistent with `OnceLock` semantics).
     pub(crate) fn set_event_filter_map(&self, map: EventFilterMap, path: PathBuf) {
-        let _ = self.event_filter_state.set((map, Arc::new(path)));
+        let _ = self.filters.event_filter_state.set((map, Arc::new(path)));
     }
 
     /// Set a user's event filter.
@@ -159,14 +169,14 @@ impl RoomState {
     /// No-ops if the event filter map has not been attached via
     /// [`set_event_filter_map`].
     pub(crate) async fn set_event_filter(&self, user: &str, filter: EventFilter) {
-        if let Some((map, _)) = self.event_filter_state.get() {
+        if let Some((map, _)) = self.filters.event_filter_state.get() {
             map.lock().await.insert(user.to_owned(), filter);
         }
     }
 
     /// Return all (username, filter) event filter pairs, sorted by username.
     pub(crate) async fn event_filter_entries(&self) -> Vec<(String, EventFilter)> {
-        match self.event_filter_state.get() {
+        match self.filters.event_filter_state.get() {
             Some((map, _)) => {
                 let mut entries: Vec<(String, EventFilter)> = map
                     .lock()
@@ -183,7 +193,7 @@ impl RoomState {
 
     /// Return a cloned snapshot of the event filter map (for persistence).
     pub(crate) async fn event_filter_snapshot(&self) -> HashMap<String, EventFilter> {
-        match self.event_filter_state.get() {
+        match self.filters.event_filter_state.get() {
             Some((map, _)) => map.lock().await.clone(),
             None => HashMap::new(),
         }
@@ -191,7 +201,8 @@ impl RoomState {
 
     /// Return the persistence path for the event filter map, if attached.
     pub(crate) fn event_filter_path(&self) -> Option<&PathBuf> {
-        self.event_filter_state
+        self.filters
+            .event_filter_state
             .get()
             .map(|(_, p): &(EventFilterMap, Arc<PathBuf>)| p.as_ref())
     }
@@ -230,7 +241,8 @@ impl RoomState {
 
     /// Set a user's subscription tier.
     pub(crate) async fn set_subscription(&self, user: &str, tier: SubscriptionTier) {
-        self.subscription_map
+        self.filters
+            .subscription_map
             .lock()
             .await
             .insert(user.to_owned(), tier);
@@ -239,6 +251,7 @@ impl RoomState {
     /// Return all (username, tier) subscription pairs, sorted by username.
     pub(crate) async fn subscription_entries(&self) -> Vec<(String, SubscriptionTier)> {
         let mut entries: Vec<(String, SubscriptionTier)> = self
+            .filters
             .subscription_map
             .lock()
             .await
@@ -251,12 +264,12 @@ impl RoomState {
 
     /// Return a cloned snapshot of the full subscription map (for persistence).
     pub(crate) async fn subscription_snapshot(&self) -> HashMap<String, SubscriptionTier> {
-        self.subscription_map.lock().await.clone()
+        self.filters.subscription_map.lock().await.clone()
     }
 
     /// Number of subscribed users.
     pub(crate) async fn subscription_count(&self) -> usize {
-        self.subscription_map.lock().await.len()
+        self.filters.subscription_map.lock().await.len()
     }
 }
 
@@ -336,7 +349,7 @@ mod tests {
             None,
         )
         .unwrap();
-        assert!(state.token_map.lock().await.contains_key("tok-1"));
+        assert!(state.auth.token_map.lock().await.contains_key("tok-1"));
     }
 
     // ── status_map accessors ──────────────────────────────────────────────────

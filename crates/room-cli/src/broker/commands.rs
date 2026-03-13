@@ -473,7 +473,13 @@ async fn handle_user_info(target: &str, state: &RoomState) -> String {
     let status_text = status_map.get(target).cloned().unwrap_or_default();
     drop(status_map);
 
-    let sub_tier = state.subscription_map.lock().await.get(target).copied();
+    let sub_tier = state
+        .filters
+        .subscription_map
+        .lock()
+        .await
+        .get(target)
+        .copied();
 
     let is_host = state.host_user.lock().await.as_deref() == Some(target);
 
@@ -781,6 +787,7 @@ mod tests {
         let state = make_state(tmp.path().to_path_buf());
         *state.host_user.lock().await = Some("alice".to_owned());
         state
+            .auth
             .token_map
             .lock()
             .await
@@ -788,7 +795,7 @@ mod tests {
         let msg = make_command("test-room", "alice", "kick", vec!["bob".to_owned()]);
         let result = route_command(msg, "alice", &state).await.unwrap();
         assert!(matches!(result, CommandResult::Handled));
-        let guard = state.token_map.lock().await;
+        let guard = state.auth.token_map.lock().await;
         assert!(
             !guard.contains_key("some-uuid"),
             "original token must be revoked"
@@ -1269,7 +1276,13 @@ mod tests {
         assert!(json.contains("subscribed"));
         assert!(json.contains("full"));
         assert_eq!(
-            *state.subscription_map.lock().await.get("alice").unwrap(),
+            *state
+                .filters
+                .subscription_map
+                .lock()
+                .await
+                .get("alice")
+                .unwrap(),
             SubscriptionTier::Full
         );
     }
@@ -1290,7 +1303,13 @@ mod tests {
         };
         assert!(json.contains("subscribed"));
         assert_eq!(
-            *state.subscription_map.lock().await.get("bob").unwrap(),
+            *state
+                .filters
+                .subscription_map
+                .lock()
+                .await
+                .get("bob")
+                .unwrap(),
             SubscriptionTier::MentionsOnly
         );
     }
@@ -1307,7 +1326,13 @@ mod tests {
         assert!(json.contains("subscribed"));
         assert!(json.contains("full"));
         assert_eq!(
-            *state.subscription_map.lock().await.get("alice").unwrap(),
+            *state
+                .filters
+                .subscription_map
+                .lock()
+                .await
+                .get("alice")
+                .unwrap(),
             SubscriptionTier::Full
         );
     }
@@ -1328,7 +1353,13 @@ mod tests {
         };
         assert!(json.contains("mentions_only"));
         assert_eq!(
-            *state.subscription_map.lock().await.get("bob").unwrap(),
+            *state
+                .filters
+                .subscription_map
+                .lock()
+                .await
+                .get("bob")
+                .unwrap(),
             SubscriptionTier::MentionsOnly
         );
     }
@@ -1347,7 +1378,13 @@ mod tests {
         );
         route_command(msg2, "alice", &state).await.unwrap();
         assert_eq!(
-            *state.subscription_map.lock().await.get("alice").unwrap(),
+            *state
+                .filters
+                .subscription_map
+                .lock()
+                .await
+                .get("alice")
+                .unwrap(),
             SubscriptionTier::MentionsOnly,
             "second subscribe should overwrite the first"
         );
@@ -1368,7 +1405,13 @@ mod tests {
         };
         assert!(json.contains("unsubscribed"));
         assert_eq!(
-            *state.subscription_map.lock().await.get("alice").unwrap(),
+            *state
+                .filters
+                .subscription_map
+                .lock()
+                .await
+                .get("alice")
+                .unwrap(),
             SubscriptionTier::Unsubscribed
         );
     }
@@ -1382,7 +1425,13 @@ mod tests {
         // Should still work — sets to Unsubscribed even without prior entry
         assert!(matches!(result, CommandResult::HandledWithReply(_)));
         assert_eq!(
-            *state.subscription_map.lock().await.get("alice").unwrap(),
+            *state
+                .filters
+                .subscription_map
+                .lock()
+                .await
+                .get("alice")
+                .unwrap(),
             SubscriptionTier::Unsubscribed
         );
     }
@@ -1403,7 +1452,7 @@ mod tests {
         let tmp = NamedTempFile::new().unwrap();
         let state = make_state(tmp.path().to_path_buf());
         {
-            let mut map = state.subscription_map.lock().await;
+            let mut map = state.filters.subscription_map.lock().await;
             map.insert("zara".to_owned(), SubscriptionTier::Full);
             map.insert("alice".to_owned(), SubscriptionTier::MentionsOnly);
         }
@@ -1433,7 +1482,13 @@ mod tests {
         };
         assert!(json.contains("must be one of"));
         // Should not have stored anything
-        assert!(state.subscription_map.lock().await.get("alice").is_none());
+        assert!(state
+            .filters
+            .subscription_map
+            .lock()
+            .await
+            .get("alice")
+            .is_none());
     }
 
     #[tokio::test]
@@ -1473,7 +1528,13 @@ mod tests {
             "DM participant should be allowed to subscribe"
         );
         assert_eq!(
-            state.subscription_map.lock().await.get("alice").copied(),
+            state
+                .filters
+                .subscription_map
+                .lock()
+                .await
+                .get("alice")
+                .copied(),
             Some(SubscriptionTier::Full),
         );
     }
@@ -1493,7 +1554,13 @@ mod tests {
             "should contain permission denied, got: {json}"
         );
         assert!(
-            state.subscription_map.lock().await.get("eve").is_none(),
+            state
+                .filters
+                .subscription_map
+                .lock()
+                .await
+                .get("eve")
+                .is_none(),
             "non-participant must not get a subscription entry"
         );
     }
@@ -1516,6 +1583,7 @@ mod tests {
         };
         assert!(json.contains("permission denied"));
         assert!(state
+            .filters
             .subscription_map
             .lock()
             .await
@@ -1596,7 +1664,7 @@ mod tests {
         let msg = make_command("test-room", "alice", "subscribe", vec![]);
         route_command(msg, "alice", &state).await.unwrap();
 
-        let loaded = load_subscription_map(&state.subscription_map_path);
+        let loaded = load_subscription_map(&state.filters.subscription_map_path);
         assert_eq!(loaded.get("alice"), Some(&SubscriptionTier::Full));
     }
 
@@ -1611,7 +1679,7 @@ mod tests {
         let msg = make_command("test-room", "alice", "unsubscribe", vec![]);
         route_command(msg, "alice", &state).await.unwrap();
 
-        let loaded = load_subscription_map(&state.subscription_map_path);
+        let loaded = load_subscription_map(&state.filters.subscription_map_path);
         assert_eq!(loaded.get("alice"), Some(&SubscriptionTier::Unsubscribed));
     }
 
@@ -1630,7 +1698,7 @@ mod tests {
         );
         route_command(msg, "bob", &state).await.unwrap();
 
-        let loaded = load_subscription_map(&state.subscription_map_path);
+        let loaded = load_subscription_map(&state.filters.subscription_map_path);
         assert_eq!(loaded.len(), 2);
         assert_eq!(loaded.get("alice"), Some(&SubscriptionTier::Full));
         assert_eq!(loaded.get("bob"), Some(&SubscriptionTier::MentionsOnly));
@@ -1645,22 +1713,28 @@ mod tests {
         route_command(msg, "alice", &state).await.unwrap();
 
         // Simulate restart: new state, load from disk.
-        let loaded = load_subscription_map(&state.subscription_map_path);
+        let loaded = load_subscription_map(&state.filters.subscription_map_path);
         assert_eq!(loaded.get("alice"), Some(&SubscriptionTier::Full));
 
         // Verify it can be populated into a new RoomState.
         let state2 = RoomState::new(
             state.room_id.as_ref().clone(),
             state.chat_path.as_ref().clone(),
-            state.token_map_path.as_ref().clone(),
-            state.subscription_map_path.as_ref().clone(),
+            state.auth.token_map_path.as_ref().clone(),
+            state.filters.subscription_map_path.as_ref().clone(),
             Arc::new(Mutex::new(HashMap::new())),
             Arc::new(Mutex::new(loaded)),
             None,
         )
         .unwrap();
         assert_eq!(
-            *state2.subscription_map.lock().await.get("alice").unwrap(),
+            *state2
+                .filters
+                .subscription_map
+                .lock()
+                .await
+                .get("alice")
+                .unwrap(),
             SubscriptionTier::Full
         );
     }
@@ -1680,7 +1754,7 @@ mod tests {
         );
         route_command(msg, "alice", &state).await.unwrap();
 
-        let loaded = load_subscription_map(&state.subscription_map_path);
+        let loaded = load_subscription_map(&state.filters.subscription_map_path);
         assert_eq!(loaded.get("alice"), Some(&SubscriptionTier::MentionsOnly));
     }
 

@@ -39,7 +39,7 @@ pub(crate) fn load_subscription_map(path: &Path) -> HashMap<String, Subscription
 /// than shaving microseconds.
 pub(crate) async fn persist_subscriptions(state: &RoomState) {
     let snapshot = state.subscription_snapshot().await;
-    if let Err(e) = save_subscription_map(&snapshot, &state.subscription_map_path) {
+    if let Err(e) = save_subscription_map(&snapshot, &state.filters.subscription_map_path) {
         eprintln!("[broker] subscription persist failed: {e}");
     }
 }

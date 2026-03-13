@@ -118,7 +118,7 @@ async fn run_ws_session(
         }
         ClientHandshake::Token(token) => {
             // Try room-level token map first, then fall back to global UserRegistry.
-            let resolved = match validate_token(&token, &state.token_map).await {
+            let resolved = match validate_token(&token, &state.auth.token_map).await {
                 Some(u) => Some(u),
                 None => {
                     if let Some(reg) = user_registry {
@@ -142,7 +142,7 @@ async fn run_ws_session(
         }
         ClientHandshake::Session(token) => {
             // Resolve username from token (room-level first, then UserRegistry).
-            let resolved = match validate_token(&token, &state.token_map).await {
+            let resolved = match validate_token(&token, &state.auth.token_map).await {
                 Some(u) => Some(u),
                 None => {
                     if let Some(reg) = user_registry {
@@ -394,13 +394,20 @@ async fn ws_oneshot_join(
         let _ = ws_tx.send(WsMessage::Close(None)).await;
         return Ok(());
     }
-    match issue_token(username, &state.token_map, Some(&state.token_map_path)).await {
+    match issue_token(
+        username,
+        &state.auth.token_map,
+        Some(&state.auth.token_map_path),
+    )
+    .await
+    {
         Ok(token) => {
             let resp = serde_json::json!({"type":"token","token": token, "username": username});
             let _ = ws_tx.send(WsMessage::Text(resp.to_string().into())).await;
             // Set Full subscription so the joining user receives all messages,
             // matching the UDS join behaviour in auth.rs.
             state
+                .filters
                 .subscription_map
                 .lock()
                 .await

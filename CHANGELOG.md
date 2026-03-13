@@ -27,6 +27,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and split `route_command()` into dedicated handler functions. (#557)
 - **refactor:** Consolidated duplicate markdown parsers in `tui/render.rs` into a single
   parameterized `render_inline_markdown` function, eliminating `render_bold_inner`. (#560)
+- **refactor:** Consolidated `OnceLock` fields in `RoomState` into `AuthState` and `FilterState`
+  sub-structs, reducing struct field count from 15 to 11. (#545)
 
 - Restructured into a cargo workspace with four crates: `room-protocol` (wire types),
   `room-cli` (broker + TUI + oneshot), `room-ralph` (agent wrapper), `agentroom`

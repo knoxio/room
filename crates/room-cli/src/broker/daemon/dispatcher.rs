@@ -109,14 +109,14 @@ pub(super) async fn dispatch_connection(
         }
         ClientHandshake::Token(token) => {
             // Try room-level token map first, then fall back to global UserRegistry.
-            let resolved = match crate::broker::auth::validate_token(&token, &state.token_map).await
-            {
-                Some(u) => Some(u),
-                None => {
-                    let reg = user_registry.lock().await;
-                    reg.validate_token(&token).map(|u| u.to_owned())
-                }
-            };
+            let resolved =
+                match crate::broker::auth::validate_token(&token, &state.auth.token_map).await {
+                    Some(u) => Some(u),
+                    None => {
+                        let reg = user_registry.lock().await;
+                        reg.validate_token(&token).map(|u| u.to_owned())
+                    }
+                };
             return match resolved {
                 Some(u) => crate::broker::handle_oneshot_send(u, reader, write_half, &state).await,
                 None => {
@@ -133,8 +133,8 @@ pub(super) async fn dispatch_connection(
                 u,
                 write_half,
                 user_registry,
-                &state.token_map,
-                &state.subscription_map,
+                &state.auth.token_map,
+                &state.filters.subscription_map,
                 state.config.as_ref(),
             )
             .await;
@@ -144,14 +144,14 @@ pub(super) async fn dispatch_connection(
         }
         ClientHandshake::Session(token) => {
             // Resolve username from token (room-level first, then UserRegistry).
-            let resolved = match crate::broker::auth::validate_token(&token, &state.token_map).await
-            {
-                Some(u) => Some(u),
-                None => {
-                    let reg = user_registry.lock().await;
-                    reg.validate_token(&token).map(|u| u.to_owned())
-                }
-            };
+            let resolved =
+                match crate::broker::auth::validate_token(&token, &state.auth.token_map).await {
+                    Some(u) => Some(u),
+                    None => {
+                        let reg = user_registry.lock().await;
+                        reg.validate_token(&token).map(|u| u.to_owned())
+                    }
+                };
             match resolved {
                 Some(u) => u,
                 None => {

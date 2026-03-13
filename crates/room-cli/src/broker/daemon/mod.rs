@@ -207,7 +207,8 @@ impl DaemonState {
         let room = rooms
             .get(room_id)
             .ok_or_else(|| format!("room not found: {room_id}"))?;
-        room.token_map
+        room.auth
+            .token_map
             .lock()
             .await
             .insert(token.to_owned(), username.to_owned());
@@ -702,7 +703,7 @@ mod tests {
             .unwrap();
 
         let state = get_room(&daemon, "dm-alice-bob").await;
-        let subs = state.subscription_map.lock().await;
+        let subs = state.filters.subscription_map.lock().await;
         assert_eq!(subs.len(), 2);
         assert_eq!(
             subs.get("alice"),
@@ -724,7 +725,7 @@ mod tests {
             .unwrap();
 
         let state = get_room(&daemon, "lobby").await;
-        let subs = state.subscription_map.lock().await;
+        let subs = state.filters.subscription_map.lock().await;
         assert!(subs.is_empty());
     }
 
@@ -734,7 +735,7 @@ mod tests {
         daemon.create_room("plain").await.unwrap();
 
         let state = get_room(&daemon, "plain").await;
-        let subs = state.subscription_map.lock().await;
+        let subs = state.filters.subscription_map.lock().await;
         assert!(subs.is_empty());
     }
 
@@ -748,7 +749,7 @@ mod tests {
             .unwrap();
 
         let state = get_room(&daemon, "dm-carol-dave").await;
-        let subs = state.subscription_map.lock().await;
+        let subs = state.filters.subscription_map.lock().await;
         // Verify it's Full, not MentionsOnly
         for (_, tier) in subs.iter() {
             assert_eq!(*tier, room_protocol::SubscriptionTier::Full);
