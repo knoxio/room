@@ -33,18 +33,41 @@ pub struct JoinResult {
 /// Maximum number of suffixed username attempts before giving up.
 const MAX_USERNAME_RETRIES: u32 = 5;
 
+/// The environment variable name for pre-provisioned tokens.
+///
+/// When set, ralph skips `room join` and uses this token directly.
+/// Used by the `/agent` plugin spawner to pass a pre-minted token.
+pub const ROOM_TOKEN_ENV: &str = "ROOM_TOKEN";
+
 /// Register a user globally and return the token UUID and actual username.
 ///
-/// Runs `room join <username>` (room-independent) and parses the token from JSON output.
-/// If the username is already taken, retries with numeric suffixes (e.g. `user-2`,
-/// `user-3`, up to 5 attempts). Falls back to cached token file as a last resort —
-/// tries the global path first, then the legacy per-room path.
+/// If the `ROOM_TOKEN` environment variable is set, uses that token directly
+/// without running `room join` or `room subscribe` (the spawner is expected to
+/// have already provisioned both). Otherwise, runs `room join <username>` and
+/// parses the token from JSON output. If the username is already taken, retries
+/// with numeric suffixes (e.g. `user-2`, `user-3`, up to 5 attempts). Falls
+/// back to cached token file as a last resort — tries the global path first,
+/// then the legacy per-room path.
 /// If `socket` is provided, passes `--socket <path>` to the `room` command.
 pub fn join_room(
     room_id: &str,
     username: &str,
     socket: Option<&str>,
 ) -> Result<JoinResult, String> {
+    // Check for pre-provisioned token from the /agent spawner
+    if let Ok(token) = std::env::var(ROOM_TOKEN_ENV) {
+        if !token.is_empty() {
+            tracing::info!(
+                "using pre-provisioned token from {} (skipping room join)",
+                ROOM_TOKEN_ENV
+            );
+            return Ok(JoinResult {
+                token,
+                username: username.to_owned(),
+            });
+        }
+    }
+
     // Try the original username first
     match try_join(username, socket) {
         Ok(token) => {
@@ -274,6 +297,48 @@ fn read_cached_token(path: &PathBuf) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    /// Mutex to serialize env-var tests (env is process-global state).
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Clear ROOM_TOKEN to avoid cross-test contamination.
+    fn clear_room_token_env() {
+        unsafe { std::env::remove_var(ROOM_TOKEN_ENV) };
+    }
+
+    #[test]
+    fn join_room_uses_room_token_env_when_set() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_room_token_env();
+
+        unsafe { std::env::set_var(ROOM_TOKEN_ENV, "pre-provisioned-uuid-123") };
+        let result = join_room("test-room", "test-agent", None).unwrap();
+        assert_eq!(result.token, "pre-provisioned-uuid-123");
+        assert_eq!(result.username, "test-agent");
+
+        clear_room_token_env();
+    }
+
+    #[test]
+    fn join_room_ignores_empty_room_token_env() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_room_token_env();
+
+        unsafe { std::env::set_var(ROOM_TOKEN_ENV, "") };
+        // With empty ROOM_TOKEN, join_room falls through to `room join` with a
+        // non-existent socket so it fails. We verify it doesn't return the empty token.
+        let result = join_room("test-room", "test-agent", Some("/nonexistent/socket.sock"));
+        // Should error because the socket doesn't exist
+        assert!(result.is_err());
+
+        clear_room_token_env();
+    }
+
+    #[test]
+    fn room_token_env_constant_value() {
+        assert_eq!(ROOM_TOKEN_ENV, "ROOM_TOKEN");
+    }
 
     #[test]
     fn extract_token_from_valid_json() {

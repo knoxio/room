@@ -129,6 +129,7 @@ mod tests {
             "RALPH_PROFILE",
             "RALPH_ALLOW_ALL",
             "ROOM_SOCKET",
+            "ROOM_TOKEN",
         ] {
             unsafe { std::env::remove_var(key) };
         }
