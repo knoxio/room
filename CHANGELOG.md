@@ -14,6 +14,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **tui:** Status/system message text no longer appears as fake users in the member panel.
+  Commas in status text caused the `/who` parser to split status fragments into separate
+  usernames. Fixed by sanitizing commas in broker output and adding parser-side validation. (#656)
 - **tui:** Show partial messages at viewport bottom when scrolling — previously the entire
   message disappeared when its bottom line scrolled off screen. (#644)
 

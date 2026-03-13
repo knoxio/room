@@ -1362,4 +1362,44 @@ mod tests {
         // alice should still be online
         assert!(tab.online_users.contains(&"alice".to_owned()));
     }
+
+    // ── #656 regression: status commas must not leak fake users ────────
+
+    #[tokio::test]
+    async fn process_message_who_with_comma_status_no_fake_users() {
+        let (_, rx) = mpsc::unbounded_channel();
+        let (_, wh) = tokio::net::UnixStream::pair().unwrap().1.into_split();
+        let mut tab = RoomTab {
+            room_id: "test".into(),
+            messages: Vec::new(),
+            online_users: Vec::new(),
+            user_statuses: HashMap::new(),
+            subscription_tiers: HashMap::new(),
+            unread_count: 0,
+            scroll_offset: 0,
+            msg_rx: rx,
+            write_half: wh,
+        };
+        let mut cm = ColorMap::new();
+
+        // Simulate a /who response where alice's status contains a comma.
+        // The broker should sanitize this, but even if it doesn't, the
+        // parser must not treat "#636 filed" as a username.
+        tab.process_message(
+            make_system("online \u{2014} alice: PR #630 merged, #636 filed, bob"),
+            &mut cm,
+            true,
+        );
+        assert_eq!(
+            tab.online_users.len(),
+            2,
+            "only alice and bob are real users"
+        );
+        assert!(tab.online_users.contains(&"alice".to_owned()));
+        assert!(tab.online_users.contains(&"bob".to_owned()));
+        assert!(
+            !tab.online_users.contains(&"#636 filed".to_owned()),
+            "status fragment must not appear as a user"
+        );
+    }
 }

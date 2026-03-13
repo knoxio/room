@@ -94,12 +94,16 @@ pub(super) fn seed_online_users_from_who(
                 Some((u, s)) => (u.trim().to_owned(), s.trim().to_owned()),
                 None => (entry.trim().to_owned(), String::new()),
             };
-            if !username.is_empty() {
-                if !online_users.contains(&username) {
-                    online_users.push(username.clone());
-                }
-                user_statuses.insert(username, status);
+            // Usernames never contain spaces. If a bare entry (no ": ")
+            // contains whitespace, it is a status-text fragment leaked by
+            // a comma in the status string — skip it (#656).
+            if username.is_empty() || username.contains(' ') {
+                continue;
             }
+            if !online_users.contains(&username) {
+                online_users.push(username.clone());
+            }
+            user_statuses.insert(username, status);
         }
     }
 }
@@ -199,6 +203,33 @@ mod tests {
     #[test]
     fn seed_who_does_not_duplicate_existing_users() {
         let mut users = vec!["alice".to_owned()];
+        let mut statuses = HashMap::new();
+        seed_online_users_from_who("online \u{2014} alice, bob", &mut users, &mut statuses);
+        assert_eq!(users, ["alice", "bob"]);
+    }
+
+    #[test]
+    fn seed_who_rejects_bare_entry_with_spaces() {
+        // If the broker ever leaks a raw comma in status text, the parser
+        // must not treat multi-word fragments as usernames (#656).
+        let mut users = Vec::new();
+        let mut statuses = HashMap::new();
+        seed_online_users_from_who(
+            "online \u{2014} alice: PR #630 merged, #636 filed, bob",
+            &mut users,
+            &mut statuses,
+        );
+        assert_eq!(users, ["alice", "bob"]);
+        assert!(
+            !users.contains(&"#636 filed".to_owned()),
+            "status fragment must not appear as a user"
+        );
+    }
+
+    #[test]
+    fn seed_who_single_word_bare_entry_accepted() {
+        // A single word without spaces is a legitimate bare username.
+        let mut users = Vec::new();
         let mut statuses = HashMap::new();
         seed_online_users_from_who("online \u{2014} alice, bob", &mut users, &mut statuses);
         assert_eq!(users, ["alice", "bob"]);

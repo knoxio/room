@@ -109,7 +109,17 @@ async fn handle_who(state: &RoomState) -> anyhow::Result<CommandResult> {
         .status_entries()
         .await
         .into_iter()
-        .map(|(u, s)| if s.is_empty() { u } else { format!("{u}: {s}") })
+        .map(|(u, s)| {
+            if s.is_empty() {
+                u
+            } else {
+                // Sanitize commas in status text so the TUI parser
+                // (which splits on ", ") doesn't treat status fragments
+                // as separate usernames (#656).
+                let safe = s.replace(", ", "; ");
+                format!("{u}: {safe}")
+            }
+        })
         .collect();
     let content = if entries.is_empty() {
         "no users online".to_owned()
@@ -750,6 +760,33 @@ mod tests {
             panic!("expected Reply");
         };
         assert!(json.contains("reviewing PR"));
+    }
+
+    #[tokio::test]
+    async fn route_command_who_sanitizes_commas_in_status() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+        {
+            let mut map = state.status_map.lock().await;
+            map.insert("alice".to_owned(), "PR #630 merged, #636 filed".to_owned());
+            map.insert("bob".to_owned(), String::new());
+        }
+        let msg = make_command("test-room", "alice", "who", vec![]);
+        let CommandResult::Reply(json) = route_command(msg, "alice", &state).await.unwrap() else {
+            panic!("expected Reply");
+        };
+        // The comma in the status must be replaced so the TUI parser
+        // doesn't treat "#636 filed" as a separate username (#656).
+        assert!(
+            !json.contains("PR #630 merged, #636"),
+            "raw comma must be sanitized: {json}"
+        );
+        assert!(
+            json.contains("PR #630 merged; #636 filed"),
+            "comma should be replaced with semicolon: {json}"
+        );
+        // bob should still appear as a separate entry
+        assert!(json.contains("bob"), "bob should be listed: {json}");
     }
 
     // ── route_command: admin permission gating ────────────────────────────
