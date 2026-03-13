@@ -735,4 +735,92 @@ mod tests {
         assert!(!f.matches(&msg_with_seq("r", "u", "x", 5), "r"));
         assert!(!f.matches(&msg_with_seq("r", "u", "x", 10), "r"));
     }
+
+    // ── composite filter edge cases (#576) ───────────────────────────────
+
+    #[test]
+    fn triple_and_user_mention_search_all_match() {
+        let f = QueryFilter {
+            users: vec!["alice".into()],
+            mention_user: Some("bob".into()),
+            content_search: Some("deploy".into()),
+            ..Default::default()
+        };
+        // All three dimensions satisfied: user=alice, mentions @bob, contains "deploy"
+        assert!(f.matches(
+            &make_message("r", "alice", "@bob please deploy staging"),
+            "r"
+        ));
+    }
+
+    #[test]
+    fn triple_and_user_mention_search_one_fails() {
+        let f = QueryFilter {
+            users: vec!["alice".into()],
+            mention_user: Some("bob".into()),
+            content_search: Some("deploy".into()),
+            ..Default::default()
+        };
+        // Wrong user — bob sends instead of alice
+        assert!(!f.matches(&make_message("r", "bob", "@bob deploy staging"), "r"));
+        // Missing mention — alice sends but doesn't mention bob
+        assert!(!f.matches(&make_message("r", "alice", "deploy staging now"), "r"));
+        // Missing search term — alice mentions bob but no "deploy"
+        assert!(!f.matches(&make_message("r", "alice", "hey @bob check this"), "r"));
+    }
+
+    #[test]
+    fn inverted_seq_range_rejects_all_in_room() {
+        // after_seq=10, before_seq=5 — impossible range, no seq can be >10 AND <5
+        let f = QueryFilter {
+            after_seq: Some(("r".into(), 10)),
+            before_seq: Some(("r".into(), 5)),
+            ..Default::default()
+        };
+        // Nothing in "r" can satisfy both constraints
+        assert!(!f.matches(&msg_with_seq("r", "u", "x", 1), "r"));
+        assert!(!f.matches(&msg_with_seq("r", "u", "x", 7), "r"));
+        assert!(!f.matches(&msg_with_seq("r", "u", "x", 15), "r"));
+        // Messages in a different room bypass both seq constraints
+        assert!(f.matches(&msg_with_seq("other", "u", "x", 7), "other"));
+    }
+
+    #[test]
+    fn future_after_ts_rejects_all_historical() {
+        // Set cutoff far in the future — no real message should have this timestamp
+        let future = ts(2099, 12, 31, 23, 59, 59);
+        let f = QueryFilter {
+            after_ts: Some(future),
+            ..Default::default()
+        };
+        // A message from 2026 is before 2099 — rejected
+        assert!(!f.matches(&msg_with_ts("r", "u", "x", ts(2026, 6, 15, 12, 0, 0)), "r"));
+        // Even a message from 2099-12-31 at the exact cutoff is rejected (strictly after)
+        assert!(!f.matches(&msg_with_ts("r", "u", "x", future), "r"));
+    }
+
+    #[test]
+    fn combined_timestamp_range_and_user() {
+        let f = QueryFilter {
+            users: vec!["alice".into()],
+            after_ts: Some(ts(2026, 3, 1, 0, 0, 0)),
+            before_ts: Some(ts(2026, 3, 31, 23, 59, 59)),
+            ..Default::default()
+        };
+        // alice within range — passes
+        assert!(f.matches(
+            &msg_with_ts("r", "alice", "x", ts(2026, 3, 15, 12, 0, 0)),
+            "r"
+        ));
+        // bob within range — fails (wrong user)
+        assert!(!f.matches(
+            &msg_with_ts("r", "bob", "x", ts(2026, 3, 15, 12, 0, 0)),
+            "r"
+        ));
+        // alice outside range — fails (too early)
+        assert!(!f.matches(
+            &msg_with_ts("r", "alice", "x", ts(2026, 2, 28, 12, 0, 0)),
+            "r"
+        ));
+    }
 }
