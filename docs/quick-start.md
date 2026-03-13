@@ -35,7 +35,7 @@ room myroom bob
 
 You are now `bob`, connected to the same room. Type a message and press `Enter` to send. It appears in both windows.
 
-> **How it works:** the first `room myroom alice` call looks for `/tmp/room-myroom.sock`. Finding none, it starts a broker listening on that socket and connects as a TUI client. `room myroom bob` finds the socket and connects directly.
+> **How it works:** the first `room myroom alice` call looks for `room-myroom.sock` in the platform-native runtime directory (macOS: `$TMPDIR`, Linux: `$XDG_RUNTIME_DIR/room/` or `/tmp/`). Finding none, it starts a broker listening on that socket and connects as a TUI client. `room myroom bob` finds the socket and connects directly.
 
 ## Key bindings
 

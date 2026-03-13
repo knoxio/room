@@ -6,13 +6,17 @@ A technical reference for contributors and advanced users.
 
 The broker is a single async Tokio process that:
 
-1. Listens on a Unix domain socket (`/tmp/room-<id>.sock`)
+1. Listens on a Unix domain socket (`<runtime_dir>/room-<id>.sock`)
 2. Accepts client connections and runs a per-client handler task
 3. Fans out messages to all connected clients via a `tokio::broadcast` channel
 4. Appends every event to an NDJSON chat file
 
+> **Runtime directory:** `<runtime_dir>` is platform-native — macOS uses `$TMPDIR`
+> (per-user, e.g. `/var/folders/...`), Linux uses `$XDG_RUNTIME_DIR/room/` or `/tmp/`
+> as a fallback. See `paths::room_runtime_dir()`.
+
 ```
-/tmp/room-<id>.sock  ←──────────────────────────────────┐
+<runtime_dir>/room-<id>.sock  ←─────────────────────────┐
                                                          │
 room myroom alice  ──[connect]──► Broker                 │
                                     │                    │
@@ -148,7 +152,7 @@ The main accept loop also holds a watch receiver and exits when `changed()` fire
 
 ## NDJSON persistence
 
-The chat file (default: `/tmp/<room-id>.chat`) is an NDJSON file — one JSON object per line. The broker is the **sole writer**; clients must never write to it directly.
+The chat file (default: `~/.room/data/<room-id>.chat`) is an NDJSON file — one JSON object per line. The broker is the **sole writer**; clients must never write to it directly.
 
 All writes go through `history::append`, which opens the file in append mode. Tokio's `tokio::fs` wrappers are not used here — see below.
 
@@ -188,6 +192,6 @@ const ADMIN_CMD_NAMES: &[&str] = &["kick", "reauth", "clear-tokens", "exit", "cl
 |---|---|
 | `kick <user>` | Removes all tokens for `<user>`, inserts a `KICKED:<user>` sentinel so the username stays reserved. Removes from `StatusMap`. |
 | `reauth <user>` | Removes all tokens for `<user>` (including the kicked sentinel) and deletes the on-disk token file. The user can `room join` again. |
-| `clear-tokens` | Clears the full `TokenMap` and removes all `room-<id>-*.token` files from `/tmp`. |
+| `clear-tokens` | Clears the full `TokenMap` and removes all token files from `~/.room/state/`. |
 | `exit` | Broadcasts a shutdown notice, then calls `shutdown.send(true)`. |
 | `clear` | Truncates the chat history file via `std::fs::write(path, "")`. |
