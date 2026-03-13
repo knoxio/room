@@ -1,7 +1,6 @@
 pub mod help;
 pub mod queue;
 pub mod stats;
-pub mod status;
 pub mod taskboard;
 
 use std::{
@@ -156,12 +155,6 @@ pub enum PluginResult {
     Broadcast(String),
     /// Command handled silently (side effects already done via [`ChatWriter`]).
     Handled,
-    /// Update the sender's status in the broker's status map, then broadcast.
-    ///
-    /// The broker handles the `status_map` write and broadcasts
-    /// `"{username} set status: {status}"` (or `"{username} cleared their status"`
-    /// if empty). Plugins never touch `StatusMap` directly.
-    SetStatus(String),
 }
 
 // ── HistoryReader ───────────────────────────────────────────────────────────
@@ -351,6 +344,7 @@ const RESERVED_COMMANDS: &[&str] = &[
     "subscribe",
     "set_subscription",
     "unsubscribe",
+    "set_status",
     "subscriptions",
 ];
 
@@ -382,7 +376,6 @@ impl PluginRegistry {
         registry.register(Box::new(queue::QueuePlugin::new(queue_path, claim_map)?))?;
 
         registry.register(Box::new(stats::StatsPlugin))?;
-        registry.register(Box::new(status::StatusPlugin))?;
 
         let taskboard_path = taskboard::TaskboardPlugin::taskboard_path_from_chat(chat_path);
         registry.register(Box::new(taskboard::TaskboardPlugin::new(
@@ -622,6 +615,17 @@ pub fn builtin_command_infos() -> Vec<CommandInfo> {
             params: vec![],
         },
         CommandInfo {
+            name: "set_status".to_owned(),
+            description: "Set your presence status".to_owned(),
+            usage: "/set_status <status>".to_owned(),
+            params: vec![ParamSchema {
+                name: "status".to_owned(),
+                param_type: ParamType::Text,
+                required: false,
+                description: "Status text (omit to clear)".to_owned(),
+            }],
+        },
+        CommandInfo {
             name: "subscriptions".to_owned(),
             description: "List subscription tiers for this room".to_owned(),
             usage: "/subscriptions".to_owned(),
@@ -639,7 +643,6 @@ pub fn all_known_commands() -> Vec<CommandInfo> {
     cmds.extend(help::HelpPlugin.commands());
     cmds.extend(queue::QueuePlugin::default_commands());
     cmds.extend(stats::StatsPlugin.commands());
-    cmds.extend(status::StatusPlugin.commands());
     cmds.extend(taskboard::TaskboardPlugin::default_commands());
     cmds
 }
@@ -885,6 +888,7 @@ mod tests {
             "exit",
             "clear",
             "room-info",
+            "set_status",
             "subscribe",
             "set_subscription",
             "unsubscribe",

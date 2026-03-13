@@ -166,6 +166,23 @@ pub(crate) async fn route_command(
             return Ok(CommandResult::Reply(json));
         }
 
+        // Status command.
+        if cmd == "set_status" {
+            let status = params.join(" ");
+            state.set_status(username, status.clone()).await;
+            let display = if status.is_empty() {
+                format!("{username} cleared their status")
+            } else {
+                format!("{username} set status: {status}")
+            };
+            let sys = make_system(&state.room_id, "broker", display);
+            let seq_msg =
+                broadcast_and_persist(&sys, &state.clients, &state.chat_path, &state.seq_counter)
+                    .await?;
+            let json = serde_json::to_string(&seq_msg)?;
+            return Ok(CommandResult::HandledWithReply(json));
+        }
+
         // Subscription commands.
         if cmd == "subscribe" || cmd == "set_subscription" {
             // Reject subscriptions from users who cannot join this room.
@@ -399,20 +416,6 @@ async fn dispatch_plugin(
             CommandResult::HandledWithReply(json)
         }
         PluginResult::Handled => CommandResult::Handled,
-        PluginResult::SetStatus(status) => {
-            state.set_status(username, status.clone()).await;
-            let display = if status.is_empty() {
-                format!("{username} cleared their status")
-            } else {
-                format!("{username} set status: {status}")
-            };
-            let sys = make_system(&state.room_id, "broker", display);
-            let seq_msg =
-                broadcast_and_persist(&sys, &state.clients, &state.chat_path, &state.seq_counter)
-                    .await?;
-            let json = serde_json::to_string(&seq_msg)?;
-            CommandResult::HandledWithReply(json)
-        }
     })
 }
 

@@ -21,6 +21,11 @@ For changes prior to the workspace restructure (v0.1.2 through v1.0.2), see the
   silently clipping at the border. (#497)
 - Admin `/kick` and `/reauth` now strip leading `@` from target username, fixing token invalidation failure and kicked users not being removed from the TUI member panel. (#505)
 
+### Changed
+
+- `/set_status` moved from plugin to builtin command — no behavior change, removes
+  `PluginResult::SetStatus` variant and `plugin/status.rs`. (#508)
+
 ### Fixed
 
 - Standalone broker now registers all plugins (queue, taskboard) — previously only help, stats, status were available outside daemon mode. (#513)
