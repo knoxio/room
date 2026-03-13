@@ -12,7 +12,7 @@ use crate::message::Message;
 
 // Re-export submodules so existing `use render::*` in mod.rs keeps working.
 pub(super) use super::colors::{assign_color, user_color, ColorMap};
-pub(super) use super::markdown::{render_chunk_content, render_content_with_mentions};
+pub(super) use super::markdown::render_chunk_content;
 pub(super) use super::panel::{
     build_member_panel_spans, ellipsize_status, member_panel_row_width, render_tab_bar, TabInfo,
 };
