@@ -411,7 +411,190 @@ async fn rest_send_dm_is_persisted() {
         .any(|m| matches!(m, Message::DirectMessage { content, to, .. } if content == "secret DM" && to == "recipient")));
 }
 
-// ── Daemon (multi-room) integration tests ────────────────────────────────────
+// ── WS SESSION: with single-room broker ──────────────────────────────────────
 
+#[tokio::test]
+async fn ws_session_interactive_with_single_room_token() {
+    let (tb, port) = TestBroker::start_with_ws("ws_sess").await;
+
+    // Get a token via JOIN.
+    let (_tx_j, mut rx_j) = ws_connect(port, "ws_sess", "JOIN:sess_user").await;
+    let token_resp = ws_recv_json(&mut rx_j).await;
+    let token = token_resp["token"].as_str().unwrap();
+
+    // Connect interactively with SESSION:<token>.
+    let first_frame = format!("SESSION:{token}");
+    let (mut tx, mut rx) = ws_connect(port, "ws_sess", &first_frame).await;
+
+    // Should receive our own join event.
+    let join = ws_recv_until(
+        &mut rx,
+        |m| matches!(m, Message::Join { user, .. } if user == "sess_user"),
+    )
+    .await;
+    assert!(matches!(join, Message::Join { user, .. } if user == "sess_user"));
+
+    // Send a message and verify echo.
+    tx.send(TungsteniteMsg::Text("session hello".into()))
+        .await
+        .unwrap();
+    let msg = ws_recv_until(
+        &mut rx,
+        |m| matches!(m, Message::Message { content, .. } if content == "session hello"),
+    )
+    .await;
+    assert!(
+        matches!(msg, Message::Message { user, content, .. } if user == "sess_user" && content == "session hello")
+    );
+
+    // Verify persistence.
+    let history = history::load(&tb.chat_path).await.unwrap();
+    assert!(history
+        .iter()
+        .any(|m| matches!(m, Message::Message { content, .. } if content == "session hello")));
+}
+
+// ── Kicked user WS reconnection (#492) ───────────────────────────────────────
+
+#[tokio::test]
+async fn ws_kicked_user_cannot_reconnect() {
+    let (tb, port) = TestBroker::start_with_ws("ws_kick").await;
+
+    // Admin connects via UDS (first user = host).
+    let mut admin = TestClient::connect(&tb.socket_path, "admin").await;
+    admin
+        .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "admin"))
+        .await;
+
+    // Victim joins via WS JOIN: to get a token.
+    let (_tx_j, mut rx_j) = ws_connect(port, "ws_kick", "JOIN:victim").await;
+    let token_resp = ws_recv_json(&mut rx_j).await;
+    assert_eq!(token_resp["type"], "token");
+    let victim_token = token_resp["token"].as_str().unwrap().to_owned();
+
+    // Admin kicks victim via UDS command.
+    admin
+        .send_json(r#"{"type":"command","cmd":"kick","params":["victim"]}"#)
+        .await;
+    admin
+        .recv_until(|m| matches!(m, Message::System { content, .. } if content.contains("kicked")))
+        .await;
+
+    // Small delay to ensure kick is fully processed.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Victim attempts to reconnect via WS TOKEN: — should be rejected.
+    let token_frame = format!("TOKEN:{victim_token}");
+    let (_tx_r, mut rx_r) = ws_connect(port, "ws_kick", &token_frame).await;
+    let v = ws_recv_json(&mut rx_r).await;
+    assert_eq!(v["type"], "error");
+    assert_eq!(v["code"], "invalid_token");
+
+    // Victim attempts to reconnect via WS SESSION: — should also be rejected.
+    let session_frame = format!("SESSION:{victim_token}");
+    let (_tx_s, mut rx_s) = ws_connect(port, "ws_kick", &session_frame).await;
+    let v2 = ws_recv_json(&mut rx_s).await;
+    assert_eq!(v2["type"], "error");
+    assert_eq!(v2["code"], "invalid_token");
+}
+
+// ── Daemon (multi-room) integration tests ────────────────────────────────────
+// Global token fallback (#490): daemon global tokens should work for
+// REST send, REST poll, and WS SESSION: on individual rooms.
+
+use common::{daemon_global_join, rest_send, TestDaemon};
 use room_cli::broker::daemon::{DaemonConfig, DaemonState};
 use room_protocol::{dm_room_id, RoomConfig, RoomVisibility};
+
+#[tokio::test]
+async fn rest_send_with_global_daemon_token() {
+    let (td, port) = TestDaemon::start_with_ws_configs(vec![("gtok_send", None)]).await;
+    let base = format!("http://127.0.0.1:{port}");
+    let client = reqwest::Client::new();
+
+    // Get a global token via daemon UDS (not per-room).
+    let global_token = daemon_global_join(&td.socket_path, "global_sender").await;
+
+    // REST send using the global token should succeed.
+    let body = rest_send(
+        &client,
+        &base,
+        "gtok_send",
+        &global_token,
+        "hello from global",
+    )
+    .await;
+    assert_eq!(body["type"], "message");
+    assert_eq!(body["content"], "hello from global");
+    assert_eq!(body["user"], "global_sender");
+}
+
+#[tokio::test]
+async fn rest_poll_with_global_daemon_token() {
+    let (td, port) = TestDaemon::start_with_ws_configs(vec![("gtok_poll", None)]).await;
+    let base = format!("http://127.0.0.1:{port}");
+    let client = reqwest::Client::new();
+
+    // Get a global token.
+    let global_token = daemon_global_join(&td.socket_path, "global_poller").await;
+
+    // Send a message first (via REST with the same global token).
+    rest_send(
+        &client,
+        &base,
+        "gtok_poll",
+        &global_token,
+        "poll target message",
+    )
+    .await;
+
+    // REST poll with the global token should return the message.
+    let resp = client
+        .get(format!("{base}/api/gtok_poll/poll"))
+        .header("Authorization", format!("Bearer {global_token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let messages = body["messages"].as_array().unwrap();
+    assert!(
+        messages
+            .iter()
+            .any(|m| m["content"] == "poll target message"),
+        "global token poll should return messages: {messages:?}"
+    );
+}
+
+#[tokio::test]
+async fn ws_session_with_global_daemon_token() {
+    let (td, port) = TestDaemon::start_with_ws_configs(vec![("gtok_ws", None)]).await;
+
+    // Get a global token.
+    let global_token = daemon_global_join(&td.socket_path, "global_ws_user").await;
+
+    // Connect via WS SESSION:<global_token> — should work for interactive session.
+    let session_frame = format!("SESSION:{global_token}");
+    let (mut tx, mut rx) = ws_connect(port, "gtok_ws", &session_frame).await;
+
+    // Should receive join event.
+    let join = ws_recv_until(
+        &mut rx,
+        |m| matches!(m, Message::Join { user, .. } if user == "global_ws_user"),
+    )
+    .await;
+    assert!(matches!(join, Message::Join { user, .. } if user == "global_ws_user"));
+
+    // Send a message and verify echo.
+    tx.send(TungsteniteMsg::Text("global ws hello".into()))
+        .await
+        .unwrap();
+    let msg = ws_recv_until(
+        &mut rx,
+        |m| matches!(m, Message::Message { content, .. } if content == "global ws hello"),
+    )
+    .await;
+    assert!(
+        matches!(msg, Message::Message { user, content, .. } if user == "global_ws_user" && content == "global ws hello")
+    );
+}
