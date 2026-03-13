@@ -71,6 +71,69 @@ pub(super) fn wrap_words(text: &str, width: usize) -> Vec<String> {
     all_chunks
 }
 
+/// Wrap content and render with markdown-aware spans (code blocks, inline code).
+///
+/// Used by Message and Reply variants where content may contain markdown.
+/// `prefix_spans` are placed before the first line; subsequent lines are indented
+/// to `prefix_width` characters.
+fn render_wrapped_markdown(
+    prefix_spans: Vec<Span<'static>>,
+    prefix_width: usize,
+    content: &str,
+    available_width: usize,
+    color_map: &ColorMap,
+) -> Text<'static> {
+    let content_width = available_width.saturating_sub(prefix_width);
+    let chunks = wrap_words(content, content_width);
+    let indent = " ".repeat(prefix_width);
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut in_code_block = false;
+    for (i, chunk) in chunks.into_iter().enumerate() {
+        let content_spans = render_chunk_content(&chunk, &mut in_code_block, color_map);
+        if i == 0 {
+            let mut line_spans = prefix_spans.clone();
+            line_spans.extend(content_spans);
+            lines.push(Line::from(line_spans));
+        } else {
+            let mut line_spans = vec![Span::raw(indent.clone())];
+            line_spans.extend(content_spans);
+            lines.push(Line::from(line_spans));
+        }
+    }
+    Text::from(lines)
+}
+
+/// Wrap content and render with a uniform style (no markdown parsing).
+///
+/// Used by System, DirectMessage, and Event variants. Each chunk gets `style`
+/// applied. `prefix_spans` are placed before the first chunk; subsequent lines
+/// are indented to `prefix_width` characters.
+fn render_wrapped_styled(
+    prefix_spans: Vec<Span<'static>>,
+    prefix_width: usize,
+    content: &str,
+    available_width: usize,
+    style: Style,
+) -> Text<'static> {
+    let content_width = available_width.saturating_sub(prefix_width);
+    let chunks = wrap_words(content, content_width);
+    let indent = " ".repeat(prefix_width);
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    for (i, chunk) in chunks.into_iter().enumerate() {
+        if i == 0 {
+            let mut line_spans = prefix_spans.clone();
+            line_spans.push(Span::styled(chunk, style));
+            lines.push(Line::from(line_spans));
+        } else {
+            lines.push(Line::from(vec![
+                Span::raw(indent.clone()),
+                Span::styled(chunk, style),
+            ]));
+        }
+    }
+    Text::from(lines)
+}
+
 pub(super) fn format_message(
     msg: &Message,
     available_width: usize,
@@ -106,33 +169,22 @@ pub(super) fn format_message(
         } => {
             let ts_str = ts.format("%H:%M:%S").to_string();
             let prefix_plain = format!("[{ts_str}] {user}: ");
-            let prefix_width = prefix_plain.chars().count();
-            let content_width = available_width.saturating_sub(prefix_width);
-            let chunks = wrap_words(content, content_width);
-            let indent = " ".repeat(prefix_width);
-            let mut lines: Vec<Line<'static>> = Vec::new();
-            let mut in_code_block = false;
-            for (i, chunk) in chunks.into_iter().enumerate() {
-                let content_spans = render_chunk_content(&chunk, &mut in_code_block, color_map);
-                if i == 0 {
-                    let mut line_spans = vec![
-                        Span::styled(format!("[{ts_str}] "), Style::default().fg(Color::DarkGray)),
-                        Span::styled(
-                            format!("{user}: "),
-                            Style::default()
-                                .fg(user_color(user, color_map))
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                    ];
-                    line_spans.extend(content_spans);
-                    lines.push(Line::from(line_spans));
-                } else {
-                    let mut line_spans = vec![Span::raw(indent.clone())];
-                    line_spans.extend(content_spans);
-                    lines.push(Line::from(line_spans));
-                }
-            }
-            Text::from(lines)
+            let prefix_spans = vec![
+                Span::styled(format!("[{ts_str}] "), Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!("{user}: "),
+                    Style::default()
+                        .fg(user_color(user, color_map))
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ];
+            render_wrapped_markdown(
+                prefix_spans,
+                prefix_plain.chars().count(),
+                content,
+                available_width,
+                color_map,
+            )
         }
         Message::Reply {
             ts,
@@ -144,37 +196,26 @@ pub(super) fn format_message(
             let ts_str = ts.format("%H:%M:%S").to_string();
             let short_id = &reply_to[..reply_to.len().min(8)];
             let prefix_plain = format!("[{ts_str}] {user}: (re:{short_id}) ");
-            let prefix_width = prefix_plain.chars().count();
-            let content_width = available_width.saturating_sub(prefix_width);
-            let chunks = wrap_words(content, content_width);
-            let indent = " ".repeat(prefix_width);
-            let mut lines: Vec<Line<'static>> = Vec::new();
-            let mut in_code_block = false;
-            for (i, chunk) in chunks.into_iter().enumerate() {
-                let content_spans = render_chunk_content(&chunk, &mut in_code_block, color_map);
-                if i == 0 {
-                    let mut line_spans = vec![
-                        Span::styled(format!("[{ts_str}] "), Style::default().fg(Color::DarkGray)),
-                        Span::styled(
-                            format!("{user}: "),
-                            Style::default()
-                                .fg(user_color(user, color_map))
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(
-                            format!("(re:{short_id}) "),
-                            Style::default().fg(Color::DarkGray),
-                        ),
-                    ];
-                    line_spans.extend(content_spans);
-                    lines.push(Line::from(line_spans));
-                } else {
-                    let mut line_spans = vec![Span::raw(indent.clone())];
-                    line_spans.extend(content_spans);
-                    lines.push(Line::from(line_spans));
-                }
-            }
-            Text::from(lines)
+            let prefix_spans = vec![
+                Span::styled(format!("[{ts_str}] "), Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!("{user}: "),
+                    Style::default()
+                        .fg(user_color(user, color_map))
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("(re:{short_id}) "),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ];
+            render_wrapped_markdown(
+                prefix_spans,
+                prefix_plain.chars().count(),
+                content,
+                available_width,
+                color_map,
+            )
         }
         Message::Command {
             ts,
@@ -201,28 +242,17 @@ pub(super) fn format_message(
         Message::System { ts, content, .. } => {
             let ts_str = ts.format("%H:%M:%S").to_string();
             let prefix_plain = format!("[{ts_str}] [system] ");
-            let prefix_width = prefix_plain.chars().count();
-            let content_width = available_width.saturating_sub(prefix_width);
-            let chunks = wrap_words(content, content_width);
-            let indent = " ".repeat(prefix_width);
-            let mut lines: Vec<Line<'static>> = Vec::new();
-            for (i, chunk) in chunks.into_iter().enumerate() {
-                if i == 0 {
-                    lines.push(Line::from(vec![
-                        Span::styled(format!("[{ts_str}] "), Style::default().fg(Color::DarkGray)),
-                        Span::styled(
-                            format!("[system] {chunk}"),
-                            Style::default().fg(Color::Cyan),
-                        ),
-                    ]));
-                } else {
-                    lines.push(Line::from(vec![
-                        Span::raw(indent.clone()),
-                        Span::styled(chunk, Style::default().fg(Color::Cyan)),
-                    ]));
-                }
-            }
-            Text::from(lines)
+            let prefix_spans = vec![
+                Span::styled(format!("[{ts_str}] "), Style::default().fg(Color::DarkGray)),
+                Span::styled("[system] ".to_owned(), Style::default().fg(Color::Cyan)),
+            ];
+            render_wrapped_styled(
+                prefix_spans,
+                prefix_plain.chars().count(),
+                content,
+                available_width,
+                Style::default().fg(Color::Cyan),
+            )
         }
         Message::DirectMessage {
             ts,
@@ -233,37 +263,28 @@ pub(super) fn format_message(
         } => {
             let ts_str = ts.format("%H:%M:%S").to_string();
             let prefix_plain = format!("[{ts_str}] [dm] {user}{DM_ARROW}{to}: ");
-            let prefix_width = prefix_plain.chars().count();
-            let content_width = available_width.saturating_sub(prefix_width);
-            let chunks = wrap_words(content, content_width);
-            let indent = " ".repeat(prefix_width);
-            let mut lines: Vec<Line<'static>> = Vec::new();
-            for (i, chunk) in chunks.into_iter().enumerate() {
-                if i == 0 {
-                    lines.push(Line::from(vec![
-                        Span::styled(format!("[{ts_str}] "), Style::default().fg(Color::DarkGray)),
-                        Span::styled(
-                            "[dm] ",
-                            Style::default()
-                                .fg(Color::Magenta)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(
-                            format!("{user}{DM_ARROW}{to}: "),
-                            Style::default()
-                                .fg(user_color(user, color_map))
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        Span::raw(chunk),
-                    ]));
-                } else {
-                    lines.push(Line::from(vec![
-                        Span::raw(indent.clone()),
-                        Span::raw(chunk),
-                    ]));
-                }
-            }
-            Text::from(lines)
+            let prefix_spans = vec![
+                Span::styled(format!("[{ts_str}] "), Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    "[dm] ",
+                    Style::default()
+                        .fg(Color::Magenta)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("{user}{DM_ARROW}{to}: "),
+                    Style::default()
+                        .fg(user_color(user, color_map))
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ];
+            render_wrapped_styled(
+                prefix_spans,
+                prefix_plain.chars().count(),
+                content,
+                available_width,
+                Style::default(),
+            )
         }
         Message::Event {
             ts,
@@ -274,25 +295,17 @@ pub(super) fn format_message(
             let ts_str = ts.format("%H:%M:%S").to_string();
             let tag = format!("[event:{event_type}]");
             let prefix_plain = format!("[{ts_str}] {tag} ");
-            let prefix_width = prefix_plain.chars().count();
-            let content_width = available_width.saturating_sub(prefix_width);
-            let chunks = wrap_words(content, content_width);
-            let indent = " ".repeat(prefix_width);
-            let mut lines: Vec<Line<'static>> = Vec::new();
-            for (i, chunk) in chunks.into_iter().enumerate() {
-                if i == 0 {
-                    lines.push(Line::from(vec![
-                        Span::styled(format!("[{ts_str}] "), Style::default().fg(Color::DarkGray)),
-                        Span::styled(format!("{tag} {chunk}"), Style::default().fg(Color::Yellow)),
-                    ]));
-                } else {
-                    lines.push(Line::from(vec![
-                        Span::raw(indent.clone()),
-                        Span::styled(chunk, Style::default().fg(Color::Yellow)),
-                    ]));
-                }
-            }
-            Text::from(lines)
+            let prefix_spans = vec![
+                Span::styled(format!("[{ts_str}] "), Style::default().fg(Color::DarkGray)),
+                Span::styled(format!("{tag} "), Style::default().fg(Color::Yellow)),
+            ];
+            render_wrapped_styled(
+                prefix_spans,
+                prefix_plain.chars().count(),
+                content,
+                available_width,
+                Style::default().fg(Color::Yellow),
+            )
         }
     }
 }
@@ -522,5 +535,94 @@ mod tests {
     fn visible_line_counts_zero_viewport() {
         let counts = visible_line_counts(&[3, 2], 0, 0);
         assert_eq!(counts, vec![]);
+    }
+
+    // ── render_wrapped_markdown tests ─────────────────────────────────────────
+
+    fn empty_color_map() -> ColorMap {
+        std::collections::HashMap::new()
+    }
+
+    #[test]
+    fn render_wrapped_markdown_single_line() {
+        let prefix = vec![Span::raw("alice: ")];
+        let result = render_wrapped_markdown(prefix, 7, "hello world", 40, &empty_color_map());
+        assert_eq!(result.lines.len(), 1);
+        // First span is the prefix
+        assert_eq!(result.lines[0].spans[0].content, "alice: ");
+    }
+
+    #[test]
+    fn render_wrapped_markdown_wraps_long_content() {
+        let prefix = vec![Span::raw("ab: ")];
+        // available=20, prefix=4 → content_width=16
+        let result = render_wrapped_markdown(
+            prefix,
+            4,
+            "one two three four five six",
+            20,
+            &empty_color_map(),
+        );
+        assert!(result.lines.len() > 1, "should wrap to multiple lines");
+        // Continuation lines should be indented (start with spaces)
+        let second_line_text: String = result.lines[1]
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(
+            second_line_text.starts_with("    "),
+            "continuation should be indented to prefix_width=4"
+        );
+    }
+
+    #[test]
+    fn render_wrapped_markdown_preserves_newlines() {
+        let prefix = vec![Span::raw("u: ")];
+        let result = render_wrapped_markdown(prefix, 3, "line1\nline2", 40, &empty_color_map());
+        assert_eq!(result.lines.len(), 2);
+    }
+
+    // ── render_wrapped_styled tests ───────────────────────────────────────────
+
+    #[test]
+    fn render_wrapped_styled_single_line() {
+        let style = Style::default().fg(Color::Cyan);
+        let prefix = vec![Span::styled("[system] ", style)];
+        let result = render_wrapped_styled(prefix, 9, "short msg", 40, style);
+        assert_eq!(result.lines.len(), 1);
+        assert_eq!(result.lines[0].spans[0].content, "[system] ");
+        assert_eq!(result.lines[0].spans[1].content, "short msg");
+        assert_eq!(result.lines[0].spans[1].style, style);
+    }
+
+    #[test]
+    fn render_wrapped_styled_wraps_long_content() {
+        let style = Style::default().fg(Color::Yellow);
+        let prefix = vec![Span::raw("[evt] ")];
+        // available=18, prefix=6 → content_width=12
+        let result = render_wrapped_styled(prefix, 6, "aaa bbb ccc ddd eee fff", 18, style);
+        assert!(result.lines.len() > 1);
+        // Continuation lines: first span is indent, second span has the style
+        assert_eq!(result.lines[1].spans[0].content, "      ");
+        assert_eq!(result.lines[1].spans[1].style, style);
+    }
+
+    #[test]
+    fn render_wrapped_styled_preserves_newlines() {
+        let style = Style::default();
+        let prefix = vec![Span::raw("p: ")];
+        let result = render_wrapped_styled(prefix, 3, "a\nb\nc", 40, style);
+        assert_eq!(result.lines.len(), 3);
+    }
+
+    #[test]
+    fn render_wrapped_styled_empty_content() {
+        let style = Style::default().fg(Color::Cyan);
+        let prefix = vec![Span::styled("[system] ", style)];
+        let result = render_wrapped_styled(prefix, 9, "", 40, style);
+        assert_eq!(result.lines.len(), 1);
+        // Prefix + empty content span
+        assert_eq!(result.lines[0].spans[0].content, "[system] ");
     }
 }
