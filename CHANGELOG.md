@@ -29,6 +29,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   parameterized `render_inline_markdown` function, eliminating `render_bold_inner`. (#560)
 - **refactor:** Consolidated `OnceLock` fields in `RoomState` into `AuthState` and `FilterState`
   sub-structs, reducing struct field count from 15 to 11. (#545)
+- **refactor:** Split `tui/render.rs` (1572 lines) into focused submodules: `colors.rs`
+  (palette, color assignment), `markdown.rs` (inline markdown parser, code block fencing),
+  `panel.rs` (tab bar, member panel, ellipsize). (#585)
 
 - Restructured into a cargo workspace with four crates: `room-protocol` (wire types),
   `room-cli` (broker + TUI + oneshot), `room-ralph` (agent wrapper), `agentroom`

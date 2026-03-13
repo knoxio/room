@@ -22,7 +22,10 @@ use tokio::{
     sync::mpsc,
 };
 
+mod colors;
 mod input;
+mod markdown;
+mod panel;
 mod render;
 mod render_bots;
 mod widgets;
