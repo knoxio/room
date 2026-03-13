@@ -179,6 +179,9 @@ enum Cmd {
     /// Sends `/subscribe [tier]` to the broker and prints the broker confirmation.
     /// Valid tiers: `full` (default, receive all messages) or `mentions_only`
     /// (receive only messages that @mention you).
+    ///
+    /// Use `--events` to filter which event types you receive (default: all).
+    /// Example: `room subscribe myroom -t TOKEN full --events task_posted,task_finished`
     Subscribe {
         room_id: String,
         /// Session token from `room join` (required)
@@ -187,6 +190,12 @@ enum Cmd {
         /// Subscription tier: `full` or `mentions_only` (default: full)
         #[arg(default_value = "full")]
         tier: String,
+        /// Event type filter: `all` (default), `none`, or comma-separated event types.
+        /// Valid types: task_posted, task_assigned, task_claimed, task_planned,
+        /// task_approved, task_updated, task_released, task_finished, task_cancelled,
+        /// status_changed, review_requested.
+        #[arg(long)]
+        events: Option<String>,
         /// Override the broker socket path (default: auto-discover daemon or per-room socket)
         #[arg(long)]
         socket: Option<PathBuf>,
@@ -613,12 +622,20 @@ async fn main() -> anyhow::Result<()> {
             room_id,
             token,
             tier,
+            events,
             socket,
         }) => {
             if socket.is_none() {
                 oneshot::ensure_daemon_running().await?;
             }
-            oneshot::cmd_subscribe(&room_id, &token, &tier, socket.as_deref()).await?;
+            oneshot::cmd_subscribe(
+                &room_id,
+                &token,
+                &tier,
+                events.as_deref(),
+                socket.as_deref(),
+            )
+            .await?;
         }
         Some(Cmd::Who {
             room_id,

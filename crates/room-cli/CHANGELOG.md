@@ -12,6 +12,11 @@ For changes prior to the workspace restructure (v0.1.2 through v1.0.2), see the
 
 ### Added
 
+- Event filtering on subscriptions: `room subscribe <room> -t TOKEN full --events task_posted,task_finished`
+  filters which event types appear in poll results. Supports `all` (default), `none`,
+  or comma-separated list. Persisted per-user per-room as `.event_filters` files. (#430)
+- `/subscribe_events` broker command — set event type filter independently of subscription tier. (#430)
+- `/subscriptions` now shows event filters alongside tier subscriptions. (#430)
 - Taskboard plugin emits typed `Event` messages (from room-protocol) alongside
   system broadcasts — first consumer of the event type system. (#430)
 - TUI: render `Event` messages with `[event:<type>]` tag in yellow. (#430)

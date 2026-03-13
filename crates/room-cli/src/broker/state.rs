@@ -4,7 +4,7 @@ use std::{
     sync::{atomic::AtomicU64, Arc},
 };
 
-use room_protocol::{RoomConfig, SubscriptionTier};
+use room_protocol::{EventFilter, RoomConfig, SubscriptionTier};
 use tokio::sync::{broadcast, watch, Mutex};
 
 use crate::{plugin::PluginRegistry, registry::UserRegistry};
@@ -30,6 +30,11 @@ pub(crate) type TokenMap = Arc<Mutex<HashMap<String, String>>>;
 /// broker/daemon startup.
 /// DM rooms auto-subscribe both participants at `Full` on creation.
 pub(crate) type SubscriptionMap = Arc<Mutex<HashMap<String, SubscriptionTier>>>;
+
+/// Maps username → event filter for this room. Persisted as JSON at
+/// `~/.room/state/<room_id>.event_filters` on every mutation; loaded on
+/// broker/daemon startup. Default for users with no entry is `EventFilter::All`.
+pub(crate) type EventFilterMap = Arc<Mutex<HashMap<String, EventFilter>>>;
 
 /// Shared broker state passed to every client handler.
 pub(crate) struct RoomState {
@@ -65,6 +70,13 @@ pub(crate) struct RoomState {
     /// requiring an extra constructor parameter (which would exceed the
     /// clippy `too-many-arguments` threshold).
     pub(crate) registry: OnceLock<Arc<Mutex<UserRegistry>>>,
+    /// Per-user event type filter. Uses `OnceLock` for the same reason as
+    /// `registry` — avoids exceeding the 7-argument constructor limit.
+    ///
+    /// Set via [`RoomState::set_event_filter_map`] after construction.
+    /// If unset, all event types pass through (equivalent to `EventFilter::All`
+    /// for every user).
+    pub(crate) event_filter_state: OnceLock<(EventFilterMap, Arc<PathBuf>)>,
 }
 
 impl RoomState {
@@ -117,6 +129,7 @@ impl RoomState {
             plugin_registry: Arc::new(plugins),
             config,
             registry: OnceLock::new(),
+            event_filter_state: OnceLock::new(),
         }))
     }
 
@@ -129,6 +142,58 @@ impl RoomState {
     /// a second time (consistent with `OnceLock` semantics).
     pub(crate) fn set_registry(&self, registry: Arc<Mutex<UserRegistry>>) {
         let _ = self.registry.set(registry);
+    }
+
+    // ── event_filter_map ─────────────────────────────────────────────────────
+
+    /// Attach the event filter map and its persistence path.
+    ///
+    /// Must be called at most once, immediately after construction. Silently
+    /// no-ops if called a second time (consistent with `OnceLock` semantics).
+    pub(crate) fn set_event_filter_map(&self, map: EventFilterMap, path: PathBuf) {
+        let _ = self.event_filter_state.set((map, Arc::new(path)));
+    }
+
+    /// Set a user's event filter.
+    ///
+    /// No-ops if the event filter map has not been attached via
+    /// [`set_event_filter_map`].
+    pub(crate) async fn set_event_filter(&self, user: &str, filter: EventFilter) {
+        if let Some((map, _)) = self.event_filter_state.get() {
+            map.lock().await.insert(user.to_owned(), filter);
+        }
+    }
+
+    /// Return all (username, filter) event filter pairs, sorted by username.
+    pub(crate) async fn event_filter_entries(&self) -> Vec<(String, EventFilter)> {
+        match self.event_filter_state.get() {
+            Some((map, _)) => {
+                let mut entries: Vec<(String, EventFilter)> = map
+                    .lock()
+                    .await
+                    .iter()
+                    .map(|(u, f)| (u.clone(), f.clone()))
+                    .collect();
+                entries.sort_by(|a, b| a.0.cmp(&b.0));
+                entries
+            }
+            None => Vec::new(),
+        }
+    }
+
+    /// Return a cloned snapshot of the event filter map (for persistence).
+    pub(crate) async fn event_filter_snapshot(&self) -> HashMap<String, EventFilter> {
+        match self.event_filter_state.get() {
+            Some((map, _)) => map.lock().await.clone(),
+            None => HashMap::new(),
+        }
+    }
+
+    /// Return the persistence path for the event filter map, if attached.
+    pub(crate) fn event_filter_path(&self) -> Option<&PathBuf> {
+        self.event_filter_state
+            .get()
+            .map(|(_, p): &(EventFilterMap, Arc<PathBuf>)| p.as_ref())
     }
 
     // ── status_map accessors ──────────────────────────────────────────────────
@@ -357,5 +422,94 @@ mod tests {
         // Snapshot is a clone — mutations don't affect the original.
         drop(snap);
         assert_eq!(state.subscription_count().await, 1);
+    }
+
+    // ── event_filter_map accessors ──────────────────────────────────────────
+
+    fn attach_event_filters(state: &RoomState, dir: &TempDir) {
+        let path = dir.path().join("room.event_filters");
+        state.set_event_filter_map(Arc::new(Mutex::new(HashMap::new())), path);
+    }
+
+    #[tokio::test]
+    async fn event_filter_entries_empty_without_attach() {
+        let dir = TempDir::new().unwrap();
+        let state = make_state(&dir);
+        // Without set_event_filter_map, entries should be empty
+        assert!(state.event_filter_entries().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn event_filter_noop_without_attach() {
+        let dir = TempDir::new().unwrap();
+        let state = make_state(&dir);
+        // set_event_filter should silently no-op without attachment
+        state.set_event_filter("alice", EventFilter::None).await;
+        assert!(state.event_filter_entries().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn set_event_filter_inserts_entry() {
+        let dir = TempDir::new().unwrap();
+        let state = make_state(&dir);
+        attach_event_filters(&state, &dir);
+        state.set_event_filter("alice", EventFilter::None).await;
+        let entries = state.event_filter_entries().await;
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].0, "alice");
+        assert_eq!(entries[0].1, EventFilter::None);
+    }
+
+    #[tokio::test]
+    async fn set_event_filter_overwrites() {
+        let dir = TempDir::new().unwrap();
+        let state = make_state(&dir);
+        attach_event_filters(&state, &dir);
+        state.set_event_filter("alice", EventFilter::None).await;
+        state.set_event_filter("alice", EventFilter::All).await;
+        let entries = state.event_filter_entries().await;
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].1, EventFilter::All);
+    }
+
+    #[tokio::test]
+    async fn event_filter_entries_sorted() {
+        let dir = TempDir::new().unwrap();
+        let state = make_state(&dir);
+        attach_event_filters(&state, &dir);
+        state.set_event_filter("carol", EventFilter::None).await;
+        state.set_event_filter("alice", EventFilter::All).await;
+        let entries = state.event_filter_entries().await;
+        assert_eq!(entries[0].0, "alice");
+        assert_eq!(entries[1].0, "carol");
+    }
+
+    #[tokio::test]
+    async fn event_filter_snapshot_clones_map() {
+        let dir = TempDir::new().unwrap();
+        let state = make_state(&dir);
+        attach_event_filters(&state, &dir);
+        state.set_event_filter("alice", EventFilter::None).await;
+        let snap: HashMap<String, EventFilter> = state.event_filter_snapshot().await;
+        assert_eq!(snap.get("alice"), Some(&EventFilter::None));
+        drop(snap);
+        let entries: Vec<(String, EventFilter)> = state.event_filter_entries().await;
+        assert_eq!(entries.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn event_filter_path_none_without_attach() {
+        let dir = TempDir::new().unwrap();
+        let state = make_state(&dir);
+        assert!(state.event_filter_path().is_none());
+    }
+
+    #[tokio::test]
+    async fn event_filter_path_some_after_attach() {
+        let dir = TempDir::new().unwrap();
+        let state = make_state(&dir);
+        let path = dir.path().join("room.event_filters");
+        state.set_event_filter_map(Arc::new(Mutex::new(HashMap::new())), path.clone());
+        assert_eq!(state.event_filter_path(), Some(&path));
     }
 }

@@ -145,6 +145,14 @@ pub fn broker_subscriptions_path(state_dir: &Path, room_id: &str) -> PathBuf {
     state_dir.join(format!("{room_id}.subscriptions"))
 }
 
+/// Broker event-filter-map file path: `<state_dir>/<room_id>.event_filters`.
+///
+/// Persists per-user event type filters on every mutation. Used alongside
+/// the subscription tier to control which [`EventType`]s appear in poll results.
+pub fn broker_event_filters_path(state_dir: &Path, room_id: &str) -> PathBuf {
+    state_dir.join(format!("{room_id}.event_filters"))
+}
+
 // ── Directory initialisation ──────────────────────────────────────────────────
 
 /// Ensure `~/.room/state/` and `~/.room/data/` exist.
@@ -261,6 +269,13 @@ mod tests {
         let base = PathBuf::from("/tmp/state");
         let p = broker_subscriptions_path(&base, "test-room");
         assert_eq!(p, base.join("test-room.subscriptions"));
+    }
+
+    #[test]
+    fn broker_event_filters_path_contains_room_id() {
+        let base = PathBuf::from("/tmp/state");
+        let p = broker_event_filters_path(&base, "test-room");
+        assert_eq!(p, base.join("test-room.event_filters"));
     }
 
     #[test]

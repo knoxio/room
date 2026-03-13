@@ -155,7 +155,21 @@ impl Broker {
             plugin_registry: Arc::new(registry),
             config: None,
             registry: std::sync::OnceLock::new(),
+            event_filter_state: std::sync::OnceLock::new(),
         });
+        // Attach event filter map (parallel to subscription map).
+        {
+            let ef_path = self.subscription_map_path.with_extension("event_filters");
+            let persisted_ef = commands::load_event_filter_map(&ef_path);
+            if !persisted_ef.is_empty() {
+                eprintln!(
+                    "[broker] loaded {} persisted event filter(s)",
+                    persisted_ef.len()
+                );
+            }
+            state.set_event_filter_map(Arc::new(Mutex::new(persisted_ef)), ef_path);
+        }
+
         let next_client_id = Arc::new(AtomicU64::new(0));
 
         // Start WebSocket/REST server if a port was configured.
@@ -724,6 +738,7 @@ mod tests {
             plugin_registry: Arc::new(PluginRegistry::new()),
             config: None,
             registry: std::sync::OnceLock::new(),
+            event_filter_state: std::sync::OnceLock::new(),
         })
     }
 

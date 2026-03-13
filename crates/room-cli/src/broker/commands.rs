@@ -1,6 +1,6 @@
 use std::{collections::HashMap, path::Path};
 
-use room_protocol::SubscriptionTier;
+use room_protocol::{EventFilter, SubscriptionTier};
 
 use crate::{
     message::{make_system, Message},
@@ -54,6 +54,47 @@ pub(crate) async fn persist_subscriptions(state: &RoomState) {
     let snapshot = state.subscription_snapshot().await;
     if let Err(e) = save_subscription_map(&snapshot, &state.subscription_map_path) {
         eprintln!("[broker] subscription persist failed: {e}");
+    }
+}
+
+// ── Event filter persistence ─────────────────────────────────────────────────
+
+/// Write an event filter map to disk as JSON.
+pub(crate) fn save_event_filter_map(
+    map: &HashMap<String, EventFilter>,
+    path: &Path,
+) -> Result<(), String> {
+    let json =
+        serde_json::to_string_pretty(map).map_err(|e| format!("serialize event filters: {e}"))?;
+    std::fs::write(path, json).map_err(|e| format!("write {}: {e}", path.display()))
+}
+
+/// Load an event filter map from disk. Returns an empty map if the file does
+/// not exist or contains invalid JSON.
+pub(crate) fn load_event_filter_map(path: &Path) -> HashMap<String, EventFilter> {
+    let contents = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return HashMap::new(),
+    };
+    serde_json::from_str(&contents).unwrap_or_else(|e| {
+        eprintln!(
+            "[broker] corrupt event filter file {}: {e} — starting empty",
+            path.display()
+        );
+        HashMap::new()
+    })
+}
+
+/// Persist the current event filter map to disk (fire-and-forget logging).
+///
+/// Called after every mutation. No-ops if the event filter map has not been
+/// attached to the [`RoomState`].
+pub(crate) async fn persist_event_filters(state: &RoomState) {
+    if let Some(path) = state.event_filter_path() {
+        let snapshot = state.event_filter_snapshot().await;
+        if let Err(e) = save_event_filter_map(&snapshot, path) {
+            eprintln!("[broker] event filter persist failed: {e}");
+        }
     }
 }
 
@@ -181,14 +222,55 @@ pub(crate) async fn route_command(
             return Ok(CommandResult::HandledWithReply(json));
         }
 
+        if cmd == "subscribe_events" || cmd == "set_event_filter" {
+            // Reject from users who cannot join this room (same guard as subscribe).
+            if let Err(reason) = check_join_permission(username, state.config.as_ref()) {
+                let sys = make_system(&state.room_id, "broker", reason);
+                let json = serde_json::to_string(&sys)?;
+                return Ok(CommandResult::Reply(json));
+            }
+            let filter_str = params.first().map(String::as_str).unwrap_or("all");
+            let filter: EventFilter = match filter_str.parse() {
+                Ok(f) => f,
+                Err(e) => {
+                    let sys = make_system(&state.room_id, "broker", e);
+                    let json = serde_json::to_string(&sys)?;
+                    return Ok(CommandResult::Reply(json));
+                }
+            };
+            state.set_event_filter(username, filter.clone()).await;
+            persist_event_filters(state).await;
+            let display = format!(
+                "{username} event filter set to {filter} in {}",
+                state.room_id
+            );
+            let sys = make_system(&state.room_id, "broker", display);
+            broadcast_and_persist(&sys, &state.clients, &state.chat_path, &state.seq_counter)
+                .await?;
+            let json = serde_json::to_string(&sys)?;
+            return Ok(CommandResult::HandledWithReply(json));
+        }
+
         if cmd == "subscriptions" {
             let raw = state.subscription_entries().await;
-            let content = if raw.is_empty() {
+            let ef_raw = state.event_filter_entries().await;
+            let content = if raw.is_empty() && ef_raw.is_empty() {
                 "no subscriptions".to_owned()
             } else {
-                let entries: Vec<String> =
-                    raw.into_iter().map(|(u, t)| format!("{u}: {t}")).collect();
-                format!("subscriptions — {}", entries.join(", "))
+                let mut parts = Vec::new();
+                if !raw.is_empty() {
+                    let entries: Vec<String> =
+                        raw.into_iter().map(|(u, t)| format!("{u}: {t}")).collect();
+                    parts.push(format!("tiers — {}", entries.join(", ")));
+                }
+                if !ef_raw.is_empty() {
+                    let entries: Vec<String> = ef_raw
+                        .into_iter()
+                        .map(|(u, f)| format!("{u}: {f}"))
+                        .collect();
+                    parts.push(format!("event filters — {}", entries.join(", ")));
+                }
+                parts.join(" | ")
             };
             let sys = make_system(&state.room_id, "broker", content);
             let json = serde_json::to_string(&sys)?;
@@ -1644,6 +1726,198 @@ mod tests {
 
         let loaded = super::load_subscription_map(&state.subscription_map_path);
         assert_eq!(loaded.get("alice"), Some(&SubscriptionTier::MentionsOnly));
+    }
+
+    // ── subscribe_events command ────────────────────────────────────────
+
+    fn make_state_with_event_filters(chat_path: std::path::PathBuf) -> Arc<RoomState> {
+        let state = make_state(chat_path.clone());
+        let ef_path = chat_path.with_extension("event_filters");
+        state.set_event_filter_map(Arc::new(Mutex::new(HashMap::new())), ef_path);
+        state
+    }
+
+    #[tokio::test]
+    async fn subscribe_events_all() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state_with_event_filters(tmp.path().to_path_buf());
+        let msg = make_command(
+            "test-room",
+            "alice",
+            "subscribe_events",
+            vec!["all".to_owned()],
+        );
+        let result = route_command(msg, "alice", &state).await.unwrap();
+        let CommandResult::HandledWithReply(json) = result else {
+            panic!("expected HandledWithReply");
+        };
+        assert!(json.contains("event filter"));
+        assert!(json.contains("all"));
+    }
+
+    #[tokio::test]
+    async fn subscribe_events_none() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state_with_event_filters(tmp.path().to_path_buf());
+        let msg = make_command(
+            "test-room",
+            "alice",
+            "subscribe_events",
+            vec!["none".to_owned()],
+        );
+        let result = route_command(msg, "alice", &state).await.unwrap();
+        let CommandResult::HandledWithReply(json) = result else {
+            panic!("expected HandledWithReply");
+        };
+        assert!(json.contains("event filter"));
+        assert!(json.contains("none"));
+    }
+
+    #[tokio::test]
+    async fn subscribe_events_csv() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state_with_event_filters(tmp.path().to_path_buf());
+        let msg = make_command(
+            "test-room",
+            "alice",
+            "subscribe_events",
+            vec!["task_posted,task_finished".to_owned()],
+        );
+        let result = route_command(msg, "alice", &state).await.unwrap();
+        let CommandResult::HandledWithReply(json) = result else {
+            panic!("expected HandledWithReply");
+        };
+        assert!(json.contains("event filter"));
+        assert!(json.contains("task_finished"));
+        assert!(json.contains("task_posted"));
+    }
+
+    #[tokio::test]
+    async fn subscribe_events_invalid_type_returns_error() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state_with_event_filters(tmp.path().to_path_buf());
+        let msg = make_command(
+            "test-room",
+            "alice",
+            "subscribe_events",
+            vec!["banana".to_owned()],
+        );
+        let result = route_command(msg, "alice", &state).await.unwrap();
+        let CommandResult::Reply(json) = result else {
+            panic!("expected Reply for invalid event type");
+        };
+        assert!(json.contains("unknown event type"));
+    }
+
+    #[tokio::test]
+    async fn subscribe_events_default_is_all() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state_with_event_filters(tmp.path().to_path_buf());
+        let msg = make_command("test-room", "alice", "subscribe_events", vec![]);
+        let result = route_command(msg, "alice", &state).await.unwrap();
+        let CommandResult::HandledWithReply(json) = result else {
+            panic!("expected HandledWithReply");
+        };
+        assert!(json.contains("event filter"));
+        assert!(json.contains("all"));
+    }
+
+    #[tokio::test]
+    async fn subscribe_events_broadcasts_system_message() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state_with_event_filters(tmp.path().to_path_buf());
+        let msg = make_command(
+            "test-room",
+            "alice",
+            "subscribe_events",
+            vec!["task_posted".to_owned()],
+        );
+        route_command(msg, "alice", &state).await.unwrap();
+        let history = std::fs::read_to_string(tmp.path()).unwrap();
+        assert!(history.contains("event filter"));
+        assert!(history.contains("alice"));
+    }
+
+    #[tokio::test]
+    async fn subscribe_events_persists_to_disk() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state_with_event_filters(tmp.path().to_path_buf());
+        let msg = make_command(
+            "test-room",
+            "alice",
+            "subscribe_events",
+            vec!["task_posted".to_owned()],
+        );
+        route_command(msg, "alice", &state).await.unwrap();
+
+        let ef_path = tmp.path().with_extension("event_filters");
+        let loaded = super::load_event_filter_map(&ef_path);
+        assert!(loaded.contains_key("alice"));
+    }
+
+    #[tokio::test]
+    async fn subscribe_events_overwrites_previous() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state_with_event_filters(tmp.path().to_path_buf());
+
+        let msg1 = make_command(
+            "test-room",
+            "alice",
+            "subscribe_events",
+            vec!["task_posted".to_owned()],
+        );
+        route_command(msg1, "alice", &state).await.unwrap();
+
+        let msg2 = make_command(
+            "test-room",
+            "alice",
+            "subscribe_events",
+            vec!["none".to_owned()],
+        );
+        route_command(msg2, "alice", &state).await.unwrap();
+
+        let ef_path = tmp.path().with_extension("event_filters");
+        let loaded = super::load_event_filter_map(&ef_path);
+        assert_eq!(loaded.get("alice"), Some(&room_protocol::EventFilter::None));
+    }
+
+    // ── event filter persistence ─────────────────────────────────────────
+
+    #[test]
+    fn load_event_filter_map_missing_file_returns_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nonexistent.event_filters");
+        let map = super::load_event_filter_map(&path);
+        assert!(map.is_empty());
+    }
+
+    #[test]
+    fn save_and_load_event_filter_map_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.event_filters");
+
+        let mut original = HashMap::new();
+        original.insert("alice".to_owned(), room_protocol::EventFilter::All);
+        original.insert("bob".to_owned(), room_protocol::EventFilter::None);
+        let mut types = std::collections::BTreeSet::new();
+        types.insert(room_protocol::EventType::TaskPosted);
+        original.insert(
+            "carol".to_owned(),
+            room_protocol::EventFilter::Only { types },
+        );
+
+        super::save_event_filter_map(&original, &path).unwrap();
+        let loaded = super::load_event_filter_map(&path);
+        assert_eq!(loaded, original);
+    }
+
+    #[test]
+    fn load_event_filter_map_corrupt_file_returns_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("corrupt.event_filters");
+        std::fs::write(&path, "not json{{{").unwrap();
+        let map = super::load_event_filter_map(&path);
+        assert!(map.is_empty());
     }
 
     // ── plugin broadcast returns HandledWithReply for oneshot echo ─────

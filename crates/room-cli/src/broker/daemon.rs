@@ -181,6 +181,11 @@ impl DaemonConfig {
     pub fn subscription_map_path(&self, room_id: &str) -> PathBuf {
         crate::paths::broker_subscriptions_path(&self.state_dir, room_id)
     }
+
+    /// Resolve the event-filter-map persistence path for a given room.
+    pub fn event_filter_map_path(&self, room_id: &str) -> PathBuf {
+        crate::paths::broker_event_filters_path(&self.state_dir, room_id)
+    }
 }
 
 impl Default for DaemonConfig {
@@ -685,6 +690,11 @@ pub(crate) async fn create_room_entry(
     if let Some(reg) = registry {
         state.set_registry(reg);
     }
+
+    // Attach persisted event filters (parallel to subscription map).
+    let ef_path = daemon_config.event_filter_map_path(room_id);
+    let persisted_ef = super::commands::load_event_filter_map(&ef_path);
+    state.set_event_filter_map(Arc::new(Mutex::new(persisted_ef)), ef_path);
 
     rooms.lock().await.insert(room_id.to_owned(), state);
 

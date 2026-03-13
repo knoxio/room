@@ -14,6 +14,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `Message::Event` variant — carries `event_type`, `content`, and optional `params`
   (structured JSON). Broadcast like any other message; no filtering in this release. (#430)
 - `make_event()` constructor for building typed events. (#430)
+- `EventType::FromStr` impl — parse event type names from strings. (#430)
+- `EventType` `Ord`/`PartialOrd` impls — enables use in `BTreeSet`. (#430)
+- `EventFilter` enum — `All`, `None`, `Only { types }` for per-user event type
+  filtering. Serde, Display, FromStr, Default(All). (#430)
 
 ## [3.0.0-rc.6] - 2026-03-10
 

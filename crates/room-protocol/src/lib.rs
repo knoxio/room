@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::fmt;
 
 use chrono::{DateTime, Utc};
@@ -181,6 +181,124 @@ impl fmt::Display for EventType {
             Self::TaskCancelled => write!(f, "task_cancelled"),
             Self::StatusChanged => write!(f, "status_changed"),
             Self::ReviewRequested => write!(f, "review_requested"),
+        }
+    }
+}
+
+impl std::str::FromStr for EventType {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "task_posted" => Ok(Self::TaskPosted),
+            "task_assigned" => Ok(Self::TaskAssigned),
+            "task_claimed" => Ok(Self::TaskClaimed),
+            "task_planned" => Ok(Self::TaskPlanned),
+            "task_approved" => Ok(Self::TaskApproved),
+            "task_updated" => Ok(Self::TaskUpdated),
+            "task_released" => Ok(Self::TaskReleased),
+            "task_finished" => Ok(Self::TaskFinished),
+            "task_cancelled" => Ok(Self::TaskCancelled),
+            "status_changed" => Ok(Self::StatusChanged),
+            "review_requested" => Ok(Self::ReviewRequested),
+            other => Err(format!(
+                "unknown event type '{other}'; expected one of: task_posted, task_assigned, \
+                 task_claimed, task_planned, task_approved, task_updated, task_released, \
+                 task_finished, task_cancelled, status_changed, review_requested"
+            )),
+        }
+    }
+}
+
+impl Ord for EventType {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.to_string().cmp(&other.to_string())
+    }
+}
+
+impl PartialOrd for EventType {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+/// Filter controlling which event types a user receives during poll.
+///
+/// Used alongside [`SubscriptionTier`] to give fine-grained control over the
+/// event stream. Tier controls message-level filtering (all, mentions, none);
+/// `EventFilter` controls which [`EventType`] values pass through for
+/// [`Message::Event`] messages specifically.
+///
+/// Non-Event messages are never affected by the event filter.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "filter")]
+pub enum EventFilter {
+    /// Receive all event types (the default).
+    #[default]
+    All,
+    /// Receive no events.
+    None,
+    /// Receive only the listed event types.
+    Only {
+        #[serde(default)]
+        types: BTreeSet<EventType>,
+    },
+}
+
+impl fmt::Display for EventFilter {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::All => write!(f, "all"),
+            Self::None => write!(f, "none"),
+            Self::Only { types } => {
+                let names: Vec<String> = types.iter().map(|t| t.to_string()).collect();
+                write!(f, "{}", names.join(","))
+            }
+        }
+    }
+}
+
+impl std::str::FromStr for EventFilter {
+    type Err = String;
+
+    /// Parse an event filter from a string.
+    ///
+    /// Accepted formats:
+    /// - `"all"` → [`EventFilter::All`]
+    /// - `"none"` → [`EventFilter::None`]
+    /// - `"task_posted,task_finished"` → [`EventFilter::Only`] with those types
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "all" => Ok(Self::All),
+            "none" => Ok(Self::None),
+            "" => Ok(Self::All),
+            csv => {
+                let mut types = BTreeSet::new();
+                for part in csv.split(',') {
+                    let trimmed = part.trim();
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+                    let et: EventType = trimmed.parse()?;
+                    types.insert(et);
+                }
+                if types.is_empty() {
+                    Ok(Self::All)
+                } else {
+                    Ok(Self::Only { types })
+                }
+            }
+        }
+    }
+}
+
+impl EventFilter {
+    /// Check whether a given event type passes this filter.
+    pub fn allows(&self, event_type: &EventType) -> bool {
+        match self {
+            Self::All => true,
+            Self::None => false,
+            Self::Only { types } => types.contains(event_type),
         }
     }
 }
@@ -1432,6 +1550,226 @@ mod tests {
         let et = EventType::TaskPosted;
         let copy = et;
         assert_eq!(et, copy);
+    }
+
+    #[test]
+    fn event_type_from_str_all_variants() {
+        let cases = [
+            ("task_posted", EventType::TaskPosted),
+            ("task_assigned", EventType::TaskAssigned),
+            ("task_claimed", EventType::TaskClaimed),
+            ("task_planned", EventType::TaskPlanned),
+            ("task_approved", EventType::TaskApproved),
+            ("task_updated", EventType::TaskUpdated),
+            ("task_released", EventType::TaskReleased),
+            ("task_finished", EventType::TaskFinished),
+            ("task_cancelled", EventType::TaskCancelled),
+            ("status_changed", EventType::StatusChanged),
+            ("review_requested", EventType::ReviewRequested),
+        ];
+        for (s, expected) in cases {
+            assert_eq!(s.parse::<EventType>().unwrap(), expected, "failed for {s}");
+        }
+    }
+
+    #[test]
+    fn event_type_from_str_invalid() {
+        let err = "banana".parse::<EventType>().unwrap_err();
+        assert!(err.contains("unknown event type"));
+        assert!(err.contains("banana"));
+    }
+
+    #[test]
+    fn event_type_display_round_trips_through_from_str() {
+        for et in [
+            EventType::TaskPosted,
+            EventType::TaskAssigned,
+            EventType::TaskClaimed,
+            EventType::TaskPlanned,
+            EventType::TaskApproved,
+            EventType::TaskUpdated,
+            EventType::TaskReleased,
+            EventType::TaskFinished,
+            EventType::TaskCancelled,
+            EventType::StatusChanged,
+            EventType::ReviewRequested,
+        ] {
+            let s = et.to_string();
+            let back: EventType = s.parse().unwrap();
+            assert_eq!(et, back);
+        }
+    }
+
+    #[test]
+    fn event_type_ord_is_deterministic() {
+        let mut v = vec![
+            EventType::ReviewRequested,
+            EventType::TaskPosted,
+            EventType::TaskApproved,
+        ];
+        v.sort();
+        // Sorted alphabetically by string representation
+        assert_eq!(v[0], EventType::ReviewRequested);
+        assert_eq!(v[1], EventType::TaskApproved);
+        assert_eq!(v[2], EventType::TaskPosted);
+    }
+
+    // ── EventFilter tests ───────────────────────────────────────────────────
+
+    #[test]
+    fn event_filter_default_is_all() {
+        assert_eq!(EventFilter::default(), EventFilter::All);
+    }
+
+    #[test]
+    fn event_filter_serde_all() {
+        let f = EventFilter::All;
+        let json = serde_json::to_string(&f).unwrap();
+        let back: EventFilter = serde_json::from_str(&json).unwrap();
+        assert_eq!(f, back);
+        assert!(json.contains("\"all\""));
+    }
+
+    #[test]
+    fn event_filter_serde_none() {
+        let f = EventFilter::None;
+        let json = serde_json::to_string(&f).unwrap();
+        let back: EventFilter = serde_json::from_str(&json).unwrap();
+        assert_eq!(f, back);
+        assert!(json.contains("\"none\""));
+    }
+
+    #[test]
+    fn event_filter_serde_only() {
+        let mut types = BTreeSet::new();
+        types.insert(EventType::TaskPosted);
+        types.insert(EventType::TaskFinished);
+        let f = EventFilter::Only { types };
+        let json = serde_json::to_string(&f).unwrap();
+        let back: EventFilter = serde_json::from_str(&json).unwrap();
+        assert_eq!(f, back);
+        assert!(json.contains("\"only\""));
+        assert!(json.contains("task_posted"));
+        assert!(json.contains("task_finished"));
+    }
+
+    #[test]
+    fn event_filter_display_all() {
+        assert_eq!(EventFilter::All.to_string(), "all");
+    }
+
+    #[test]
+    fn event_filter_display_none() {
+        assert_eq!(EventFilter::None.to_string(), "none");
+    }
+
+    #[test]
+    fn event_filter_display_only() {
+        let mut types = BTreeSet::new();
+        types.insert(EventType::TaskPosted);
+        types.insert(EventType::TaskFinished);
+        let f = EventFilter::Only { types };
+        let display = f.to_string();
+        // BTreeSet is sorted, so order is deterministic
+        assert!(display.contains("task_finished"));
+        assert!(display.contains("task_posted"));
+    }
+
+    #[test]
+    fn event_filter_from_str_all() {
+        assert_eq!("all".parse::<EventFilter>().unwrap(), EventFilter::All);
+    }
+
+    #[test]
+    fn event_filter_from_str_none() {
+        assert_eq!("none".parse::<EventFilter>().unwrap(), EventFilter::None);
+    }
+
+    #[test]
+    fn event_filter_from_str_empty_is_all() {
+        assert_eq!("".parse::<EventFilter>().unwrap(), EventFilter::All);
+    }
+
+    #[test]
+    fn event_filter_from_str_csv() {
+        let f: EventFilter = "task_posted,task_finished".parse().unwrap();
+        let mut expected = BTreeSet::new();
+        expected.insert(EventType::TaskPosted);
+        expected.insert(EventType::TaskFinished);
+        assert_eq!(f, EventFilter::Only { types: expected });
+    }
+
+    #[test]
+    fn event_filter_from_str_csv_with_spaces() {
+        let f: EventFilter = "task_posted , task_finished".parse().unwrap();
+        let mut expected = BTreeSet::new();
+        expected.insert(EventType::TaskPosted);
+        expected.insert(EventType::TaskFinished);
+        assert_eq!(f, EventFilter::Only { types: expected });
+    }
+
+    #[test]
+    fn event_filter_from_str_single() {
+        let f: EventFilter = "task_posted".parse().unwrap();
+        let mut expected = BTreeSet::new();
+        expected.insert(EventType::TaskPosted);
+        assert_eq!(f, EventFilter::Only { types: expected });
+    }
+
+    #[test]
+    fn event_filter_from_str_invalid_type() {
+        let err = "task_posted,banana".parse::<EventFilter>().unwrap_err();
+        assert!(err.contains("unknown event type"));
+        assert!(err.contains("banana"));
+    }
+
+    #[test]
+    fn event_filter_from_str_trailing_comma() {
+        let f: EventFilter = "task_posted,".parse().unwrap();
+        let mut expected = BTreeSet::new();
+        expected.insert(EventType::TaskPosted);
+        assert_eq!(f, EventFilter::Only { types: expected });
+    }
+
+    #[test]
+    fn event_filter_allows_all() {
+        let f = EventFilter::All;
+        assert!(f.allows(&EventType::TaskPosted));
+        assert!(f.allows(&EventType::ReviewRequested));
+    }
+
+    #[test]
+    fn event_filter_allows_none() {
+        let f = EventFilter::None;
+        assert!(!f.allows(&EventType::TaskPosted));
+        assert!(!f.allows(&EventType::ReviewRequested));
+    }
+
+    #[test]
+    fn event_filter_allows_only_matching() {
+        let mut types = BTreeSet::new();
+        types.insert(EventType::TaskPosted);
+        types.insert(EventType::TaskFinished);
+        let f = EventFilter::Only { types };
+        assert!(f.allows(&EventType::TaskPosted));
+        assert!(f.allows(&EventType::TaskFinished));
+        assert!(!f.allows(&EventType::TaskAssigned));
+        assert!(!f.allows(&EventType::ReviewRequested));
+    }
+
+    #[test]
+    fn event_filter_display_round_trips_through_from_str() {
+        let filters = vec![EventFilter::All, EventFilter::None, {
+            let mut types = BTreeSet::new();
+            types.insert(EventType::TaskPosted);
+            types.insert(EventType::TaskFinished);
+            EventFilter::Only { types }
+        }];
+        for f in filters {
+            let s = f.to_string();
+            let back: EventFilter = s.parse().unwrap();
+            assert_eq!(f, back, "round-trip failed for {s}");
+        }
     }
 
     // ── Event message tests ─────────────────────────────────────────────────
