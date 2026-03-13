@@ -667,7 +667,7 @@ pub(crate) async fn create_room_entry(
     let chat_path = daemon_config.chat_path(room_id);
     let subscription_map_path = daemon_config.subscription_map_path(room_id);
 
-    let persisted_subs = super::commands::load_subscription_map(&subscription_map_path);
+    let persisted_subs = super::persistence::load_subscription_map(&subscription_map_path);
     let merged_subs = if let Some(ref cfg) = config {
         let mut initial = build_initial_subscriptions(cfg);
         initial.extend(persisted_subs);
@@ -693,7 +693,7 @@ pub(crate) async fn create_room_entry(
 
     // Attach persisted event filters (parallel to subscription map).
     let ef_path = daemon_config.event_filter_map_path(room_id);
-    let persisted_ef = super::commands::load_event_filter_map(&ef_path);
+    let persisted_ef = super::persistence::load_event_filter_map(&ef_path);
     state.set_event_filter_map(Arc::new(Mutex::new(persisted_ef)), ef_path);
 
     rooms.lock().await.insert(room_id.to_owned(), state);
@@ -1124,7 +1124,7 @@ async fn dispatch_connection(
             )
             .await;
             // Persist auto-subscription from join so it survives broker restart.
-            super::commands::persist_subscriptions(&state).await;
+            super::persistence::persist_subscriptions(&state).await;
             return result;
         }
         ClientHandshake::Session(token) => {

@@ -4,7 +4,7 @@ use room_protocol::SubscriptionTier;
 use tokio::net::UnixStream;
 use tokio::time::{timeout, Duration};
 
-use crate::broker::commands::load_subscription_map;
+use crate::broker::persistence::load_subscription_map;
 
 /// Information about a discovered room with a live broker.
 #[derive(serde::Serialize)]

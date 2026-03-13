@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use room_protocol::{EventFilter, SubscriptionTier};
 
 use crate::{
-    broker::commands::{load_event_filter_map, load_subscription_map},
+    broker::persistence::{load_event_filter_map, load_subscription_map},
     history,
     message::Message,
     paths,

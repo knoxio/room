@@ -19,6 +19,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **refactor:** Extracted persistence functions from `broker/commands.rs` to `broker/persistence.rs`
+  and split `route_command()` into dedicated handler functions. (#557)
+
 - Restructured into a cargo workspace with four crates: `room-protocol` (wire types),
   `room-cli` (broker + TUI + oneshot), `room-ralph` (agent wrapper), `agentroom`
   (deprecation shim). (#197, #198, #199, #204, #205, #206)

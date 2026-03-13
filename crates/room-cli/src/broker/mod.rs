@@ -4,6 +4,7 @@ pub(crate) mod commands;
 pub mod daemon;
 pub(crate) mod fanout;
 pub(crate) mod handshake;
+pub(crate) mod persistence;
 pub(crate) mod service;
 pub(crate) mod state;
 pub(crate) mod ws;
@@ -132,7 +133,7 @@ impl Broker {
                 persisted_tokens.len()
             );
         }
-        let persisted_subs = commands::load_subscription_map(&self.subscription_map_path);
+        let persisted_subs = persistence::load_subscription_map(&self.subscription_map_path);
         if !persisted_subs.is_empty() {
             eprintln!(
                 "[broker] loaded {} persisted subscription(s)",
@@ -160,7 +161,7 @@ impl Broker {
         // Attach event filter map (parallel to subscription map).
         {
             let ef_path = self.subscription_map_path.with_extension("event_filters");
-            let persisted_ef = commands::load_event_filter_map(&ef_path);
+            let persisted_ef = persistence::load_event_filter_map(&ef_path);
             if !persisted_ef.is_empty() {
                 eprintln!(
                     "[broker] loaded {} persisted event filter(s)",
@@ -269,7 +270,7 @@ async fn handle_client(
             )
             .await;
             // Persist auto-subscription from join so it survives broker restart.
-            commands::persist_subscriptions(state).await;
+            persistence::persist_subscriptions(state).await;
             return result;
         }
         ClientHandshake::Session(token) => {
@@ -720,7 +721,7 @@ async fn subscribe_mentioned(msg: &Message, state: &RoomState) -> Vec<String> {
     if !newly_subscribed.is_empty() {
         // Persist the updated subscription map to disk so that
         // `discover_joined_rooms` picks up the new room immediately.
-        commands::persist_subscriptions(state).await;
+        persistence::persist_subscriptions(state).await;
     }
 
     newly_subscribed
@@ -933,7 +934,7 @@ mod tests {
         let msg = make_message("test-room", "bob", "hey @alice");
         subscribe_mentioned(&msg, &state).await;
         // Verify subscriptions were persisted to the .subscriptions file.
-        let loaded = commands::load_subscription_map(&state.subscription_map_path);
+        let loaded = persistence::load_subscription_map(&state.subscription_map_path);
         assert_eq!(loaded.get("alice"), Some(&SubscriptionTier::MentionsOnly));
     }
 
@@ -956,7 +957,7 @@ mod tests {
         assert_eq!(newly, vec!["alice"]);
 
         // Verify subscription is persisted BEFORE any message is in the chat file.
-        let loaded = commands::load_subscription_map(&state.subscription_map_path);
+        let loaded = persistence::load_subscription_map(&state.subscription_map_path);
         assert_eq!(loaded.get("alice"), Some(&SubscriptionTier::MentionsOnly));
         // Chat file should still be empty (broadcast hasn't happened yet).
         let chat_content = std::fs::read_to_string(tmp.path()).unwrap();

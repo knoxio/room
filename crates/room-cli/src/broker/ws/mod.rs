@@ -406,7 +406,7 @@ async fn ws_oneshot_join(
                 .await
                 .insert(username.to_owned(), room_protocol::SubscriptionTier::Full);
             // Persist so the subscription survives broker restart.
-            super::commands::persist_subscriptions(state).await;
+            super::persistence::persist_subscriptions(state).await;
         }
         Err(_) => {
             let err = serde_json::json!({

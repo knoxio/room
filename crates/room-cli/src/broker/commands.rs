@@ -1,5 +1,3 @@
-use std::{collections::HashMap, path::Path};
-
 use room_protocol::{EventFilter, SubscriptionTier};
 
 use crate::{
@@ -14,89 +12,9 @@ use super::{
     admin::{handle_admin_cmd, ADMIN_CMD_NAMES},
     auth::check_join_permission,
     fanout::broadcast_and_persist,
+    persistence::{persist_event_filters, persist_subscriptions},
     state::RoomState,
 };
-
-// ── Subscription persistence ─────────────────────────────────────────────────
-
-/// Write a subscription map to disk as JSON.
-pub(crate) fn save_subscription_map(
-    map: &HashMap<String, SubscriptionTier>,
-    path: &Path,
-) -> Result<(), String> {
-    let json =
-        serde_json::to_string_pretty(map).map_err(|e| format!("serialize subscriptions: {e}"))?;
-    std::fs::write(path, json).map_err(|e| format!("write {}: {e}", path.display()))
-}
-
-/// Load a subscription map from disk. Returns an empty map if the file does
-/// not exist or contains invalid JSON.
-pub(crate) fn load_subscription_map(path: &Path) -> HashMap<String, SubscriptionTier> {
-    let contents = match std::fs::read_to_string(path) {
-        Ok(c) => c,
-        Err(_) => return HashMap::new(),
-    };
-    serde_json::from_str(&contents).unwrap_or_else(|e| {
-        eprintln!(
-            "[broker] corrupt subscription file {}: {e} — starting empty",
-            path.display()
-        );
-        HashMap::new()
-    })
-}
-
-/// Persist the current subscription map to disk (fire-and-forget logging).
-///
-/// Called after every mutation to the in-memory map. Uses synchronous I/O
-/// because the file is tiny (a few KB at most) and consistency matters more
-/// than shaving microseconds.
-pub(crate) async fn persist_subscriptions(state: &RoomState) {
-    let snapshot = state.subscription_snapshot().await;
-    if let Err(e) = save_subscription_map(&snapshot, &state.subscription_map_path) {
-        eprintln!("[broker] subscription persist failed: {e}");
-    }
-}
-
-// ── Event filter persistence ─────────────────────────────────────────────────
-
-/// Write an event filter map to disk as JSON.
-pub(crate) fn save_event_filter_map(
-    map: &HashMap<String, EventFilter>,
-    path: &Path,
-) -> Result<(), String> {
-    let json =
-        serde_json::to_string_pretty(map).map_err(|e| format!("serialize event filters: {e}"))?;
-    std::fs::write(path, json).map_err(|e| format!("write {}: {e}", path.display()))
-}
-
-/// Load an event filter map from disk. Returns an empty map if the file does
-/// not exist or contains invalid JSON.
-pub(crate) fn load_event_filter_map(path: &Path) -> HashMap<String, EventFilter> {
-    let contents = match std::fs::read_to_string(path) {
-        Ok(c) => c,
-        Err(_) => return HashMap::new(),
-    };
-    serde_json::from_str(&contents).unwrap_or_else(|e| {
-        eprintln!(
-            "[broker] corrupt event filter file {}: {e} — starting empty",
-            path.display()
-        );
-        HashMap::new()
-    })
-}
-
-/// Persist the current event filter map to disk (fire-and-forget logging).
-///
-/// Called after every mutation. No-ops if the event filter map has not been
-/// attached to the [`RoomState`].
-pub(crate) async fn persist_event_filters(state: &RoomState) {
-    if let Some(path) = state.event_filter_path() {
-        let snapshot = state.event_filter_snapshot().await;
-        if let Err(e) = save_event_filter_map(&snapshot, path) {
-            eprintln!("[broker] event filter persist failed: {e}");
-        }
-    }
-}
 
 /// The result of routing an inbound command line.
 pub(crate) enum CommandResult {
@@ -119,12 +37,12 @@ pub(crate) enum CommandResult {
 
 /// Route a parsed `Message` for a given `username` against `state`.
 ///
-/// Handles `set_status`, `who`, and all admin commands inline. For any other
-/// message (including regular chat) returns `CommandResult::Passthrough(msg)`
-/// so the caller can broadcast or DM it.
+/// Thin dispatcher that matches on command name and delegates to dedicated
+/// `handle_*` functions. For non-command messages (regular chat, DMs) returns
+/// `CommandResult::Passthrough(msg)` so the caller can broadcast or DM it.
 ///
 /// This is the unified entry point used by both the interactive inbound task
-/// and `handle_oneshot_send` — previously the logic was duplicated in both.
+/// and `handle_oneshot_send`.
 pub(crate) async fn route_command(
     msg: Message,
     username: &str,
@@ -146,170 +64,23 @@ pub(crate) async fn route_command(
             }
         }
 
-        if cmd == "who" {
-            let entries: Vec<String> = state
-                .status_entries()
-                .await
-                .into_iter()
-                .map(|(u, s)| if s.is_empty() { u } else { format!("{u}: {s}") })
-                .collect();
-            let content = if entries.is_empty() {
-                "no users online".to_owned()
-            } else {
-                format!("online — {}", entries.join(", "))
-            };
-            let sys = make_system(&state.room_id, "broker", content);
-            let json = serde_json::to_string(&sys)?;
-            return Ok(CommandResult::Reply(json));
-        }
-
-        // Status command.
-        if cmd == "set_status" {
-            let status = params.join(" ");
-            state.set_status(username, status.clone()).await;
-            let display = if status.is_empty() {
-                format!("{username} cleared their status")
-            } else {
-                format!("{username} set status: {status}")
-            };
-            let sys = make_system(&state.room_id, "broker", display);
-            let seq_msg =
-                broadcast_and_persist(&sys, &state.clients, &state.chat_path, &state.seq_counter)
-                    .await?;
-            let json = serde_json::to_string(&seq_msg)?;
-            return Ok(CommandResult::HandledWithReply(json));
-        }
-
-        // Subscription commands.
-        if cmd == "subscribe" || cmd == "set_subscription" {
-            // Reject subscriptions from users who cannot join this room.
-            // Without this guard, non-participants could subscribe to DM rooms
-            // and read regular messages through the poll path (#491).
-            if let Err(reason) = check_join_permission(username, state.config.as_ref()) {
-                let sys = make_system(&state.room_id, "broker", reason);
-                let json = serde_json::to_string(&sys)?;
-                return Ok(CommandResult::Reply(json));
+        match cmd.as_str() {
+            "who" => return handle_who(state).await,
+            "set_status" => return handle_set_status(params, username, state).await,
+            "subscribe" | "set_subscription" => {
+                return handle_subscribe(params, username, state).await
             }
-            let tier_str = params.first().map(String::as_str).unwrap_or("full");
-            let tier: SubscriptionTier = match tier_str.parse() {
-                Ok(t) => t,
-                Err(e) => {
-                    let sys = make_system(&state.room_id, "broker", e);
-                    let json = serde_json::to_string(&sys)?;
-                    return Ok(CommandResult::Reply(json));
-                }
-            };
-            state.set_subscription(username, tier).await;
-            persist_subscriptions(state).await;
-            let display = format!("{username} subscribed to {} (tier: {tier})", state.room_id);
-            let sys = make_system(&state.room_id, "broker", display);
-            broadcast_and_persist(&sys, &state.clients, &state.chat_path, &state.seq_counter)
-                .await?;
-            let json = serde_json::to_string(&sys)?;
-            return Ok(CommandResult::HandledWithReply(json));
-        }
-
-        if cmd == "unsubscribe" {
-            state
-                .set_subscription(username, SubscriptionTier::Unsubscribed)
-                .await;
-            persist_subscriptions(state).await;
-            let display = format!("{username} unsubscribed from {}", state.room_id);
-            let sys = make_system(&state.room_id, "broker", display);
-            broadcast_and_persist(&sys, &state.clients, &state.chat_path, &state.seq_counter)
-                .await?;
-            let json = serde_json::to_string(&sys)?;
-            return Ok(CommandResult::HandledWithReply(json));
-        }
-
-        if cmd == "subscribe_events" || cmd == "set_event_filter" {
-            // Reject from users who cannot join this room (same guard as subscribe).
-            if let Err(reason) = check_join_permission(username, state.config.as_ref()) {
-                let sys = make_system(&state.room_id, "broker", reason);
-                let json = serde_json::to_string(&sys)?;
-                return Ok(CommandResult::Reply(json));
+            "unsubscribe" => return handle_unsubscribe(username, state).await,
+            "subscribe_events" | "set_event_filter" => {
+                return handle_subscribe_events(params, username, state).await
             }
-            let filter_str = params.first().map(String::as_str).unwrap_or("all");
-            let filter: EventFilter = match filter_str.parse() {
-                Ok(f) => f,
-                Err(e) => {
-                    let sys = make_system(&state.room_id, "broker", e);
-                    let json = serde_json::to_string(&sys)?;
-                    return Ok(CommandResult::Reply(json));
-                }
-            };
-            state.set_event_filter(username, filter.clone()).await;
-            persist_event_filters(state).await;
-            let display = format!(
-                "{username} event filter set to {filter} in {}",
-                state.room_id
-            );
-            let sys = make_system(&state.room_id, "broker", display);
-            broadcast_and_persist(&sys, &state.clients, &state.chat_path, &state.seq_counter)
-                .await?;
-            let json = serde_json::to_string(&sys)?;
-            return Ok(CommandResult::HandledWithReply(json));
-        }
-
-        if cmd == "subscriptions" {
-            let raw = state.subscription_entries().await;
-            let ef_raw = state.event_filter_entries().await;
-            let content = if raw.is_empty() && ef_raw.is_empty() {
-                "no subscriptions".to_owned()
-            } else {
-                let mut parts = Vec::new();
-                if !raw.is_empty() {
-                    let entries: Vec<String> =
-                        raw.into_iter().map(|(u, t)| format!("{u}: {t}")).collect();
-                    parts.push(format!("tiers — {}", entries.join(", ")));
-                }
-                if !ef_raw.is_empty() {
-                    let entries: Vec<String> = ef_raw
-                        .into_iter()
-                        .map(|(u, f)| format!("{u}: {f}"))
-                        .collect();
-                    parts.push(format!("event filters — {}", entries.join(", ")));
-                }
-                parts.join(" | ")
-            };
-            let sys = make_system(&state.room_id, "broker", content);
-            let json = serde_json::to_string(&sys)?;
-            return Ok(CommandResult::Reply(json));
-        }
-
-        // Room/user inspection commands.
-        if cmd == "info" || cmd == "room-info" {
-            let result = handle_info(params, state).await;
-            let sys = make_system(&state.room_id, "broker", result);
-            let json = serde_json::to_string(&sys)?;
-            return Ok(CommandResult::Reply(json));
-        }
-
-        if ADMIN_CMD_NAMES.contains(&cmd.as_str()) {
-            let cmd_line = format!("{cmd} {}", params.join(" "));
-            let error = handle_admin_cmd(&cmd_line, username, state).await;
-            if let Some(err) = error {
-                // Permission denied or invalid args — send error back privately.
-                let sys = make_system(&state.room_id, "broker", err);
-                let json = serde_json::to_string(&sys)?;
-                return Ok(CommandResult::Reply(json));
+            "subscriptions" => return handle_subscriptions(state).await,
+            "info" | "room-info" => return handle_info_cmd(params, state).await,
+            "help" => return handle_help_cmd(params, state),
+            _ if ADMIN_CMD_NAMES.contains(&cmd.as_str()) => {
+                return handle_admin(cmd, params, username, state).await
             }
-            // Admin command succeeded — the command itself may have broadcast a notice.
-            // If it was /exit the shutdown signal was already sent; signal the caller.
-            if cmd == "exit" {
-                return Ok(CommandResult::Shutdown);
-            }
-            return Ok(CommandResult::Handled);
-        }
-
-        // Help command — handled inline because it needs access to both
-        // builtin_command_infos() and the plugin registry, which makes it
-        // infrastructure rather than a user plugin (#509).
-        if cmd == "help" {
-            let reply = handle_help(params, state);
-            let sys = make_system(&state.room_id, "broker", reply);
-            let json = serde_json::to_string(&sys)?;
-            return Ok(CommandResult::Reply(json));
+            _ => {}
         }
 
         // Plugin dispatch — check registry before falling through to Passthrough.
@@ -318,7 +89,6 @@ pub(crate) async fn route_command(
             match dispatch_plugin(plugin, &msg, username, state).await {
                 Ok(result) => return Ok(result),
                 Err(e) => {
-                    // Plugin errors are sent as private replies, never swallowed.
                     let err_msg = format!("plugin:{plugin_name} error: {e}");
                     let sys = make_system(&state.room_id, "broker", err_msg);
                     let json = serde_json::to_string(&sys)?;
@@ -329,6 +99,186 @@ pub(crate) async fn route_command(
     }
 
     Ok(CommandResult::Passthrough(msg))
+}
+
+// ── Command handlers ─────────────────────────────────────────────────────────
+
+/// Handle `/who` — list online users with their statuses.
+async fn handle_who(state: &RoomState) -> anyhow::Result<CommandResult> {
+    let entries: Vec<String> = state
+        .status_entries()
+        .await
+        .into_iter()
+        .map(|(u, s)| if s.is_empty() { u } else { format!("{u}: {s}") })
+        .collect();
+    let content = if entries.is_empty() {
+        "no users online".to_owned()
+    } else {
+        format!("online — {}", entries.join(", "))
+    };
+    let sys = make_system(&state.room_id, "broker", content);
+    let json = serde_json::to_string(&sys)?;
+    Ok(CommandResult::Reply(json))
+}
+
+/// Handle `/set_status [text]` — set or clear the user's status, broadcast the change.
+async fn handle_set_status(
+    params: &[String],
+    username: &str,
+    state: &RoomState,
+) -> anyhow::Result<CommandResult> {
+    let status = params.join(" ");
+    state.set_status(username, status.clone()).await;
+    let display = if status.is_empty() {
+        format!("{username} cleared their status")
+    } else {
+        format!("{username} set status: {status}")
+    };
+    let sys = make_system(&state.room_id, "broker", display);
+    let seq_msg =
+        broadcast_and_persist(&sys, &state.clients, &state.chat_path, &state.seq_counter).await?;
+    let json = serde_json::to_string(&seq_msg)?;
+    Ok(CommandResult::HandledWithReply(json))
+}
+
+/// Handle `/subscribe [tier]` — subscribe to room messages with a tier filter.
+async fn handle_subscribe(
+    params: &[String],
+    username: &str,
+    state: &RoomState,
+) -> anyhow::Result<CommandResult> {
+    // Reject subscriptions from users who cannot join this room.
+    // Without this guard, non-participants could subscribe to DM rooms
+    // and read regular messages through the poll path (#491).
+    if let Err(reason) = check_join_permission(username, state.config.as_ref()) {
+        let sys = make_system(&state.room_id, "broker", reason);
+        let json = serde_json::to_string(&sys)?;
+        return Ok(CommandResult::Reply(json));
+    }
+    let tier_str = params.first().map(String::as_str).unwrap_or("full");
+    let tier: SubscriptionTier = match tier_str.parse() {
+        Ok(t) => t,
+        Err(e) => {
+            let sys = make_system(&state.room_id, "broker", e);
+            let json = serde_json::to_string(&sys)?;
+            return Ok(CommandResult::Reply(json));
+        }
+    };
+    state.set_subscription(username, tier).await;
+    persist_subscriptions(state).await;
+    let display = format!("{username} subscribed to {} (tier: {tier})", state.room_id);
+    let sys = make_system(&state.room_id, "broker", display);
+    broadcast_and_persist(&sys, &state.clients, &state.chat_path, &state.seq_counter).await?;
+    let json = serde_json::to_string(&sys)?;
+    Ok(CommandResult::HandledWithReply(json))
+}
+
+/// Handle `/unsubscribe` — set subscription to Unsubscribed tier.
+async fn handle_unsubscribe(username: &str, state: &RoomState) -> anyhow::Result<CommandResult> {
+    state
+        .set_subscription(username, SubscriptionTier::Unsubscribed)
+        .await;
+    persist_subscriptions(state).await;
+    let display = format!("{username} unsubscribed from {}", state.room_id);
+    let sys = make_system(&state.room_id, "broker", display);
+    broadcast_and_persist(&sys, &state.clients, &state.chat_path, &state.seq_counter).await?;
+    let json = serde_json::to_string(&sys)?;
+    Ok(CommandResult::HandledWithReply(json))
+}
+
+/// Handle `/subscribe_events [filter]` — set event filter for the user.
+async fn handle_subscribe_events(
+    params: &[String],
+    username: &str,
+    state: &RoomState,
+) -> anyhow::Result<CommandResult> {
+    // Reject from users who cannot join this room (same guard as subscribe).
+    if let Err(reason) = check_join_permission(username, state.config.as_ref()) {
+        let sys = make_system(&state.room_id, "broker", reason);
+        let json = serde_json::to_string(&sys)?;
+        return Ok(CommandResult::Reply(json));
+    }
+    let filter_str = params.first().map(String::as_str).unwrap_or("all");
+    let filter: EventFilter = match filter_str.parse() {
+        Ok(f) => f,
+        Err(e) => {
+            let sys = make_system(&state.room_id, "broker", e);
+            let json = serde_json::to_string(&sys)?;
+            return Ok(CommandResult::Reply(json));
+        }
+    };
+    state.set_event_filter(username, filter.clone()).await;
+    persist_event_filters(state).await;
+    let display = format!(
+        "{username} event filter set to {filter} in {}",
+        state.room_id
+    );
+    let sys = make_system(&state.room_id, "broker", display);
+    broadcast_and_persist(&sys, &state.clients, &state.chat_path, &state.seq_counter).await?;
+    let json = serde_json::to_string(&sys)?;
+    Ok(CommandResult::HandledWithReply(json))
+}
+
+/// Handle `/subscriptions` — list all subscription tiers and event filters.
+async fn handle_subscriptions(state: &RoomState) -> anyhow::Result<CommandResult> {
+    let raw = state.subscription_entries().await;
+    let ef_raw = state.event_filter_entries().await;
+    let content = if raw.is_empty() && ef_raw.is_empty() {
+        "no subscriptions".to_owned()
+    } else {
+        let mut parts = Vec::new();
+        if !raw.is_empty() {
+            let entries: Vec<String> = raw.into_iter().map(|(u, t)| format!("{u}: {t}")).collect();
+            parts.push(format!("tiers — {}", entries.join(", ")));
+        }
+        if !ef_raw.is_empty() {
+            let entries: Vec<String> = ef_raw
+                .into_iter()
+                .map(|(u, f)| format!("{u}: {f}"))
+                .collect();
+            parts.push(format!("event filters — {}", entries.join(", ")));
+        }
+        parts.join(" | ")
+    };
+    let sys = make_system(&state.room_id, "broker", content);
+    let json = serde_json::to_string(&sys)?;
+    Ok(CommandResult::Reply(json))
+}
+
+/// Handle `/info [username]` — dispatch to room info or user info.
+async fn handle_info_cmd(params: &[String], state: &RoomState) -> anyhow::Result<CommandResult> {
+    let result = handle_info(params, state).await;
+    let sys = make_system(&state.room_id, "broker", result);
+    let json = serde_json::to_string(&sys)?;
+    Ok(CommandResult::Reply(json))
+}
+
+/// Handle `/help [command]` — list commands or show detail for one.
+fn handle_help_cmd(params: &[String], state: &RoomState) -> anyhow::Result<CommandResult> {
+    let reply = handle_help(params, state);
+    let sys = make_system(&state.room_id, "broker", reply);
+    let json = serde_json::to_string(&sys)?;
+    Ok(CommandResult::Reply(json))
+}
+
+/// Handle admin commands (`/kick`, `/reauth`, `/clear-tokens`, `/exit`, `/clear`).
+async fn handle_admin(
+    cmd: &str,
+    params: &[String],
+    username: &str,
+    state: &RoomState,
+) -> anyhow::Result<CommandResult> {
+    let cmd_line = format!("{cmd} {}", params.join(" "));
+    let error = handle_admin_cmd(&cmd_line, username, state).await;
+    if let Some(err) = error {
+        let sys = make_system(&state.room_id, "broker", err);
+        let json = serde_json::to_string(&sys)?;
+        return Ok(CommandResult::Reply(json));
+    }
+    if cmd == "exit" {
+        return Ok(CommandResult::Shutdown);
+    }
+    Ok(CommandResult::Handled)
 }
 
 /// Validate `params` against a command's [`CommandInfo`] schema.
@@ -619,7 +569,13 @@ fn format_command_help(cmd: &CommandInfo) -> String {
 mod tests {
     use super::{handle_info, handle_room_info, handle_user_info, route_command, CommandResult};
     use crate::{
-        broker::state::RoomState,
+        broker::{
+            persistence::{
+                load_event_filter_map, load_subscription_map, save_event_filter_map,
+                save_subscription_map,
+            },
+            state::RoomState,
+        },
         message::{make_command, make_dm, make_message},
     };
     use room_protocol::SubscriptionTier;
@@ -1605,7 +1561,7 @@ mod tests {
     fn load_subscription_map_missing_file_returns_empty() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nonexistent.subscriptions");
-        let map = super::load_subscription_map(&path);
+        let map = load_subscription_map(&path);
         assert!(map.is_empty());
     }
 
@@ -1619,8 +1575,8 @@ mod tests {
         original.insert("bob".to_owned(), SubscriptionTier::MentionsOnly);
         original.insert("carol".to_owned(), SubscriptionTier::Unsubscribed);
 
-        super::save_subscription_map(&original, &path).unwrap();
-        let loaded = super::load_subscription_map(&path);
+        save_subscription_map(&original, &path).unwrap();
+        let loaded = load_subscription_map(&path);
         assert_eq!(loaded, original);
     }
 
@@ -1629,7 +1585,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("corrupt.subscriptions");
         std::fs::write(&path, "not json{{{").unwrap();
-        let map = super::load_subscription_map(&path);
+        let map = load_subscription_map(&path);
         assert!(map.is_empty());
     }
 
@@ -1640,7 +1596,7 @@ mod tests {
         let msg = make_command("test-room", "alice", "subscribe", vec![]);
         route_command(msg, "alice", &state).await.unwrap();
 
-        let loaded = super::load_subscription_map(&state.subscription_map_path);
+        let loaded = load_subscription_map(&state.subscription_map_path);
         assert_eq!(loaded.get("alice"), Some(&SubscriptionTier::Full));
     }
 
@@ -1655,7 +1611,7 @@ mod tests {
         let msg = make_command("test-room", "alice", "unsubscribe", vec![]);
         route_command(msg, "alice", &state).await.unwrap();
 
-        let loaded = super::load_subscription_map(&state.subscription_map_path);
+        let loaded = load_subscription_map(&state.subscription_map_path);
         assert_eq!(loaded.get("alice"), Some(&SubscriptionTier::Unsubscribed));
     }
 
@@ -1674,7 +1630,7 @@ mod tests {
         );
         route_command(msg, "bob", &state).await.unwrap();
 
-        let loaded = super::load_subscription_map(&state.subscription_map_path);
+        let loaded = load_subscription_map(&state.subscription_map_path);
         assert_eq!(loaded.len(), 2);
         assert_eq!(loaded.get("alice"), Some(&SubscriptionTier::Full));
         assert_eq!(loaded.get("bob"), Some(&SubscriptionTier::MentionsOnly));
@@ -1689,7 +1645,7 @@ mod tests {
         route_command(msg, "alice", &state).await.unwrap();
 
         // Simulate restart: new state, load from disk.
-        let loaded = super::load_subscription_map(&state.subscription_map_path);
+        let loaded = load_subscription_map(&state.subscription_map_path);
         assert_eq!(loaded.get("alice"), Some(&SubscriptionTier::Full));
 
         // Verify it can be populated into a new RoomState.
@@ -1724,7 +1680,7 @@ mod tests {
         );
         route_command(msg, "alice", &state).await.unwrap();
 
-        let loaded = super::load_subscription_map(&state.subscription_map_path);
+        let loaded = load_subscription_map(&state.subscription_map_path);
         assert_eq!(loaded.get("alice"), Some(&SubscriptionTier::MentionsOnly));
     }
 
@@ -1851,7 +1807,7 @@ mod tests {
         route_command(msg, "alice", &state).await.unwrap();
 
         let ef_path = tmp.path().with_extension("event_filters");
-        let loaded = super::load_event_filter_map(&ef_path);
+        let loaded = load_event_filter_map(&ef_path);
         assert!(loaded.contains_key("alice"));
     }
 
@@ -1877,7 +1833,7 @@ mod tests {
         route_command(msg2, "alice", &state).await.unwrap();
 
         let ef_path = tmp.path().with_extension("event_filters");
-        let loaded = super::load_event_filter_map(&ef_path);
+        let loaded = load_event_filter_map(&ef_path);
         assert_eq!(loaded.get("alice"), Some(&room_protocol::EventFilter::None));
     }
 
@@ -1887,7 +1843,7 @@ mod tests {
     fn load_event_filter_map_missing_file_returns_empty() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nonexistent.event_filters");
-        let map = super::load_event_filter_map(&path);
+        let map = load_event_filter_map(&path);
         assert!(map.is_empty());
     }
 
@@ -1906,8 +1862,8 @@ mod tests {
             room_protocol::EventFilter::Only { types },
         );
 
-        super::save_event_filter_map(&original, &path).unwrap();
-        let loaded = super::load_event_filter_map(&path);
+        save_event_filter_map(&original, &path).unwrap();
+        let loaded = load_event_filter_map(&path);
         assert_eq!(loaded, original);
     }
 
@@ -1916,7 +1872,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("corrupt.event_filters");
         std::fs::write(&path, "not json{{{").unwrap();
-        let map = super::load_event_filter_map(&path);
+        let map = load_event_filter_map(&path);
         assert!(map.is_empty());
     }
 
