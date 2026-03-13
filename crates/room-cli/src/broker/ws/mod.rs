@@ -18,7 +18,7 @@ use tokio::sync::{broadcast, Mutex};
 
 use crate::{
     history,
-    message::{make_join, make_leave, parse_client_line, Message},
+    message::{make_join, make_leave, make_system, parse_client_line, Message},
 };
 
 use super::{
@@ -436,7 +436,12 @@ async fn ws_oneshot_send(
     }
     let msg = parse_client_line(trimmed, &state.room_id, &username)?;
     match route_command(msg, &username, state).await? {
-        CommandResult::Handled | CommandResult::Shutdown => {}
+        CommandResult::Handled | CommandResult::Shutdown => {
+            // Always send a response so oneshot clients don't get EOF.
+            let ack = make_system(&state.room_id, "broker", "ok");
+            let json = serde_json::to_string(&ack)?;
+            let _ = ws_tx.send(WsMessage::Text(json.into())).await;
+        }
         CommandResult::HandledWithReply(json) | CommandResult::Reply(json) => {
             let _ = ws_tx.send(WsMessage::Text(json.into())).await;
         }

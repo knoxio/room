@@ -165,8 +165,9 @@ impl TaskboardPlugin {
                 None => "-".to_owned(),
             };
             let assignee = lt.task.assigned_to.as_deref().unwrap_or("-").to_owned();
-            let desc = if lt.task.description.len() > 40 {
-                format!("{}...", &lt.task.description[..37])
+            let desc = if lt.task.description.chars().count() > 40 {
+                let truncated: String = lt.task.description.chars().take(37).collect();
+                format!("{truncated}...")
             } else {
                 lt.task.description.clone()
             };
