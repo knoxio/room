@@ -20,6 +20,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **tui:** Show partial messages at viewport bottom when scrolling — previously the entire
   message disappeared when its bottom line scrolled off screen. (#644)
 
+### Changed
+
+- **plugin:** Extracted taskboard plugin into its own workspace crate `room-plugin-taskboard`.
+  Zero coupling to broker internals — depends only on `room-protocol`. All existing import
+  paths preserved via re-export. (#454)
+
 ### Added
 
 - **broker:** Cross-room command routing via `--room <id>` flag. Plugin commands in daemon
