@@ -12,6 +12,11 @@ For changes prior to the workspace restructure (v0.1.2 through v1.0.2), see the
 
 ### Added
 
+- Team-restricted task claims: `/taskboard post --team <name>` creates team-restricted tasks.
+  Only team members can `/taskboard claim` or be `/taskboard assign`-ed to restricted tasks.
+  `TeamAccess` trait in `room-protocol`, `TeamChecker` concrete impl in `room-daemon/plugin/bridge.rs`.
+  `Task` struct gains `team: Option<String>` (backward-compatible NDJSON via `#[serde(default)]`).
+  18 new unit tests. (#516)
 - Cross-room command routing via `--room <id>` flag in `dispatch_plugin`. `CrossRoomResolver`
   trait in `broker/service.rs`, `DaemonRoomResolver` in `broker/daemon/mod.rs`. 13 unit tests
   and 4 daemon integration tests. (#517)

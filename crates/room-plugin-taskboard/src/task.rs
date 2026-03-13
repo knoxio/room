@@ -44,6 +44,10 @@ pub struct Task {
     pub approved_at: Option<DateTime<Utc>>,
     pub updated_at: Option<DateTime<Utc>>,
     pub notes: Option<String>,
+    /// Optional team restriction — only members of this team can claim or be
+    /// assigned to the task. `None` means unrestricted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub team: Option<String>,
 }
 
 /// In-memory task with a lease timestamp for TTL tracking.
@@ -155,6 +159,7 @@ mod tests {
             approved_at: None,
             updated_at: None,
             notes: None,
+            team: None,
         }
     }
 

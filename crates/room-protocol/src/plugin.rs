@@ -171,6 +171,11 @@ pub struct CommandContext {
     /// All registered commands (so `/help` can list them without
     /// holding a reference to the registry).
     pub available_commands: Vec<CommandInfo>,
+    /// Optional access to daemon-level team membership.
+    ///
+    /// `Some` in daemon mode (backed by `UserRegistry`), `None` in standalone
+    /// mode where teams are not available.
+    pub team_access: Option<Box<dyn TeamAccess>>,
 }
 
 // ── PluginResult ────────────────────────────────────────────────────────────
@@ -226,6 +231,22 @@ pub trait HistoryAccess: Send + Sync {
 
     /// Count total messages in the chat.
     fn count(&self) -> BoxFuture<'_, anyhow::Result<usize>>;
+}
+
+// ── TeamAccess trait ────────────────────────────────────────────────────────
+
+/// Read-only access to daemon-level team membership.
+///
+/// Plugins use this trait to check whether a user belongs to a team without
+/// depending on `room-daemon` or `UserRegistry` directly. The broker provides
+/// a concrete implementation backed by the registry; standalone mode passes
+/// `None` (no team checking available).
+pub trait TeamAccess: Send + Sync {
+    /// Returns `true` if the named team exists in the registry.
+    fn team_exists(&self, team: &str) -> bool;
+
+    /// Returns `true` if `user` is a member of `team`.
+    fn is_member(&self, team: &str, user: &str) -> bool;
 }
 
 // ── RoomMetadata ────────────────────────────────────────────────────────────

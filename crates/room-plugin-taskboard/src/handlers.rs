@@ -1,10 +1,49 @@
 use super::*;
 
+/// Parse an optional `--team <name>` flag from a slice of arguments.
+///
+/// Returns `(Some(team_name), remaining_args)` if found, or `(None, all_args)` otherwise.
+fn parse_team_flag(args: &[String]) -> (Option<String>, Vec<String>) {
+    let mut team = None;
+    let mut rest = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == "--team" {
+            if let Some(name) = args.get(i + 1) {
+                team = Some(name.clone());
+                i += 2;
+                continue;
+            }
+        }
+        rest.push(args[i].clone());
+        i += 1;
+    }
+    (team, rest)
+}
+
 impl TaskboardPlugin {
     pub(super) fn handle_post(&self, ctx: &CommandContext) -> (String, bool) {
-        let description = ctx.params[1..].join(" ");
+        // Parse optional --team flag from params[1..].
+        let raw_args = &ctx.params[1..];
+        let (team, desc_parts) = parse_team_flag(raw_args);
+        let description = desc_parts.join(" ");
         if description.is_empty() {
-            return ("usage: /taskboard post <description>".to_owned(), false);
+            return (
+                "usage: /taskboard post [--team <name>] <description>".to_owned(),
+                false,
+            );
+        }
+        // Validate team exists if specified.
+        if let Some(ref team_name) = team {
+            match ctx.team_access.as_ref() {
+                Some(ta) if !ta.team_exists(team_name) => {
+                    return (format!("team '{team_name}' does not exist"), false);
+                }
+                Some(_) => {}
+                None => {
+                    return ("team restrictions require daemon mode".to_owned(), false);
+                }
+            }
         }
         let mut board = self.board.lock().unwrap();
         let tasks: Vec<Task> = board.iter().map(|lt| lt.task.clone()).collect();
@@ -22,11 +61,16 @@ impl TaskboardPlugin {
             approved_at: None,
             updated_at: None,
             notes: None,
+            team: team.clone(),
         };
         board.push(LiveTask::new(task.clone()));
         let all_tasks: Vec<Task> = board.iter().map(|lt| lt.task.clone()).collect();
         let _ = task::save_tasks(&self.storage_path, &all_tasks);
-        (format!("task {id} posted: {description}"), true)
+        let team_suffix = team.map(|t| format!(" [team: {t}]")).unwrap_or_default();
+        (
+            format!("task {id} posted: {description}{team_suffix}"),
+            true,
+        )
     }
 
     pub(super) fn handle_list(&self) -> String {
@@ -39,10 +83,19 @@ impl TaskboardPlugin {
         if !expired.is_empty() {
             lines.push(format!("expired: {}", expired.join(", ")));
         }
-        lines.push(format!(
-            "{:<8} {:<10} {:<12} {:<12} {}",
-            "ID", "STATUS", "ASSIGNEE", "ELAPSED", "DESCRIPTION"
-        ));
+        // Show TEAM column only if any task has a team restriction.
+        let has_teams = board.iter().any(|lt| lt.task.team.is_some());
+        if has_teams {
+            lines.push(format!(
+                "{:<8} {:<10} {:<12} {:<10} {:<12} {}",
+                "ID", "STATUS", "ASSIGNEE", "TEAM", "ELAPSED", "DESCRIPTION"
+            ));
+        } else {
+            lines.push(format!(
+                "{:<8} {:<10} {:<12} {:<12} {}",
+                "ID", "STATUS", "ASSIGNEE", "ELAPSED", "DESCRIPTION"
+            ));
+        }
         for lt in board.iter() {
             let elapsed = match lt.lease_start {
                 Some(start) => {
@@ -62,10 +115,18 @@ impl TaskboardPlugin {
             } else {
                 lt.task.description.clone()
             };
-            lines.push(format!(
-                "{:<8} {:<10} {:<12} {:<12} {}",
-                lt.task.id, lt.task.status, assignee, elapsed, desc
-            ));
+            if has_teams {
+                let team = lt.task.team.as_deref().unwrap_or("-").to_owned();
+                lines.push(format!(
+                    "{:<8} {:<10} {:<12} {:<10} {:<12} {}",
+                    lt.task.id, lt.task.status, assignee, team, elapsed, desc
+                ));
+            } else {
+                lines.push(format!(
+                    "{:<8} {:<10} {:<12} {:<12} {}",
+                    lt.task.id, lt.task.status, assignee, elapsed, desc
+                ));
+            }
         }
         lines.join("\n")
     }
@@ -89,6 +150,28 @@ impl TaskboardPlugin {
                 ),
                 false,
             );
+        }
+        // Team restriction: if the task has a team, the claimer must be a member.
+        if let Some(ref team_name) = lt.task.team {
+            match ctx.team_access.as_ref() {
+                Some(ta) if !ta.is_member(team_name, &ctx.sender) => {
+                    return (
+                        format!(
+                            "task {task_id} is restricted to team '{team_name}' — you are not a member"
+                        ),
+                        false,
+                    );
+                }
+                None => {
+                    return (
+                        format!(
+                            "task {task_id} has team restriction but team access is unavailable (standalone mode)"
+                        ),
+                        false,
+                    );
+                }
+                _ => {}
+            }
         }
         lt.task.status = TaskStatus::Claimed;
         lt.task.assigned_to = Some(ctx.sender.clone());
@@ -338,6 +421,26 @@ impl TaskboardPlugin {
         if !is_poster && !is_host {
             return ("only the task poster or host can assign".to_owned(), false);
         }
+        // Team restriction: if the task has a team, the target user must be a member.
+        if let Some(ref team_name) = lt.task.team {
+            match ctx.team_access.as_ref() {
+                Some(ta) if !ta.is_member(team_name, target_user) => {
+                    return (
+                        format!("cannot assign {target_user} — not a member of team '{team_name}'"),
+                        false,
+                    );
+                }
+                None => {
+                    return (
+                        format!(
+                            "task {task_id} has team restriction but team access is unavailable (standalone mode)"
+                        ),
+                        false,
+                    );
+                }
+                _ => {}
+            }
+        }
         lt.task.status = TaskStatus::Claimed;
         lt.task.assigned_to = Some(target_user.clone());
         lt.task.claimed_at = Some(chrono::Utc::now());
@@ -366,6 +469,7 @@ impl TaskboardPlugin {
         let plan = t.plan.as_deref().unwrap_or("-");
         let approved_by = t.approved_by.as_deref().unwrap_or("-");
         let notes = t.notes.as_deref().unwrap_or("-");
+        let team = t.team.as_deref().unwrap_or("-");
         let elapsed = match lt.lease_start {
             Some(start) => {
                 let secs = start.elapsed().as_secs();
@@ -378,8 +482,8 @@ impl TaskboardPlugin {
             None => "-".to_owned(),
         };
         format!(
-            "task {}\n  status:      {}\n  description: {}\n  posted by:   {}\n  assigned to: {}\n  plan:        {}\n  approved by: {}\n  notes:       {}\n  lease:       {}",
-            t.id, t.status, t.description, t.posted_by, assignee, plan, approved_by, notes, elapsed
+            "task {}\n  status:      {}\n  description: {}\n  posted by:   {}\n  assigned to: {}\n  team:        {}\n  plan:        {}\n  approved by: {}\n  notes:       {}\n  lease:       {}",
+            t.id, t.status, t.description, t.posted_by, assignee, team, plan, approved_by, notes, elapsed
         )
     }
 
@@ -999,6 +1103,260 @@ mod tests {
         );
     }
 
+    // -- Team restriction tests -------------------------------------------------
+
+    use std::collections::{HashMap, HashSet};
+
+    /// Mock team access for unit tests.
+    struct MockTeamAccess {
+        teams: HashMap<String, HashSet<String>>,
+    }
+
+    impl MockTeamAccess {
+        fn new(teams: Vec<(&str, Vec<&str>)>) -> Self {
+            let mut map = HashMap::new();
+            for (name, members) in teams {
+                map.insert(
+                    name.to_owned(),
+                    members.into_iter().map(|m| m.to_owned()).collect(),
+                );
+            }
+            Self { teams: map }
+        }
+    }
+
+    impl room_protocol::plugin::TeamAccess for MockTeamAccess {
+        fn team_exists(&self, team: &str) -> bool {
+            self.teams.contains_key(team)
+        }
+        fn is_member(&self, team: &str, user: &str) -> bool {
+            self.teams
+                .get(team)
+                .map(|m| m.contains(user))
+                .unwrap_or(false)
+        }
+    }
+
+    fn mock_team_access(
+        teams: Vec<(&str, Vec<&str>)>,
+    ) -> Option<Box<dyn room_protocol::plugin::TeamAccess>> {
+        Some(Box::new(MockTeamAccess::new(teams)))
+    }
+
+    #[test]
+    fn handle_post_with_team_flag() {
+        let (plugin, _tmp) = make_plugin();
+        let ta = mock_team_access(vec![("backend", vec!["alice", "bob"])]);
+        let ctx = test_ctx_with_team_access("alice", &["post", "--team", "backend", "fix api"], ta);
+        let (result, broadcast) = plugin.handle_post(&ctx);
+        assert!(result.contains("tb-001"));
+        assert!(result.contains("[team: backend]"));
+        assert!(broadcast);
+        let board = plugin.board.lock().unwrap();
+        assert_eq!(board[0].task.team.as_deref(), Some("backend"));
+    }
+
+    #[test]
+    fn handle_post_team_not_found() {
+        let (plugin, _tmp) = make_plugin();
+        let ta = mock_team_access(vec![("backend", vec!["alice"])]);
+        let ctx = test_ctx_with_team_access("alice", &["post", "--team", "nope", "task"], ta);
+        let (result, broadcast) = plugin.handle_post(&ctx);
+        assert!(result.contains("does not exist"));
+        assert!(!broadcast);
+    }
+
+    #[test]
+    fn handle_post_team_requires_daemon_mode() {
+        let (plugin, _tmp) = make_plugin();
+        // No team_access (standalone mode).
+        let ctx = test_ctx("alice", &["post", "--team", "backend", "task"]);
+        let (result, broadcast) = plugin.handle_post(&ctx);
+        assert!(result.contains("daemon mode"));
+        assert!(!broadcast);
+    }
+
+    #[test]
+    fn handle_claim_team_member_allowed() {
+        let (plugin, _tmp) = make_plugin();
+        // Post with team restriction.
+        let ta = mock_team_access(vec![("backend", vec!["alice", "bob"])]);
+        let ctx = test_ctx_with_team_access("alice", &["post", "--team", "backend", "fix api"], ta);
+        plugin.handle_post(&ctx);
+        // bob is a member — claim should succeed.
+        let ta2 = mock_team_access(vec![("backend", vec!["alice", "bob"])]);
+        let ctx2 = test_ctx_with_team_access("bob", &["claim", "tb-001"], ta2);
+        let (result, broadcast) = plugin.handle_claim(&ctx2);
+        assert!(result.contains("claimed by bob"));
+        assert!(broadcast);
+    }
+
+    #[test]
+    fn handle_claim_team_non_member_rejected() {
+        let (plugin, _tmp) = make_plugin();
+        let ta = mock_team_access(vec![("backend", vec!["alice"])]);
+        let ctx = test_ctx_with_team_access("alice", &["post", "--team", "backend", "fix api"], ta);
+        plugin.handle_post(&ctx);
+        // charlie is NOT a member — claim should fail.
+        let ta2 = mock_team_access(vec![("backend", vec!["alice"])]);
+        let ctx2 = test_ctx_with_team_access("charlie", &["claim", "tb-001"], ta2);
+        let (result, broadcast) = plugin.handle_claim(&ctx2);
+        assert!(result.contains("restricted to team 'backend'"));
+        assert!(result.contains("not a member"));
+        assert!(!broadcast);
+    }
+
+    #[test]
+    fn handle_claim_team_no_team_access_fails() {
+        let (plugin, _tmp) = make_plugin();
+        // Post with team restriction (need team_access for post).
+        let ta = mock_team_access(vec![("backend", vec!["alice"])]);
+        let ctx = test_ctx_with_team_access("alice", &["post", "--team", "backend", "fix api"], ta);
+        plugin.handle_post(&ctx);
+        // Try to claim without team_access (standalone mode).
+        let ctx2 = test_ctx("alice", &["claim", "tb-001"]);
+        let (result, broadcast) = plugin.handle_claim(&ctx2);
+        assert!(result.contains("team access is unavailable"));
+        assert!(!broadcast);
+    }
+
+    #[test]
+    fn handle_assign_team_member_allowed() {
+        let (plugin, _tmp) = make_plugin();
+        let ta = mock_team_access(vec![("backend", vec!["alice", "bob"])]);
+        let ctx = test_ctx_with_team_access("alice", &["post", "--team", "backend", "fix api"], ta);
+        plugin.handle_post(&ctx);
+        // alice (poster) assigns bob (member) — should succeed.
+        let ta2 = mock_team_access(vec![("backend", vec!["alice", "bob"])]);
+        let ctx2 = test_ctx_with_team_access("alice", &["assign", "tb-001", "bob"], ta2);
+        let (result, broadcast) = plugin.handle_assign(&ctx2);
+        assert!(result.contains("assigned to bob"));
+        assert!(broadcast);
+    }
+
+    #[test]
+    fn handle_assign_team_non_member_rejected() {
+        let (plugin, _tmp) = make_plugin();
+        let ta = mock_team_access(vec![("backend", vec!["alice"])]);
+        let ctx = test_ctx_with_team_access("alice", &["post", "--team", "backend", "fix api"], ta);
+        plugin.handle_post(&ctx);
+        // alice (poster) tries to assign charlie (not a member).
+        let ta2 = mock_team_access(vec![("backend", vec!["alice"])]);
+        let ctx2 = test_ctx_with_team_access("alice", &["assign", "tb-001", "charlie"], ta2);
+        let (result, broadcast) = plugin.handle_assign(&ctx2);
+        assert!(result.contains("not a member of team 'backend'"));
+        assert!(!broadcast);
+    }
+
+    #[test]
+    fn handle_claim_no_team_unrestricted() {
+        let (plugin, _tmp) = make_plugin();
+        // Post WITHOUT team — anyone can claim, even without team_access.
+        plugin.handle_post(&test_ctx("ba", &["post", "open task"]));
+        let (result, broadcast) = plugin.handle_claim(&test_ctx("random", &["claim", "tb-001"]));
+        assert!(result.contains("claimed by random"));
+        assert!(broadcast);
+    }
+
+    #[test]
+    fn handle_show_displays_team() {
+        let (plugin, _tmp) = make_plugin();
+        let ta = mock_team_access(vec![("backend", vec!["alice"])]);
+        let ctx = test_ctx_with_team_access("alice", &["post", "--team", "backend", "fix api"], ta);
+        plugin.handle_post(&ctx);
+        let result = plugin.handle_show(&test_ctx("anyone", &["show", "tb-001"]));
+        assert!(result.contains("team:        backend"));
+    }
+
+    #[test]
+    fn handle_list_shows_team_column_when_tasks_have_teams() {
+        let (plugin, _tmp) = make_plugin();
+        let ta = mock_team_access(vec![("backend", vec!["alice"])]);
+        let ctx = test_ctx_with_team_access("alice", &["post", "--team", "backend", "fix api"], ta);
+        plugin.handle_post(&ctx);
+        plugin.handle_post(&test_ctx("ba", &["post", "open task"]));
+        let result = plugin.handle_list();
+        assert!(result.contains("TEAM"));
+        assert!(result.contains("backend"));
+    }
+
+    #[test]
+    fn handle_list_no_team_column_when_no_teams() {
+        let (plugin, _tmp) = make_plugin();
+        plugin.handle_post(&test_ctx("ba", &["post", "open task"]));
+        let result = plugin.handle_list();
+        assert!(!result.contains("TEAM"));
+    }
+
+    #[test]
+    fn parse_team_flag_extracts_team() {
+        let args: Vec<String> = vec!["--team", "backend", "fix", "api"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        let (team, rest) = parse_team_flag(&args);
+        assert_eq!(team.as_deref(), Some("backend"));
+        assert_eq!(rest, vec!["fix", "api"]);
+    }
+
+    #[test]
+    fn parse_team_flag_no_flag() {
+        let args: Vec<String> = vec!["fix", "the", "bug"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        let (team, rest) = parse_team_flag(&args);
+        assert!(team.is_none());
+        assert_eq!(rest, vec!["fix", "the", "bug"]);
+    }
+
+    #[test]
+    fn parse_team_flag_at_end_no_value() {
+        let args: Vec<String> = vec!["fix", "--team"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        let (team, rest) = parse_team_flag(&args);
+        assert!(team.is_none());
+        assert_eq!(rest, vec!["fix", "--team"]);
+    }
+
+    #[test]
+    fn team_field_serde_backward_compatible() {
+        // Task JSON without "team" field should deserialize with team = None.
+        let json = r#"{"id":"tb-001","description":"test","status":"open","posted_by":"alice","assigned_to":null,"posted_at":"2026-03-13T00:00:00Z","claimed_at":null,"plan":null,"approved_by":null,"approved_at":null,"updated_at":null,"notes":null}"#;
+        let task: Task = serde_json::from_str(json).unwrap();
+        assert!(task.team.is_none());
+    }
+
+    #[test]
+    fn team_field_serde_round_trip() {
+        let mut task = Task {
+            id: "tb-001".to_owned(),
+            description: "test".to_owned(),
+            status: TaskStatus::Open,
+            posted_by: "alice".to_owned(),
+            assigned_to: None,
+            posted_at: chrono::Utc::now(),
+            claimed_at: None,
+            plan: None,
+            approved_by: None,
+            approved_at: None,
+            updated_at: None,
+            notes: None,
+            team: Some("backend".to_owned()),
+        };
+        let json = serde_json::to_string(&task).unwrap();
+        assert!(json.contains("\"team\":\"backend\""));
+        let parsed: Task = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.team.as_deref(), Some("backend"));
+
+        // None team should not appear in JSON (skip_serializing_if).
+        task.team = None;
+        let json2 = serde_json::to_string(&task).unwrap();
+        assert!(!json2.contains("team"));
+    }
+
     // -- Test helpers -----------------------------------------------------------
 
     /// No-op MessageWriter for unit tests — taskboard handler tests never
@@ -1049,6 +1407,23 @@ mod tests {
     }
 
     fn test_ctx_with_host(sender: &str, params: &[&str], host: Option<&str>) -> CommandContext {
+        test_ctx_full(sender, params, host, None)
+    }
+
+    fn test_ctx_with_team_access(
+        sender: &str,
+        params: &[&str],
+        team_access: Option<Box<dyn room_protocol::plugin::TeamAccess>>,
+    ) -> CommandContext {
+        test_ctx_full(sender, params, None, team_access)
+    }
+
+    fn test_ctx_full(
+        sender: &str,
+        params: &[&str],
+        host: Option<&str>,
+        team_access: Option<Box<dyn room_protocol::plugin::TeamAccess>>,
+    ) -> CommandContext {
         CommandContext {
             command: "taskboard".to_owned(),
             params: params.iter().map(|s| s.to_string()).collect(),
@@ -1067,6 +1442,7 @@ mod tests {
                 message_count: 0,
             },
             available_commands: vec![],
+            team_access,
         }
     }
 }

@@ -656,6 +656,12 @@ async fn dispatch_plugin(
     let metadata = snapshot_metadata(&state.status_map, &state.host_user, &state.chat_path).await;
     let available_commands = state.plugin_registry.all_commands();
 
+    let team_access: Option<Box<dyn room_protocol::plugin::TeamAccess>> = state
+        .auth
+        .registry
+        .get()
+        .map(|reg| Box::new(crate::plugin::bridge::TeamChecker::new(reg)) as _);
+
     let ctx = CommandContext {
         command: cmd.clone(),
         params: params.clone(),
@@ -667,6 +673,7 @@ async fn dispatch_plugin(
         writer: Box::new(writer),
         metadata,
         available_commands,
+        team_access,
     };
 
     let result = plugin.handle(ctx).await?;
@@ -773,6 +780,12 @@ async fn dispatch_cross_room(
     .await;
     let available_commands = target_state.plugin_registry.all_commands();
 
+    let team_access: Option<Box<dyn room_protocol::plugin::TeamAccess>> = target_state
+        .auth
+        .registry
+        .get()
+        .map(|reg| Box::new(crate::plugin::bridge::TeamChecker::new(reg)) as _);
+
     let ctx = CommandContext {
         command: cmd.to_owned(),
         params: params.to_vec(),
@@ -784,6 +797,7 @@ async fn dispatch_cross_room(
         writer: Box::new(writer),
         metadata,
         available_commands,
+        team_access,
     };
 
     let result = plugin.handle(ctx).await?;

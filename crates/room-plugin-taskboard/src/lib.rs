@@ -263,6 +263,7 @@ mod tests {
                     approved_at: None,
                     updated_at: None,
                     notes: None,
+                    team: None,
                 };
                 let mut lt = LiveTask::new(t);
                 lt.lease_start = Some(stale);
@@ -282,6 +283,7 @@ mod tests {
                 approved_at: None,
                 updated_at: None,
                 notes: None,
+                team: None,
             };
             let mut lt_finished = LiveTask::new(finished);
             // Manually inject stale lease to simulate edge case.

@@ -12,13 +12,13 @@ use std::{collections::HashMap, path::Path};
 // imports from `crate::plugin::*` continue to work without changes.
 pub use room_protocol::plugin::{
     BoxFuture, CommandContext, CommandInfo, HistoryAccess, MessageWriter, ParamSchema, ParamType,
-    Plugin, PluginResult, RoomMetadata, UserInfo, PLUGIN_API_VERSION, PROTOCOL_VERSION,
+    Plugin, PluginResult, RoomMetadata, TeamAccess, UserInfo, PLUGIN_API_VERSION, PROTOCOL_VERSION,
 };
 
 // Re-export concrete bridge types. ChatWriter and HistoryReader are public
 // (used in tests and by broker/commands.rs). snapshot_metadata is crate-only.
 pub(crate) use bridge::snapshot_metadata;
-pub use bridge::{ChatWriter, HistoryReader};
+pub use bridge::{ChatWriter, HistoryReader, TeamChecker};
 pub use schema::{all_known_commands, builtin_command_infos};
 
 // ── PluginRegistry ──────────────────────────────────────────────────────────

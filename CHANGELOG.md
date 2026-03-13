@@ -12,6 +12,11 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 > - [room-protocol CHANGELOG](crates/room-protocol/CHANGELOG.md)
 > - [room-ralph CHANGELOG](crates/room-ralph/CHANGELOG.md)
 
+### Added
+
+- **taskboard:** Team-restricted task claims — `/taskboard post --team <name>` restricts
+  claiming and assignment to team members. Backward-compatible NDJSON persistence. (#516)
+
 ### Fixed
 
 - **tui:** Status/system message text no longer appears as fake users in the member panel.

@@ -179,6 +179,7 @@ mod tests {
                 message_count: 3,
             },
             available_commands: vec![],
+            team_access: None,
         };
 
         let result = StatsPlugin.handle(ctx).await.unwrap();

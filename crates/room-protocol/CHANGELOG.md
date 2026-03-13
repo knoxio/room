@@ -17,6 +17,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Plugin versioning: `version()`, `api_version()`, `min_protocol()` methods on `Plugin`
   trait with backward-compatible defaults. `PLUGIN_API_VERSION` and `PROTOCOL_VERSION`
   constants for broker-side compatibility checking. (#512)
+- `TeamAccess` trait in `plugin` module — read-only team membership queries for plugins.
+  `team_exists(team)` and `is_member(team, user)` methods. `CommandContext` gains an
+  optional `team_access` field (`None` in standalone mode, `Some` in daemon mode). (#516)
 
 ## [3.1.0] - 2026-03-13
 

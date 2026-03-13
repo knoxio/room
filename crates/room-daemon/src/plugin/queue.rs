@@ -323,6 +323,7 @@ mod tests {
                 message_count: 0,
             },
             available_commands: vec![],
+            team_access: None,
         }
     }
 

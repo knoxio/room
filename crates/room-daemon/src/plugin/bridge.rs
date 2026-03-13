@@ -15,7 +15,9 @@ use std::{
     },
 };
 
-use room_protocol::plugin::{BoxFuture, HistoryAccess, MessageWriter, RoomMetadata, UserInfo};
+use room_protocol::plugin::{
+    BoxFuture, HistoryAccess, MessageWriter, RoomMetadata, TeamAccess, UserInfo,
+};
 
 use room_protocol::{make_event, make_system, Message};
 
@@ -25,6 +27,7 @@ use crate::{
         state::{ClientMap, StatusMap},
     },
     history,
+    registry::UserRegistry,
 };
 
 // ── HistoryReader ───────────────────────────────────────────────────────────
@@ -206,6 +209,45 @@ pub(crate) async fn snapshot_metadata(
         online_users,
         host,
         message_count,
+    }
+}
+
+// ── TeamChecker ─────────────────────────────────────────────────────────────
+
+/// Concrete [`TeamAccess`] backed by the daemon's [`UserRegistry`].
+///
+/// Wraps the shared registry behind `Arc<tokio::sync::Mutex<_>>`. Each method
+/// uses `try_lock()` for non-blocking access. If the lock is contended (rare —
+/// the registry lock is held only briefly by command handlers), the method
+/// returns a conservative `false`.
+pub struct TeamChecker {
+    registry: Arc<tokio::sync::Mutex<UserRegistry>>,
+}
+
+impl TeamChecker {
+    pub(crate) fn new(registry: &Arc<tokio::sync::Mutex<UserRegistry>>) -> Self {
+        Self {
+            registry: registry.clone(),
+        }
+    }
+}
+
+impl TeamAccess for TeamChecker {
+    fn team_exists(&self, team: &str) -> bool {
+        match self.registry.try_lock() {
+            Ok(reg) => reg.get_team(team).is_some(),
+            Err(_) => false,
+        }
+    }
+
+    fn is_member(&self, team: &str, user: &str) -> bool {
+        match self.registry.try_lock() {
+            Ok(reg) => reg
+                .get_team(team)
+                .map(|t| t.members.contains(user))
+                .unwrap_or(false),
+            Err(_) => false,
+        }
     }
 }
 
