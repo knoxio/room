@@ -72,6 +72,23 @@ pub(super) fn render_content_with_mentions(
     content: &str,
     color_map: &ColorMap,
 ) -> Vec<Span<'static>> {
+    render_inline_markdown(content, color_map, Style::default(), false)
+}
+
+/// Parameterized inline markdown parser shared by top-level and nested contexts.
+///
+/// When `nested` is false, handles all inline markdown: `***bold+italic***`,
+/// `**bold**`, `*italic*`, `` `code` ``, and `@mentions`.
+/// When `nested` is true (inside `**...**`), only handles `*italic*` and
+/// `@mentions` — avoids re-parsing outer delimiters.
+///
+/// `base_style` is applied to plain text and merged into delimiter styles.
+fn render_inline_markdown(
+    content: &str,
+    color_map: &ColorMap,
+    base_style: Style,
+    nested: bool,
+) -> Vec<Span<'static>> {
     let mut spans: Vec<Span<'static>> = Vec::new();
     let bytes = content.as_bytes();
     let len = bytes.len();
@@ -79,14 +96,19 @@ pub(super) fn render_content_with_mentions(
     let mut plain_start = 0;
 
     while i < len {
-        // `***bold+italic***`
-        if i + 2 < len && bytes[i] == b'*' && bytes[i + 1] == b'*' && bytes[i + 2] == b'*' {
+        // `***bold+italic***` — top-level only
+        if !nested
+            && i + 2 < len
+            && bytes[i] == b'*'
+            && bytes[i + 1] == b'*'
+            && bytes[i + 2] == b'*'
+        {
             if let Some(close) = find_closing_triple_star(bytes, i + 3) {
                 if close > i + 3 {
-                    flush_plain(content, plain_start, i, &mut spans);
+                    flush_styled(content, plain_start, i, base_style, &mut spans);
                     spans.push(Span::styled(
                         content[i + 3..close].to_string(),
-                        Style::default().add_modifier(Modifier::BOLD | Modifier::ITALIC),
+                        base_style.add_modifier(Modifier::BOLD | Modifier::ITALIC),
                     ));
                     i = close + 3;
                     plain_start = i;
@@ -95,12 +117,17 @@ pub(super) fn render_content_with_mentions(
             }
         }
 
-        // `**bold**` — inner content parsed for @mentions and *italic*
-        if i + 1 < len && bytes[i] == b'*' && bytes[i + 1] == b'*' {
+        // `**bold**` — top-level only, delegates to nested call
+        if !nested && i + 1 < len && bytes[i] == b'*' && bytes[i + 1] == b'*' {
             if let Some(close) = find_closing_double_star(bytes, i + 2) {
                 if close > i + 2 {
-                    flush_plain(content, plain_start, i, &mut spans);
-                    spans.extend(render_bold_inner(&content[i + 2..close], color_map));
+                    flush_styled(content, plain_start, i, base_style, &mut spans);
+                    spans.extend(render_inline_markdown(
+                        &content[i + 2..close],
+                        color_map,
+                        base_style.add_modifier(Modifier::BOLD),
+                        true,
+                    ));
                     i = close + 2;
                     plain_start = i;
                     continue;
@@ -112,10 +139,10 @@ pub(super) fn render_content_with_mentions(
         if bytes[i] == b'*' && !(i + 1 < len && bytes[i + 1] == b'*') {
             if let Some(close) = find_closing_single_star(bytes, i + 1) {
                 if close > i + 1 {
-                    flush_plain(content, plain_start, i, &mut spans);
+                    flush_styled(content, plain_start, i, base_style, &mut spans);
                     spans.push(Span::styled(
                         content[i + 1..close].to_string(),
-                        Style::default().add_modifier(Modifier::ITALIC),
+                        base_style.add_modifier(Modifier::ITALIC),
                     ));
                     i = close + 1;
                     plain_start = i;
@@ -124,11 +151,11 @@ pub(super) fn render_content_with_mentions(
             }
         }
 
-        // `` `code` ``
-        if bytes[i] == b'`' {
+        // `` `code` `` — top-level only
+        if !nested && bytes[i] == b'`' {
             if let Some(close) = find_closing_backtick(bytes, i + 1) {
                 if close > i + 1 {
-                    flush_plain(content, plain_start, i, &mut spans);
+                    flush_styled(content, plain_start, i, base_style, &mut spans);
                     spans.push(Span::styled(
                         content[i + 1..close].to_string(),
                         Style::default().fg(Color::Yellow),
@@ -147,7 +174,7 @@ pub(super) fn render_content_with_mentions(
                 .find(|c: char| !c.is_alphanumeric() && c != '_' && c != '-')
                 .unwrap_or(after_at.len());
             if username_end > 0 {
-                flush_plain(content, plain_start, i, &mut spans);
+                flush_styled(content, plain_start, i, base_style, &mut spans);
                 let username = &after_at[..username_end];
                 spans.push(Span::styled(
                     format!("@{username}"),
@@ -164,17 +191,23 @@ pub(super) fn render_content_with_mentions(
         i += 1;
     }
 
-    flush_plain(content, plain_start, len, &mut spans);
+    flush_styled(content, plain_start, len, base_style, &mut spans);
     if spans.is_empty() {
-        spans.push(Span::raw(String::new()));
+        spans.push(Span::styled(String::new(), base_style));
     }
     spans
 }
 
 /// Flush accumulated plain text from `content[start..end]` into `spans`.
-fn flush_plain(content: &str, start: usize, end: usize, spans: &mut Vec<Span<'static>>) {
+fn flush_styled(
+    content: &str,
+    start: usize,
+    end: usize,
+    style: Style,
+    spans: &mut Vec<Span<'static>>,
+) {
     if start < end {
-        spans.push(Span::raw(content[start..end].to_string()));
+        spans.push(Span::styled(content[start..end].to_string(), style));
     }
 }
 
@@ -228,73 +261,6 @@ fn find_closing_triple_star(bytes: &[u8], start: usize) -> Option<usize> {
         j += 1;
     }
     None
-}
-
-/// Parse content inside `**...**` for nested `@mentions` and `*italic*`.
-///
-/// Every span produced carries [`Modifier::BOLD`] since it sits inside a bold
-/// delimiter. `@mentions` keep their user color; `*italic*` segments get
-/// `BOLD | ITALIC`.
-fn render_bold_inner(content: &str, color_map: &ColorMap) -> Vec<Span<'static>> {
-    let bold = Style::default().add_modifier(Modifier::BOLD);
-    let mut spans: Vec<Span<'static>> = Vec::new();
-    let bytes = content.as_bytes();
-    let len = bytes.len();
-    let mut i = 0;
-    let mut plain_start = 0;
-
-    while i < len {
-        // `*italic*` inside bold → BOLD|ITALIC
-        if bytes[i] == b'*' && !(i + 1 < len && bytes[i + 1] == b'*') {
-            if let Some(close) = find_closing_single_star(bytes, i + 1) {
-                if close > i + 1 {
-                    if plain_start < i {
-                        spans.push(Span::styled(content[plain_start..i].to_string(), bold));
-                    }
-                    spans.push(Span::styled(
-                        content[i + 1..close].to_string(),
-                        Style::default().add_modifier(Modifier::BOLD | Modifier::ITALIC),
-                    ));
-                    i = close + 1;
-                    plain_start = i;
-                    continue;
-                }
-            }
-        }
-
-        // `@mention` inside bold
-        if bytes[i] == b'@' {
-            let after_at = &content[i + 1..];
-            let username_end = after_at
-                .find(|c: char| !c.is_alphanumeric() && c != '_' && c != '-')
-                .unwrap_or(after_at.len());
-            if username_end > 0 {
-                if plain_start < i {
-                    spans.push(Span::styled(content[plain_start..i].to_string(), bold));
-                }
-                let username = &after_at[..username_end];
-                spans.push(Span::styled(
-                    format!("@{username}"),
-                    Style::default()
-                        .fg(user_color(username, color_map))
-                        .add_modifier(Modifier::BOLD),
-                ));
-                i += 1 + username_end;
-                plain_start = i;
-                continue;
-            }
-        }
-
-        i += 1;
-    }
-
-    if plain_start < len {
-        spans.push(Span::styled(content[plain_start..len].to_string(), bold));
-    }
-    if spans.is_empty() {
-        spans.push(Span::styled(String::new(), bold));
-    }
-    spans
 }
 
 /// Render a single chunk with code-block fence awareness.

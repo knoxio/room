@@ -21,6 +21,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **refactor:** Extracted persistence functions from `broker/commands.rs` to `broker/persistence.rs`
   and split `route_command()` into dedicated handler functions. (#557)
+- **refactor:** Consolidated duplicate markdown parsers in `tui/render.rs` into a single
+  parameterized `render_inline_markdown` function, eliminating `render_bold_inner`. (#560)
 
 - Restructured into a cargo workspace with four crates: `room-protocol` (wire types),
   `room-cli` (broker + TUI + oneshot), `room-ralph` (agent wrapper), `agentroom`
