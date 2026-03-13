@@ -52,7 +52,7 @@ impl TaskboardPlugin {
         vec![CommandInfo {
             name: "taskboard".to_owned(),
             description:
-                "Manage task lifecycle — post, list, show, claim, assign, plan, approve, update, release, finish"
+                "Manage task lifecycle — post, list, show, claim, assign, plan, approve, update, release, finish, cancel"
                     .to_owned(),
             usage: "/taskboard <action> [args...]".to_owned(),
             params: vec![
@@ -69,6 +69,7 @@ impl TaskboardPlugin {
                         "update".to_owned(),
                         "release".to_owned(),
                         "finish".to_owned(),
+                        "cancel".to_owned(),
                     ]),
                     required: true,
                     description: "Subcommand".to_owned(),
@@ -524,6 +525,63 @@ impl TaskboardPlugin {
         let _ = task::save_tasks(&self.storage_path, &tasks);
         (format!("task {task_id} finished by {}", ctx.sender), true)
     }
+
+    fn handle_cancel(&self, ctx: &CommandContext) -> (String, bool) {
+        let task_id = match ctx.params.get(1) {
+            Some(id) => id,
+            None => {
+                return (
+                    "usage: /taskboard cancel <task-id> [reason]".to_owned(),
+                    false,
+                )
+            }
+        };
+        self.sweep_expired();
+        let mut board = self.board.lock().unwrap();
+        let lt = match board.iter_mut().find(|lt| lt.task.id == *task_id) {
+            Some(lt) => lt,
+            None => return (format!("task {task_id} not found"), false),
+        };
+        if matches!(lt.task.status, TaskStatus::Finished | TaskStatus::Cancelled) {
+            return (
+                format!("task {task_id} is {} (cannot cancel)", lt.task.status),
+                false,
+            );
+        }
+        // Permission: poster, assignee, or host can cancel.
+        let is_poster = lt.task.posted_by == ctx.sender;
+        let is_assignee = lt.task.assigned_to.as_deref() == Some(&ctx.sender);
+        let is_host = ctx.metadata.host.as_deref() == Some(&ctx.sender);
+        if !is_poster && !is_assignee && !is_host {
+            return (
+                format!("task {task_id} can only be cancelled by the poster, assignee, or host"),
+                false,
+            );
+        }
+        lt.task.status = TaskStatus::Cancelled;
+        lt.lease_start = None;
+        let reason: String = ctx
+            .params
+            .iter()
+            .skip(2)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(" ");
+        lt.task.notes = Some(if reason.is_empty() {
+            format!("cancelled by {}", ctx.sender)
+        } else {
+            format!("cancelled by {}: {reason}", ctx.sender)
+        });
+        lt.task.updated_at = Some(chrono::Utc::now());
+        let tasks: Vec<Task> = board.iter().map(|lt| lt.task.clone()).collect();
+        let _ = task::save_tasks(&self.storage_path, &tasks);
+        let msg = if reason.is_empty() {
+            format!("task {task_id} cancelled by {}", ctx.sender)
+        } else {
+            format!("task {task_id} cancelled by {} — {reason}", ctx.sender)
+        };
+        (msg, true)
+    }
 }
 
 impl Plugin for TaskboardPlugin {
@@ -549,8 +607,9 @@ impl Plugin for TaskboardPlugin {
                 "update" => self.handle_update(&ctx),
                 "release" => self.handle_release(&ctx),
                 "finish" => self.handle_finish(&ctx),
-                "" => ("usage: /taskboard <post|list|show|claim|assign|plan|approve|update|release|finish> [args...]".to_owned(), false),
-                other => (format!("unknown action: {other}. use: post, list, show, claim, assign, plan, approve, update, release, finish"), false),
+                "cancel" => self.handle_cancel(&ctx),
+                "" => ("usage: /taskboard <post|list|show|claim|assign|plan|approve|update|release|finish|cancel> [args...]".to_owned(), false),
+                other => (format!("unknown action: {other}. use: post, list, show, claim, assign, plan, approve, update, release, finish, cancel"), false),
             };
             if broadcast {
                 Ok(PluginResult::Broadcast(result))
@@ -588,7 +647,7 @@ mod tests {
             assert!(choices.contains(&"post".to_owned()));
             assert!(choices.contains(&"approve".to_owned()));
             assert!(choices.contains(&"assign".to_owned()));
-            assert_eq!(choices.len(), 10);
+            assert_eq!(choices.len(), 11);
         } else {
             panic!("expected Choice param type");
         }
@@ -993,6 +1052,99 @@ mod tests {
         let (result, broadcast) = plugin.handle_finish(&test_ctx("agent", &["finish", "tb-001"]));
         assert!(result.contains("finished"));
         assert!(broadcast);
+    }
+
+    #[test]
+    fn handle_cancel_by_poster() {
+        let (plugin, _tmp) = make_plugin();
+        plugin.handle_post(&test_ctx("ba", &["post", "obsolete task"]));
+        let (result, broadcast) =
+            plugin.handle_cancel(&test_ctx("ba", &["cancel", "tb-001", "no longer needed"]));
+        assert!(result.contains("cancelled by ba"));
+        assert!(result.contains("no longer needed"));
+        assert!(broadcast);
+        let board = plugin.board.lock().unwrap();
+        assert_eq!(board[0].task.status, TaskStatus::Cancelled);
+        assert!(board[0]
+            .task
+            .notes
+            .as_deref()
+            .unwrap()
+            .contains("no longer needed"));
+        assert!(board[0].lease_start.is_none());
+    }
+
+    #[test]
+    fn handle_cancel_by_assignee() {
+        let (plugin, _tmp) = make_plugin();
+        plugin.handle_post(&test_ctx("ba", &["post", "task"]));
+        plugin.handle_claim(&test_ctx("agent", &["claim", "tb-001"]));
+        let (result, broadcast) = plugin.handle_cancel(&test_ctx("agent", &["cancel", "tb-001"]));
+        assert!(result.contains("cancelled by agent"));
+        assert!(broadcast);
+        let board = plugin.board.lock().unwrap();
+        assert_eq!(board[0].task.status, TaskStatus::Cancelled);
+        assert!(board[0]
+            .task
+            .notes
+            .as_deref()
+            .unwrap()
+            .contains("cancelled by agent"));
+    }
+
+    #[test]
+    fn handle_cancel_by_host() {
+        let (plugin, _tmp) = make_plugin();
+        plugin.handle_post(&test_ctx("ba", &["post", "task"]));
+        plugin.handle_claim(&test_ctx("agent", &["claim", "tb-001"]));
+        // Host (joao) can cancel even if not poster or assignee.
+        let (result, broadcast) = plugin.handle_cancel(&test_ctx_with_host(
+            "joao",
+            &["cancel", "tb-001", "scope changed"],
+            Some("joao"),
+        ));
+        assert!(result.contains("cancelled by joao"));
+        assert!(result.contains("scope changed"));
+        assert!(broadcast);
+    }
+
+    #[test]
+    fn handle_cancel_finished_rejected() {
+        let (plugin, _tmp) = make_plugin();
+        plugin.handle_post(&test_ctx("ba", &["post", "task"]));
+        plugin.handle_claim(&test_ctx("agent", &["claim", "tb-001"]));
+        plugin.handle_finish(&test_ctx("agent", &["finish", "tb-001"]));
+        let (result, broadcast) = plugin.handle_cancel(&test_ctx("ba", &["cancel", "tb-001"]));
+        assert!(result.contains("cannot cancel"));
+        assert!(result.contains("finished"));
+        assert!(!broadcast);
+    }
+
+    #[test]
+    fn handle_cancel_unauthorized_rejected() {
+        let (plugin, _tmp) = make_plugin();
+        plugin.handle_post(&test_ctx("ba", &["post", "task"]));
+        plugin.handle_claim(&test_ctx("agent", &["claim", "tb-001"]));
+        // Random user who is neither poster, assignee, nor host.
+        let (result, broadcast) = plugin.handle_cancel(&test_ctx_with_host(
+            "random",
+            &["cancel", "tb-001"],
+            Some("joao"),
+        ));
+        assert!(result.contains("poster, assignee, or host"));
+        assert!(!broadcast);
+    }
+
+    #[test]
+    fn handle_cancel_no_reason() {
+        let (plugin, _tmp) = make_plugin();
+        plugin.handle_post(&test_ctx("ba", &["post", "task"]));
+        let (result, broadcast) = plugin.handle_cancel(&test_ctx("ba", &["cancel", "tb-001"]));
+        assert!(result.contains("cancelled by ba"));
+        assert!(!result.contains("—")); // no reason separator
+        assert!(broadcast);
+        let board = plugin.board.lock().unwrap();
+        assert_eq!(board[0].task.notes.as_deref(), Some("cancelled by ba"));
     }
 
     // ── Test helpers ────────────────────────────────────────────────────────

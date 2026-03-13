@@ -13,6 +13,7 @@ pub enum TaskStatus {
     Planned,
     Approved,
     Finished,
+    Cancelled,
 }
 
 impl std::fmt::Display for TaskStatus {
@@ -23,6 +24,7 @@ impl std::fmt::Display for TaskStatus {
             TaskStatus::Planned => write!(f, "planned"),
             TaskStatus::Approved => write!(f, "approved"),
             TaskStatus::Finished => write!(f, "finished"),
+            TaskStatus::Cancelled => write!(f, "cancelled"),
         }
     }
 }
@@ -163,6 +165,7 @@ mod tests {
         assert_eq!(TaskStatus::Planned.to_string(), "planned");
         assert_eq!(TaskStatus::Approved.to_string(), "approved");
         assert_eq!(TaskStatus::Finished.to_string(), "finished");
+        assert_eq!(TaskStatus::Cancelled.to_string(), "cancelled");
     }
 
     #[test]
@@ -289,6 +292,7 @@ mod tests {
             TaskStatus::Planned,
             TaskStatus::Approved,
             TaskStatus::Finished,
+            TaskStatus::Cancelled,
         ] {
             let task = make_task("tb-001", status);
             let json = serde_json::to_string(&task).unwrap();
