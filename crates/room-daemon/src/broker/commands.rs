@@ -750,15 +750,15 @@ async fn dispatch_plugin(
 
     // Check for --room flag to redirect to a different room.
     if let Some((target_room_id, cleaned_params)) = extract_room_flag(params) {
-        return dispatch_cross_room(
+        return dispatch_cross_room(CrossRoomContext {
             cmd,
-            &cleaned_params,
+            params: &cleaned_params,
             id,
-            *ts,
+            ts: *ts,
             username,
-            state,
-            &target_room_id,
-        )
+            source_state: state,
+            target_room_id: &target_room_id,
+        })
         .await;
     }
 
@@ -783,21 +783,35 @@ async fn dispatch_plugin(
     translate_plugin_result(result, plugin.name(), state, None).await
 }
 
+/// Bundles the parameters for cross-room plugin dispatch into a single struct,
+/// keeping the function signature readable and easy to extend.
+struct CrossRoomContext<'a> {
+    cmd: &'a str,
+    params: &'a [String],
+    id: &'a str,
+    ts: chrono::DateTime<chrono::Utc>,
+    username: &'a str,
+    source_state: &'a RoomState,
+    target_room_id: &'a str,
+}
+
 /// Execute a plugin command against a different room (cross-room dispatch).
 ///
 /// Resolves the target room via `state.cross_room_resolver`, finds the plugin
 /// in the target room's registry, builds a `CommandContext` pointing at the
 /// target room's state, and runs the plugin handler. Broadcasts go to the
 /// target room's clients and chat file.
-async fn dispatch_cross_room(
-    cmd: &str,
-    params: &[String],
-    id: &str,
-    ts: chrono::DateTime<chrono::Utc>,
-    username: &str,
-    source_state: &RoomState,
-    target_room_id: &str,
-) -> anyhow::Result<CommandResult> {
+async fn dispatch_cross_room(cx: CrossRoomContext<'_>) -> anyhow::Result<CommandResult> {
+    let CrossRoomContext {
+        cmd,
+        params,
+        id,
+        ts,
+        username,
+        source_state,
+        target_room_id,
+    } = cx;
+
     let resolver = match source_state.cross_room_resolver.get() {
         Some(r) => r,
         None => {
