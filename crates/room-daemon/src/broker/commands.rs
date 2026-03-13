@@ -600,6 +600,130 @@ fn extract_room_flag(params: &[String]) -> Option<(String, Vec<String>)> {
     target_room.map(|room_id| (room_id, cleaned))
 }
 
+/// Build a [`CommandContext`] from the given command fields and room state.
+///
+/// This is the single place where `CommandContext` is assembled — both
+/// `dispatch_plugin` (local) and `dispatch_cross_room` (remote) call it.
+async fn build_command_context(
+    cmd: &str,
+    params: &[String],
+    id: &str,
+    ts: chrono::DateTime<chrono::Utc>,
+    username: &str,
+    state: &RoomState,
+    plugin_name: &str,
+) -> CommandContext {
+    let history = HistoryReader::new(&state.chat_path, username);
+    let writer = ChatWriter::new(
+        &state.clients,
+        &state.chat_path,
+        &state.room_id,
+        &state.seq_counter,
+        plugin_name,
+    );
+    let metadata = snapshot_metadata(&state.status_map, &state.host_user, &state.chat_path).await;
+    let available_commands = state.plugin_registry.all_commands();
+
+    let team_access: Option<Box<dyn room_protocol::plugin::TeamAccess>> = state
+        .auth
+        .registry
+        .get()
+        .map(|reg| Box::new(crate::plugin::bridge::TeamChecker::new(reg)) as _);
+
+    CommandContext {
+        command: cmd.to_owned(),
+        params: params.to_vec(),
+        sender: username.to_owned(),
+        room_id: state.room_id.as_ref().clone(),
+        message_id: id.to_owned(),
+        timestamp: ts,
+        history: Box::new(history),
+        writer: Box::new(writer),
+        metadata,
+        available_commands,
+        team_access,
+    }
+}
+
+/// Run a plugin handler with timeout and panic isolation.
+///
+/// Wraps the handler in [`catch_unwind`] and [`tokio::time::timeout`] so that
+/// panicking or hung plugins do not take down the broker.
+async fn run_plugin_with_catch(
+    plugin: &dyn crate::plugin::Plugin,
+    ctx: CommandContext,
+) -> anyhow::Result<PluginResult> {
+    match tokio::time::timeout(
+        PLUGIN_TIMEOUT,
+        AssertUnwindSafe(plugin.handle(ctx)).catch_unwind(),
+    )
+    .await
+    {
+        Ok(Ok(r)) => r,
+        Ok(Err(panic_info)) => {
+            let msg = panic_info
+                .downcast_ref::<String>()
+                .map(|s| s.as_str())
+                .or_else(|| panic_info.downcast_ref::<&str>().copied())
+                .unwrap_or("unknown panic");
+            eprintln!("[broker] plugin '{}' panicked: {msg}", plugin.name());
+            Ok(PluginResult::Reply(format!(
+                "plugin '{}' panicked: {msg}",
+                plugin.name()
+            )))
+        }
+        Err(_elapsed) => {
+            eprintln!(
+                "[broker] plugin '{}' timed out after {}s",
+                plugin.name(),
+                PLUGIN_TIMEOUT.as_secs()
+            );
+            Ok(PluginResult::Reply(format!(
+                "plugin '{}' timed out after {}s",
+                plugin.name(),
+                PLUGIN_TIMEOUT.as_secs()
+            )))
+        }
+    }
+}
+
+/// Translate a [`PluginResult`] into a [`CommandResult`].
+///
+/// For cross-room dispatch, pass `cross_room = Some((source_room_id, target_room_id))`
+/// so that replies are tagged with the target room prefix and broadcasts go to the
+/// correct room's clients. For local dispatch, pass `None`.
+async fn translate_plugin_result(
+    result: PluginResult,
+    plugin_name: &str,
+    state: &RoomState,
+    cross_room: Option<(&str, &str)>,
+) -> anyhow::Result<CommandResult> {
+    Ok(match result {
+        PluginResult::Reply(text) => {
+            let reply_text = match cross_room {
+                Some((_, target)) => format!("[→{target}] {text}"),
+                None => text,
+            };
+            let reply_room = match cross_room {
+                Some((source, _)) => source,
+                None => &state.room_id,
+            };
+            let sys = make_system(reply_room, &format!("plugin:{plugin_name}"), reply_text);
+            let json = serde_json::to_string(&sys)?;
+            CommandResult::Reply(json)
+        }
+        PluginResult::Broadcast(text) => {
+            let sys = make_system(&state.room_id, &format!("plugin:{plugin_name}"), text);
+            let seq_msg =
+                broadcast_and_persist(&sys, &state.clients, &state.chat_path, &state.seq_counter)
+                    .await?;
+            let json = serde_json::to_string(&seq_msg)?;
+            CommandResult::HandledWithReply(json)
+        }
+        PluginResult::Handled => CommandResult::Handled,
+    })
+}
+
 /// Build a [`CommandContext`] and call a plugin's `handle` method, translating
 /// the [`PluginResult`] into a [`CommandResult`] the broker understands.
 ///
@@ -652,95 +776,11 @@ async fn dispatch_plugin(
         }
     }
 
-    let history = HistoryReader::new(&state.chat_path, username);
-    let writer = ChatWriter::new(
-        &state.clients,
-        &state.chat_path,
-        &state.room_id,
-        &state.seq_counter,
-        plugin.name(),
-    );
-    let metadata = snapshot_metadata(&state.status_map, &state.host_user, &state.chat_path).await;
-    let available_commands = state.plugin_registry.all_commands();
+    let ctx = build_command_context(cmd, params, id, *ts, username, state, plugin.name()).await;
 
-    let team_access: Option<Box<dyn room_protocol::plugin::TeamAccess>> = state
-        .auth
-        .registry
-        .get()
-        .map(|reg| Box::new(crate::plugin::bridge::TeamChecker::new(reg)) as _);
+    let result = run_plugin_with_catch(plugin, ctx).await?;
 
-    let ctx = CommandContext {
-        command: cmd.clone(),
-        params: params.clone(),
-        sender: username.to_owned(),
-        room_id: state.room_id.as_ref().clone(),
-        message_id: id.clone(),
-        timestamp: *ts,
-        history: Box::new(history),
-        writer: Box::new(writer),
-        metadata,
-        available_commands,
-        team_access,
-    };
-
-    let result = match tokio::time::timeout(
-        PLUGIN_TIMEOUT,
-        AssertUnwindSafe(plugin.handle(ctx)).catch_unwind(),
-    )
-    .await
-    {
-        Ok(Ok(r)) => r?,
-        Ok(Err(panic_info)) => {
-            let msg = panic_info
-                .downcast_ref::<String>()
-                .map(|s| s.as_str())
-                .or_else(|| panic_info.downcast_ref::<&str>().copied())
-                .unwrap_or("unknown panic");
-            eprintln!("[broker] plugin '{}' panicked: {msg}", plugin.name());
-            let sys = make_system(
-                &state.room_id,
-                &format!("plugin:{}", plugin.name()),
-                format!("plugin '{}' panicked: {msg}", plugin.name()),
-            );
-            let json = serde_json::to_string(&sys)?;
-            return Ok(CommandResult::Reply(json));
-        }
-        Err(_elapsed) => {
-            eprintln!(
-                "[broker] plugin '{}' timed out after {}s",
-                plugin.name(),
-                PLUGIN_TIMEOUT.as_secs()
-            );
-            let sys = make_system(
-                &state.room_id,
-                &format!("plugin:{}", plugin.name()),
-                format!(
-                    "plugin '{}' timed out after {}s",
-                    plugin.name(),
-                    PLUGIN_TIMEOUT.as_secs()
-                ),
-            );
-            let json = serde_json::to_string(&sys)?;
-            return Ok(CommandResult::Reply(json));
-        }
-    };
-
-    Ok(match result {
-        PluginResult::Reply(text) => {
-            let sys = make_system(&state.room_id, &format!("plugin:{}", plugin.name()), text);
-            let json = serde_json::to_string(&sys)?;
-            CommandResult::Reply(json)
-        }
-        PluginResult::Broadcast(text) => {
-            let sys = make_system(&state.room_id, &format!("plugin:{}", plugin.name()), text);
-            let seq_msg =
-                broadcast_and_persist(&sys, &state.clients, &state.chat_path, &state.seq_counter)
-                    .await?;
-            let json = serde_json::to_string(&seq_msg)?;
-            CommandResult::HandledWithReply(json)
-        }
-        PluginResult::Handled => CommandResult::Handled,
-    })
+    translate_plugin_result(result, plugin.name(), state, None).await
 }
 
 /// Execute a plugin command against a different room (cross-room dispatch).
@@ -811,75 +851,20 @@ async fn dispatch_cross_room(
     }
 
     // Build context against the TARGET room's state.
-    let history = HistoryReader::new(&target_state.chat_path, username);
-    let writer = ChatWriter::new(
-        &target_state.clients,
-        &target_state.chat_path,
-        &target_state.room_id,
-        &target_state.seq_counter,
-        plugin.name(),
-    );
-    let metadata = snapshot_metadata(
-        &target_state.status_map,
-        &target_state.host_user,
-        &target_state.chat_path,
-    )
-    .await;
-    let available_commands = target_state.plugin_registry.all_commands();
+    let ctx =
+        build_command_context(cmd, params, id, ts, username, &target_state, plugin.name()).await;
 
-    let team_access: Option<Box<dyn room_protocol::plugin::TeamAccess>> = target_state
-        .auth
-        .registry
-        .get()
-        .map(|reg| Box::new(crate::plugin::bridge::TeamChecker::new(reg)) as _);
-
-    let ctx = CommandContext {
-        command: cmd.to_owned(),
-        params: params.to_vec(),
-        sender: username.to_owned(),
-        room_id: target_state.room_id.as_ref().clone(),
-        message_id: id.to_owned(),
-        timestamp: ts,
-        history: Box::new(history),
-        writer: Box::new(writer),
-        metadata,
-        available_commands,
-        team_access,
-    };
-
-    let result = plugin.handle(ctx).await?;
+    let result = run_plugin_with_catch(plugin, ctx).await?;
 
     // Replies go to the SOURCE room (the caller sees them), but broadcasts go
     // to the TARGET room (where the state change happened).
-    Ok(match result {
-        PluginResult::Reply(text) => {
-            let sys = make_system(
-                &source_state.room_id,
-                &format!("plugin:{}", plugin.name()),
-                format!("[→{target_room_id}] {text}"),
-            );
-            let json = serde_json::to_string(&sys)?;
-            CommandResult::Reply(json)
-        }
-        PluginResult::Broadcast(text) => {
-            // Broadcast to the TARGET room.
-            let sys = make_system(
-                &target_state.room_id,
-                &format!("plugin:{}", plugin.name()),
-                text,
-            );
-            let seq_msg = broadcast_and_persist(
-                &sys,
-                &target_state.clients,
-                &target_state.chat_path,
-                &target_state.seq_counter,
-            )
-            .await?;
-            let json = serde_json::to_string(&seq_msg)?;
-            CommandResult::HandledWithReply(json)
-        }
-        PluginResult::Handled => CommandResult::Handled,
-    })
+    translate_plugin_result(
+        result,
+        plugin.name(),
+        &target_state,
+        Some((&source_state.room_id, target_room_id)),
+    )
+    .await
 }
 
 // ── Room management commands ──────────────────────────────────────────────────
