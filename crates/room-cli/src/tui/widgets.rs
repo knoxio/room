@@ -120,49 +120,30 @@ impl CommandPalette {
     }
 }
 
-// ── Mention picker ────────────────────────────────────────────────────────────
+// ── Shared picker state ──────────────────────────────────────────────────────
 
-/// Autocomplete popup for `@username` mentions.
-pub(super) struct MentionPicker {
+/// Common state and behaviour shared by [`MentionPicker`] and [`ChoicePicker`].
+///
+/// Both pickers maintain an active flag, a selected-index, and a prefix-filtered
+/// list of candidates. Navigation, deactivation, selection retrieval, and
+/// prefix-filtering are identical — this struct owns all of that.
+pub(super) struct PickerState {
     pub(super) active: bool,
     pub(super) selected: usize,
-    /// Prefix-filtered list of matching online usernames.
     pub(super) filtered: Vec<String>,
-    /// Byte index of the `@` character in the input buffer that opened this picker.
-    pub(super) at_byte: usize,
 }
 
-impl MentionPicker {
-    pub(super) fn new() -> Self {
+impl PickerState {
+    fn new() -> Self {
         Self {
             active: false,
             selected: 0,
             filtered: Vec::new(),
-            at_byte: 0,
         }
-    }
-
-    pub(super) fn activate(&mut self, at_byte: usize, online_users: &[String], query: &str) {
-        self.active = true;
-        self.selected = 0;
-        self.at_byte = at_byte;
-        self.update_filter(online_users, query);
     }
 
     pub(super) fn deactivate(&mut self) {
         self.active = false;
-    }
-
-    pub(super) fn update_filter(&mut self, online_users: &[String], query: &str) {
-        let q = query.to_ascii_lowercase();
-        self.filtered = online_users
-            .iter()
-            .filter(|u| u.to_ascii_lowercase().starts_with(q.as_str()))
-            .cloned()
-            .collect();
-        if self.selected >= self.filtered.len() {
-            self.selected = self.filtered.len().saturating_sub(1);
-        }
     }
 
     pub(super) fn move_up(&mut self) {
@@ -175,8 +156,77 @@ impl MentionPicker {
         }
     }
 
-    pub(super) fn selected_user(&self) -> Option<&str> {
+    /// The currently highlighted item, if any.
+    pub(super) fn selected_item(&self) -> Option<&str> {
         self.filtered.get(self.selected).map(|s| s.as_str())
+    }
+
+    /// Replace the filtered list with candidates whose lowercase form starts
+    /// with `query` (case-insensitive prefix match), then clamp `selected`.
+    pub(super) fn filter_prefix(&mut self, candidates: &[String], query: &str) {
+        let q = query.to_ascii_lowercase();
+        self.filtered = candidates
+            .iter()
+            .filter(|c| c.to_ascii_lowercase().starts_with(q.as_str()))
+            .cloned()
+            .collect();
+        self.clamp_selected();
+    }
+
+    fn clamp_selected(&mut self) {
+        if self.selected >= self.filtered.len() {
+            self.selected = self.filtered.len().saturating_sub(1);
+        }
+    }
+}
+
+// ── Mention picker ────────────────────────────────────────────────────────────
+
+/// Autocomplete popup for `@username` mentions.
+///
+/// Delegates navigation, filtering, and selection to an inner [`PickerState`]
+/// exposed via `Deref`/`DerefMut` — callers access `.active`, `.selected`,
+/// `.filtered`, `.move_up()`, etc. directly.
+pub(super) struct MentionPicker {
+    picker: PickerState,
+    /// Byte index of the `@` character in the input buffer that opened this picker.
+    pub(super) at_byte: usize,
+}
+
+impl std::ops::Deref for MentionPicker {
+    type Target = PickerState;
+    fn deref(&self) -> &PickerState {
+        &self.picker
+    }
+}
+
+impl std::ops::DerefMut for MentionPicker {
+    fn deref_mut(&mut self) -> &mut PickerState {
+        &mut self.picker
+    }
+}
+
+impl MentionPicker {
+    pub(super) fn new() -> Self {
+        Self {
+            picker: PickerState::new(),
+            at_byte: 0,
+        }
+    }
+
+    pub(super) fn activate(&mut self, at_byte: usize, online_users: &[String], query: &str) {
+        self.picker.active = true;
+        self.picker.selected = 0;
+        self.at_byte = at_byte;
+        self.update_filter(online_users, query);
+    }
+
+    pub(super) fn update_filter(&mut self, online_users: &[String], query: &str) {
+        self.picker.filter_prefix(online_users, query);
+    }
+
+    pub(super) fn selected_user(&self) -> Option<&str> {
+        self.picker.selected_item()
     }
 }
 
@@ -184,14 +234,11 @@ impl MentionPicker {
 
 /// Autocomplete popup for `ParamType::Choice` parameters.
 ///
-/// Mirrors [`MentionPicker`] but shows a filtered list of predefined choice
-/// values instead of online usernames. Activated when the user selects a
-/// command whose first parameter is `Choice` from the command palette.
+/// Shows a filtered list of predefined choice values instead of online
+/// usernames. Delegates shared behaviour to an inner [`PickerState`] via
+/// `Deref`/`DerefMut`.
 pub(super) struct ChoicePicker {
-    pub(super) active: bool,
-    pub(super) selected: usize,
-    /// Prefix-filtered list of matching choices.
-    pub(super) filtered: Vec<String>,
+    picker: PickerState,
     /// The full set of valid choices for the current parameter.
     all_choices: Vec<String>,
     /// The command name this picker is completing for.
@@ -200,12 +247,23 @@ pub(super) struct ChoicePicker {
     pub(super) value_start: usize,
 }
 
+impl std::ops::Deref for ChoicePicker {
+    type Target = PickerState;
+    fn deref(&self) -> &PickerState {
+        &self.picker
+    }
+}
+
+impl std::ops::DerefMut for ChoicePicker {
+    fn deref_mut(&mut self) -> &mut PickerState {
+        &mut self.picker
+    }
+}
+
 impl ChoicePicker {
     pub(super) fn new() -> Self {
         Self {
-            active: false,
-            selected: 0,
-            filtered: Vec::new(),
+            picker: PickerState::new(),
             all_choices: Vec::new(),
             cmd_name: String::new(),
             value_start: 0,
@@ -219,43 +277,20 @@ impl ChoicePicker {
         value_start: usize,
         query: &str,
     ) {
-        self.active = true;
-        self.selected = 0;
+        self.picker.active = true;
+        self.picker.selected = 0;
         self.cmd_name = cmd_name.to_owned();
         self.all_choices = choices;
         self.value_start = value_start;
         self.update_filter(query);
     }
 
-    pub(super) fn deactivate(&mut self) {
-        self.active = false;
-    }
-
     pub(super) fn update_filter(&mut self, query: &str) {
-        let q = query.to_ascii_lowercase();
-        self.filtered = self
-            .all_choices
-            .iter()
-            .filter(|c| c.to_ascii_lowercase().starts_with(q.as_str()))
-            .cloned()
-            .collect();
-        if self.selected >= self.filtered.len() {
-            self.selected = self.filtered.len().saturating_sub(1);
-        }
-    }
-
-    pub(super) fn move_up(&mut self) {
-        self.selected = self.selected.saturating_sub(1);
-    }
-
-    pub(super) fn move_down(&mut self) {
-        if !self.filtered.is_empty() {
-            self.selected = (self.selected + 1).min(self.filtered.len() - 1);
-        }
+        self.picker.filter_prefix(&self.all_choices, query);
     }
 
     pub(super) fn selected_value(&self) -> Option<&str> {
-        self.filtered.get(self.selected).map(|s| s.as_str())
+        self.picker.selected_item()
     }
 }
 
@@ -590,6 +625,114 @@ mod tests {
             online_users.push(user);
         }
         assert_eq!(online_users.len(), 1);
+    }
+
+    // ── PickerState tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn picker_state_starts_inactive() {
+        let ps = PickerState::new();
+        assert!(!ps.active);
+        assert_eq!(ps.selected, 0);
+        assert!(ps.filtered.is_empty());
+    }
+
+    #[test]
+    fn picker_state_filter_prefix_case_insensitive() {
+        let mut ps = PickerState::new();
+        let candidates = vec!["Alice".to_owned(), "Bob".to_owned(), "Alyx".to_owned()];
+        ps.filter_prefix(&candidates, "al");
+        assert_eq!(ps.filtered, vec!["Alice", "Alyx"]);
+    }
+
+    #[test]
+    fn picker_state_filter_prefix_empty_query_returns_all() {
+        let mut ps = PickerState::new();
+        let candidates = vec!["a".to_owned(), "b".to_owned()];
+        ps.filter_prefix(&candidates, "");
+        assert_eq!(ps.filtered.len(), 2);
+    }
+
+    #[test]
+    fn picker_state_filter_prefix_no_match() {
+        let mut ps = PickerState::new();
+        let candidates = vec!["a".to_owned(), "b".to_owned()];
+        ps.filter_prefix(&candidates, "zzz");
+        assert!(ps.filtered.is_empty());
+    }
+
+    #[test]
+    fn picker_state_clamps_selected_on_filter() {
+        let mut ps = PickerState::new();
+        ps.active = true;
+        let all = vec!["a".to_owned(), "b".to_owned(), "c".to_owned()];
+        ps.filter_prefix(&all, "");
+        ps.selected = 2;
+        ps.filter_prefix(&all, "a"); // only "a"
+        assert_eq!(ps.selected, 0);
+    }
+
+    #[test]
+    fn picker_state_navigate_up_down() {
+        let mut ps = PickerState::new();
+        ps.filtered = vec!["a".to_owned(), "b".to_owned(), "c".to_owned()];
+        assert_eq!(ps.selected, 0);
+        ps.move_down();
+        assert_eq!(ps.selected, 1);
+        ps.move_down();
+        assert_eq!(ps.selected, 2);
+        ps.move_down(); // clamps at end
+        assert_eq!(ps.selected, 2);
+        ps.move_up();
+        assert_eq!(ps.selected, 1);
+        ps.move_up();
+        assert_eq!(ps.selected, 0);
+        ps.move_up(); // clamps at zero
+        assert_eq!(ps.selected, 0);
+    }
+
+    #[test]
+    fn picker_state_selected_item() {
+        let mut ps = PickerState::new();
+        assert_eq!(ps.selected_item(), None);
+        ps.filtered = vec!["alpha".to_owned(), "beta".to_owned()];
+        assert_eq!(ps.selected_item(), Some("alpha"));
+        ps.move_down();
+        assert_eq!(ps.selected_item(), Some("beta"));
+    }
+
+    #[test]
+    fn picker_state_deactivate() {
+        let mut ps = PickerState::new();
+        ps.active = true;
+        ps.deactivate();
+        assert!(!ps.active);
+    }
+
+    #[test]
+    fn mention_picker_deref_exposes_picker_state() {
+        let mut picker = MentionPicker::new();
+        let users = vec!["alice".to_owned(), "bob".to_owned()];
+        picker.activate(5, &users, "");
+        assert!(picker.active);
+        assert_eq!(picker.filtered.len(), 2);
+        assert_eq!(picker.at_byte, 5);
+        picker.move_down();
+        assert_eq!(picker.selected, 1);
+        assert_eq!(picker.selected_user(), Some("bob"));
+    }
+
+    #[test]
+    fn choice_picker_deref_exposes_picker_state() {
+        let mut picker = ChoicePicker::new();
+        let choices = vec!["x".to_owned(), "y".to_owned()];
+        picker.activate("cmd", choices, 3, "");
+        assert!(picker.active);
+        assert_eq!(picker.filtered.len(), 2);
+        assert_eq!(picker.value_start, 3);
+        picker.move_down();
+        assert_eq!(picker.selected, 1);
+        assert_eq!(picker.selected_value(), Some("y"));
     }
 
     // ── ChoicePicker tests ──────────────────────────────────────────────────
