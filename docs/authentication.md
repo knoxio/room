@@ -43,11 +43,11 @@ in daemon mode), the first line determines the session type:
 
 | Prefix | Type | Auth | Description |
 |---|---|---|---|
-| `SESSION:<token>` | Interactive | Token | Authenticated interactive session. Broker resolves username from token, enters full interactive mode (history replay, broadcast, join/leave events). **Recommended for TUI and agent sessions.** |
+| `SESSION:<uuid>` | Interactive | Token | Authenticated interactive session. Broker resolves username from token, enters full interactive mode (history replay, broadcast, join/leave events). **Recommended for TUI and agent sessions.** |
 | `TOKEN:<uuid>` | One-shot | Token | Authenticated one-shot send. Send one message as the next line, receive the broadcast echo, connection closes. Used by `room send -t <token>`. |
 | `JOIN:<username>` | Registration | None | Register a username and receive a session token (`{"type":"token","token":"<uuid>"}`). Connection closes after token issuance. Used by `room join`. |
 | `SEND:<username>` | One-shot | None | **Deprecated (v3.1.0).** Unauthenticated one-shot send. Prints a deprecation warning. Use `TOKEN:<uuid>` instead. |
-| `<username>` | Interactive | None | **Deprecated.** Unauthenticated interactive join. Use `SESSION:<token>` instead. |
+| `<username>` | Interactive | None | **Deprecated (v3.1.0).** Unauthenticated interactive join. Use `SESSION:<uuid>` instead. |
 
 Recognition order: `SEND:` → `TOKEN:` → `JOIN:` → `SESSION:` → plain username.
 
