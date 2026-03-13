@@ -65,6 +65,7 @@ crates/room-cli/tests/
   auth.rs               — token issuance, validation, join permissions
   broker.rs             — UDS broker lifecycle, broadcast, admin commands
   daemon.rs             — multi-room daemon, room create/destroy
+  events.rs             — event type system, emit_event, event filtering
   oneshot.rs            — one-shot send, poll, cursor advancement
   rest_query.rs         — REST query endpoint, filters
   room_lifecycle.rs     — room create/destroy lifecycle
@@ -187,6 +188,23 @@ async fn my_feature_works() {
   (joins from other clients, system messages, etc.).
 - For timing-sensitive tests involving the broker on an encrypted volume,
   allow generous sleep margins — startup can take >300 ms.
+
+---
+
+## Test baseline
+
+**Current: 1371 Rust tests + 107 shell tests** (as of v3.1.0)
+
+| Crate | Unit | Integration | Total |
+|-------|------|-------------|-------|
+| room-protocol | 116 | — | 116 |
+| room-cli | 888 | 193 | 1081 |
+| room-ralph | 164 | 10 | 174 |
+
+Shell tests: 48 (test-context-monitor.sh) + 59 (test-ralph-room.sh) = 107.
+
+The test count must never decrease without explicit justification. Every PR
+that adds or changes functionality must include tests.
 
 ---
 
