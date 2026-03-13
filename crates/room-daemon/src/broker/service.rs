@@ -9,7 +9,7 @@
 
 use std::{future::Future, pin::Pin, sync::Arc};
 
-use crate::message::Message;
+use room_protocol::Message;
 
 use room_protocol::SubscriptionTier;
 
@@ -292,7 +292,7 @@ mod tests {
     async fn route_and_dispatch_regular_message_sends() {
         let tmp = NamedTempFile::new().unwrap();
         let state = make_state(tmp.path().to_path_buf());
-        let msg = crate::message::make_message("test-room", "alice", "hello");
+        let msg = room_protocol::make_message("test-room", "alice", "hello");
         let result = state.route_and_dispatch(msg, "alice").await.unwrap();
         assert!(matches!(result, DispatchResult::Sent(_)));
     }
@@ -301,7 +301,7 @@ mod tests {
     async fn route_and_dispatch_command_returns_reply() {
         let tmp = NamedTempFile::new().unwrap();
         let state = make_state(tmp.path().to_path_buf());
-        let msg = crate::message::make_command("test-room", "alice", "who", vec![]);
+        let msg = room_protocol::make_command("test-room", "alice", "who", vec![]);
         let result = state.route_and_dispatch(msg, "alice").await.unwrap();
         assert!(matches!(result, DispatchResult::Reply(_)));
     }
@@ -310,7 +310,7 @@ mod tests {
     async fn route_and_dispatch_dm_in_public_room_sends() {
         let tmp = NamedTempFile::new().unwrap();
         let state = make_state(tmp.path().to_path_buf());
-        let msg = crate::message::make_dm("test-room", "alice", "bob", "secret");
+        let msg = room_protocol::make_dm("test-room", "alice", "bob", "secret");
         let result = state.route_and_dispatch(msg, "alice").await.unwrap();
         assert!(matches!(result, DispatchResult::Sent(_)));
     }
@@ -331,7 +331,7 @@ mod tests {
             Some(config),
         )
         .unwrap();
-        let msg = crate::message::make_message("dm-room", "eve", "hello");
+        let msg = room_protocol::make_message("dm-room", "eve", "hello");
         let result = state.route_and_dispatch(msg, "eve").await.unwrap();
         assert!(matches!(result, DispatchResult::SendDenied(_)));
     }

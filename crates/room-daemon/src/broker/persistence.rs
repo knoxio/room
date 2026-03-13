@@ -18,7 +18,7 @@ pub(crate) fn save_subscription_map(
 
 /// Load a subscription map from disk. Returns an empty map if the file does
 /// not exist or contains invalid JSON.
-pub(crate) fn load_subscription_map(path: &Path) -> HashMap<String, SubscriptionTier> {
+pub fn load_subscription_map(path: &Path) -> HashMap<String, SubscriptionTier> {
     let contents = match std::fs::read_to_string(path) {
         Ok(c) => c,
         Err(_) => return HashMap::new(),
@@ -58,7 +58,7 @@ pub(crate) fn save_event_filter_map(
 
 /// Load an event filter map from disk. Returns an empty map if the file does
 /// not exist or contains invalid JSON.
-pub(crate) fn load_event_filter_map(path: &Path) -> HashMap<String, EventFilter> {
+pub fn load_event_filter_map(path: &Path) -> HashMap<String, EventFilter> {
     let contents = match std::fs::read_to_string(path) {
         Ok(c) => c,
         Err(_) => return HashMap::new(),

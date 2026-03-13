@@ -3,7 +3,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::message::Message;
+use room_protocol::Message;
 
 pub fn default_chat_path(room_id: &str) -> PathBuf {
     PathBuf::from(format!("/tmp/{room_id}.chat"))
@@ -69,7 +69,7 @@ pub async fn append(path: &Path, msg: &Message) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::message::{make_join, make_leave, make_message};
+    use room_protocol::{make_join, make_leave, make_message};
     use tempfile::NamedTempFile;
 
     /// Write messages via `append`, read them back via `load`, assert equality.

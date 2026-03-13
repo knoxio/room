@@ -25,6 +25,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **plugin:** Extracted taskboard plugin into its own workspace crate `room-plugin-taskboard`.
   Zero coupling to broker internals — depends only on `room-protocol`. All existing import
   paths preserved via re-export. (#454)
+- **architecture:** Extracted `room-daemon` crate from `room-cli` (Phase 1 of #511).
+  Moves broker, plugin registry, user registry, history, paths, and query modules into
+  `crates/room-daemon/`. `room-cli` re-exports all modules for full backward compatibility —
+  no downstream import changes required.
 
 ### Added
 

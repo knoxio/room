@@ -17,13 +17,14 @@ use std::{
 
 use room_protocol::plugin::{BoxFuture, HistoryAccess, MessageWriter, RoomMetadata, UserInfo};
 
+use room_protocol::{make_event, make_system, Message};
+
 use crate::{
     broker::{
         fanout::broadcast_and_persist,
         state::{ClientMap, StatusMap},
     },
     history,
-    message::{make_event, make_system, Message},
 };
 
 // ── HistoryReader ───────────────────────────────────────────────────────────
@@ -217,8 +218,8 @@ mod tests {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let path = tmp.path();
 
-        let dm = crate::message::make_dm("r", "alice", "bob", "secret");
-        let public = crate::message::make_message("r", "carol", "hello all");
+        let dm = room_protocol::make_dm("r", "alice", "bob", "secret");
+        let public = room_protocol::make_message("r", "carol", "hello all");
         history::append(path, &dm).await.unwrap();
         history::append(path, &public).await.unwrap();
 
@@ -240,7 +241,7 @@ mod tests {
         for i in 0..5 {
             history::append(
                 path,
-                &crate::message::make_message("r", "u", format!("msg {i}")),
+                &room_protocol::make_message("r", "u", format!("msg {i}")),
             )
             .await
             .unwrap();
@@ -258,9 +259,9 @@ mod tests {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         let path = tmp.path();
 
-        let msg1 = crate::message::make_message("r", "u", "first");
-        let msg2 = crate::message::make_message("r", "u", "second");
-        let msg3 = crate::message::make_message("r", "u", "third");
+        let msg1 = room_protocol::make_message("r", "u", "first");
+        let msg2 = room_protocol::make_message("r", "u", "second");
+        let msg3 = room_protocol::make_message("r", "u", "third");
         let id1 = msg1.id().to_owned();
         history::append(path, &msg1).await.unwrap();
         history::append(path, &msg2).await.unwrap();

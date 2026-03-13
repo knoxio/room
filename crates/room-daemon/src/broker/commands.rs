@@ -1,11 +1,10 @@
 use room_protocol::{EventFilter, SubscriptionTier};
 
-use crate::{
-    message::{make_system, Message},
-    plugin::{
-        builtin_command_infos, snapshot_metadata, ChatWriter, CommandContext, CommandInfo,
-        HistoryReader, ParamType, PluginResult,
-    },
+use room_protocol::{make_system, Message};
+
+use crate::plugin::{
+    builtin_command_infos, snapshot_metadata, ChatWriter, CommandContext, CommandInfo,
+    HistoryReader, ParamType, PluginResult,
 };
 
 use super::{
@@ -979,17 +978,15 @@ fn format_command_help(cmd: &CommandInfo) -> String {
 #[cfg(test)]
 mod tests {
     use super::{handle_info, handle_room_info, handle_user_info, route_command, CommandResult};
-    use crate::{
-        broker::{
-            persistence::{
-                load_event_filter_map, load_subscription_map, save_event_filter_map,
-                save_subscription_map,
-            },
-            state::RoomState,
+    use crate::broker::{
+        persistence::{
+            load_event_filter_map, load_subscription_map, save_event_filter_map,
+            save_subscription_map,
         },
-        message::{make_command, make_dm, make_message},
+        state::RoomState,
     };
     use room_protocol::SubscriptionTier;
+    use room_protocol::{make_command, make_dm, make_message};
     use std::{collections::HashMap, sync::Arc};
     use tempfile::NamedTempFile;
     use tokio::sync::Mutex;

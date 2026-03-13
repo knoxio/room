@@ -1961,6 +1961,7 @@ dependencies = [
  "ratatui",
  "regex",
  "reqwest",
+ "room-daemon",
  "room-plugin-taskboard",
  "room-protocol",
  "serde",
@@ -1970,6 +1971,25 @@ dependencies = [
  "tokio-tungstenite",
  "tower-http",
  "unicode-width",
+ "uuid",
+]
+
+[[package]]
+name = "room-daemon"
+version = "3.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "chrono",
+ "futures-util",
+ "regex",
+ "room-plugin-taskboard",
+ "room-protocol",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-tungstenite",
  "uuid",
 ]
 

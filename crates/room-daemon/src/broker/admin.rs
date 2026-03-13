@@ -3,7 +3,7 @@
 //! These commands are restricted to the room host and perform privileged
 //! operations: kick, reauth, clear-tokens, exit, clear.
 
-use crate::message::make_system;
+use room_protocol::make_system;
 
 use super::{fanout::broadcast_and_persist, state::RoomState, token_store::save_token_map};
 

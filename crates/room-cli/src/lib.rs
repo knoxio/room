@@ -1,10 +1,8 @@
-pub mod broker;
+// Modules that live in room-daemon — re-exported for backward compatibility.
+pub use room_daemon::{broker, history, paths, plugin, query, registry};
+
+// Modules that remain in room-cli.
 pub mod client;
-pub mod history;
 pub mod message;
 pub mod oneshot;
-pub mod paths;
-pub mod plugin;
-pub mod query;
-pub mod registry;
 pub mod tui;

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::message::Message;
+use room_protocol::Message;
 
 use super::{BoxFuture, CommandContext, CommandInfo, ParamSchema, ParamType, Plugin, PluginResult};
 
@@ -97,7 +97,7 @@ fn build_summary(messages: &[Message]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::message::{make_join, make_message, make_system};
+    use room_protocol::{make_join, make_message, make_system};
 
     #[test]
     fn build_summary_empty() {

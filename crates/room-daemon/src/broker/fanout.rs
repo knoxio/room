@@ -6,7 +6,8 @@ use std::{
     },
 };
 
-use crate::{history, message::Message};
+use crate::history;
+use room_protocol::Message;
 
 use super::state::{ClientMap, HostUser};
 
@@ -67,7 +68,7 @@ pub(crate) async fn dm_and_persist(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::message::{make_dm, make_message};
+    use room_protocol::{make_dm, make_message};
     use std::collections::HashMap;
     use tokio::sync::{broadcast, Mutex};
 

@@ -11,11 +11,9 @@
 
 use std::sync::Arc;
 
-use crate::{
-    history,
-    message::{make_join, make_leave, make_system, parse_client_line, Message},
-};
+use crate::history;
 use room_protocol::SubscriptionTier;
+use room_protocol::{make_join, make_leave, make_system, parse_client_line, Message};
 
 use super::{
     auth,
@@ -386,8 +384,8 @@ pub(crate) async fn broadcast_subscribe_notices(newly_subscribed: &[String], sta
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::message::make_message;
     use crate::plugin::PluginRegistry;
+    use room_protocol::make_message;
     use std::collections::HashMap;
     use std::sync::atomic::AtomicU64;
     use tokio::sync::{watch, Mutex};

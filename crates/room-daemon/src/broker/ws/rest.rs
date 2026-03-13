@@ -9,8 +9,9 @@ use axum::{
 use serde::Deserialize;
 use tokio::sync::Mutex;
 
+use room_protocol::{make_dm, make_message, Message};
+
 use crate::{
-    message::{make_dm, make_message, Message},
     query::{has_narrowing_filter, QueryFilter},
     registry::UserRegistry,
 };
@@ -643,7 +644,7 @@ mod tests {
     use tokio::sync::Mutex;
 
     use crate::broker::service::DispatchResult;
-    use crate::message::{make_dm, make_message};
+    use room_protocol::{make_dm, make_message};
 
     fn make_state(dir: &TempDir) -> Arc<RoomState> {
         let chat = dir.path().join("chat.ndjson");
