@@ -30,6 +30,50 @@ returns an error.
 
 ---
 
+## Handshake variants
+
+Every connection to the broker starts with a single-line (UDS) or single-frame (WebSocket)
+handshake that tells the broker what kind of session this is. The broker parses the first
+line and dispatches accordingly.
+
+### Per-room client handshake
+
+When connecting to a specific room (directly in single-room mode, or via `ROOM:<id>:<rest>`
+in daemon mode), the first line determines the session type:
+
+| Prefix | Type | Auth | Description |
+|---|---|---|---|
+| `SESSION:<token>` | Interactive | Token | Authenticated interactive session. Broker resolves username from token, enters full interactive mode (history replay, broadcast, join/leave events). **Recommended for TUI and agent sessions.** |
+| `TOKEN:<uuid>` | One-shot | Token | Authenticated one-shot send. Send one message as the next line, receive the broadcast echo, connection closes. Used by `room send -t <token>`. |
+| `JOIN:<username>` | Registration | None | Register a username and receive a session token (`{"type":"token","token":"<uuid>"}`). Connection closes after token issuance. Used by `room join`. |
+| `SEND:<username>` | One-shot | None | **Deprecated (v3.1.0).** Unauthenticated one-shot send. Prints a deprecation warning. Use `TOKEN:<uuid>` instead. |
+| `<username>` | Interactive | None | **Deprecated.** Unauthenticated interactive join. Use `SESSION:<token>` instead. |
+
+Recognition order: `SEND:` → `TOKEN:` → `JOIN:` → `SESSION:` → plain username.
+
+The same handshake variants apply to all three transports (UDS, WebSocket, daemon-routed).
+For WebSocket, send the handshake as the first text frame after connecting to
+`ws://host:port/ws/<room_id>`.
+
+### Daemon-level prefix
+
+In daemon mode (`room daemon`), the first line of a connection determines whether to route
+to a room or perform a lifecycle operation:
+
+| Prefix | Auth | Description |
+|---|---|---|
+| `ROOM:<room_id>:<rest>` | Varies | Route to an existing room. `<rest>` is a per-room handshake (e.g. `JOIN:alice`, `TOKEN:<uuid>`, `SESSION:<uuid>`). |
+| `JOIN:<username>` | None | Global user registration — issues a token via UserRegistry without associating a room. User must `room subscribe <room-id>` afterwards. |
+| `CREATE:<room_id>` | Token | Create a new room. Requires a valid token (validated against UserRegistry). Room ID must pass `validate_room_id()`. |
+| `DESTROY:<room_id>` | Token | Destroy an existing room. Requires a valid token. |
+
+Recognition order: `DESTROY:` → `CREATE:` → `JOIN:` → `ROOM:` → rejected.
+
+Unrecognised prefixes are rejected with an error response. In daemon mode, plain usernames
+(without a `ROOM:` prefix) are not accepted — connections must specify which room to enter.
+
+---
+
 ## Using the token
 
 Pass the token with `--token` (or `-t`) on every `send`, `poll`, `query`,
@@ -109,6 +153,24 @@ For agents that run across sessions, re-join only if authentication fails:
 TOKEN=$(room join bot-name | jq -r .token)
 # store TOKEN for subsequent send/poll/watch calls
 ```
+
+---
+
+## UserRegistry (daemon mode)
+
+In daemon mode, persistent identity is managed by the `UserRegistry` (`users.json`),
+which is the source of truth for user-to-token mappings across all rooms.
+
+Key differences from single-room mode:
+
+- **Global tokens**: `room join` in daemon mode registers the user in the UserRegistry and
+  issues a global token (not per-room). The user then subscribes to specific rooms with
+  `room subscribe <room-id>`.
+- **Persistent kick/reauth**: `/kick` and `/reauth` modify the UserRegistry entry, so
+  revocation survives broker restarts. In single-room mode, kick state is in-memory only.
+- **Migration**: `load_or_migrate_registry()` handles migration from legacy per-room
+  `.tokens` files to the centralised `users.json`. Do not bypass the registry for token
+  issuance in daemon mode.
 
 ---
 
