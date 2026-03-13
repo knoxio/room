@@ -32,6 +32,9 @@ For changes prior to the workspace restructure (v0.1.2 through v1.0.2), see the
   new `broker/token_store.rs`. Separates disk I/O from auth logic. (#588)
 - Extracted 11 taskboard handler methods from `plugin/taskboard/mod.rs` (1237 lines) into
   `plugin/taskboard/handlers.rs`. mod.rs drops to 216 lines. No logic changes. (#586)
+- Split `tui/input.rs` (2546 lines) into 3 modules: `tui/parse.rs` (message parsing
+  utilities), `tui/display.rs` (text/cursor calculations), `tui/input.rs` (key handlers).
+  `input.rs` prod code reduced to ~497 lines. (#583)
 
 ### Fixed
 

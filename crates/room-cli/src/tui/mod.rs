@@ -23,9 +23,11 @@ use tokio::{
 };
 
 mod colors;
+mod display;
 mod input;
 mod markdown;
 mod panel;
+mod parse;
 mod render;
 mod render_bots;
 mod widgets;
