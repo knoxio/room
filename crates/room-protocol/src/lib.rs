@@ -146,6 +146,45 @@ impl std::str::FromStr for SubscriptionTier {
     }
 }
 
+/// Typed event categories for structured event filtering.
+///
+/// Used with the [`Message::Event`] variant. Marked `#[non_exhaustive]` so new
+/// event types can be added without a breaking change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum EventType {
+    TaskPosted,
+    TaskAssigned,
+    TaskClaimed,
+    TaskPlanned,
+    TaskApproved,
+    TaskUpdated,
+    TaskReleased,
+    TaskFinished,
+    TaskCancelled,
+    StatusChanged,
+    ReviewRequested,
+}
+
+impl fmt::Display for EventType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::TaskPosted => write!(f, "task_posted"),
+            Self::TaskAssigned => write!(f, "task_assigned"),
+            Self::TaskClaimed => write!(f, "task_claimed"),
+            Self::TaskPlanned => write!(f, "task_planned"),
+            Self::TaskApproved => write!(f, "task_approved"),
+            Self::TaskUpdated => write!(f, "task_updated"),
+            Self::TaskReleased => write!(f, "task_released"),
+            Self::TaskFinished => write!(f, "task_finished"),
+            Self::TaskCancelled => write!(f, "task_cancelled"),
+            Self::StatusChanged => write!(f, "status_changed"),
+            Self::ReviewRequested => write!(f, "review_requested"),
+        }
+    }
+}
+
 /// Entry returned by room listing (discovery).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RoomListEntry {
@@ -232,6 +271,20 @@ pub enum Message {
         to: String,
         content: String,
     },
+    /// A typed event for structured filtering. Carries an [`EventType`] alongside
+    /// human-readable content and optional machine-readable params.
+    Event {
+        id: String,
+        room: String,
+        user: String,
+        ts: DateTime<Utc>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        seq: Option<u64>,
+        event_type: EventType,
+        content: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        params: Option<serde_json::Value>,
+    },
 }
 
 impl Message {
@@ -243,7 +296,8 @@ impl Message {
             | Self::Reply { id, .. }
             | Self::Command { id, .. }
             | Self::System { id, .. }
-            | Self::DirectMessage { id, .. } => id,
+            | Self::DirectMessage { id, .. }
+            | Self::Event { id, .. } => id,
         }
     }
 
@@ -255,7 +309,8 @@ impl Message {
             | Self::Reply { room, .. }
             | Self::Command { room, .. }
             | Self::System { room, .. }
-            | Self::DirectMessage { room, .. } => room,
+            | Self::DirectMessage { room, .. }
+            | Self::Event { room, .. } => room,
         }
     }
 
@@ -267,7 +322,8 @@ impl Message {
             | Self::Reply { user, .. }
             | Self::Command { user, .. }
             | Self::System { user, .. }
-            | Self::DirectMessage { user, .. } => user,
+            | Self::DirectMessage { user, .. }
+            | Self::Event { user, .. } => user,
         }
     }
 
@@ -279,7 +335,8 @@ impl Message {
             | Self::Reply { ts, .. }
             | Self::Command { ts, .. }
             | Self::System { ts, .. }
-            | Self::DirectMessage { ts, .. } => ts,
+            | Self::DirectMessage { ts, .. }
+            | Self::Event { ts, .. } => ts,
         }
     }
 
@@ -293,7 +350,8 @@ impl Message {
             | Self::Reply { seq, .. }
             | Self::Command { seq, .. }
             | Self::System { seq, .. }
-            | Self::DirectMessage { seq, .. } => *seq,
+            | Self::DirectMessage { seq, .. }
+            | Self::Event { seq, .. } => *seq,
         }
     }
 
@@ -304,7 +362,8 @@ impl Message {
             Self::Message { content, .. }
             | Self::Reply { content, .. }
             | Self::System { content, .. }
-            | Self::DirectMessage { content, .. } => Some(content),
+            | Self::DirectMessage { content, .. }
+            | Self::Event { content, .. } => Some(content),
             Self::Join { .. } | Self::Leave { .. } | Self::Command { .. } => None,
         }
     }
@@ -345,6 +404,7 @@ impl Message {
             Self::Command { seq, .. } => *seq = n,
             Self::System { seq, .. } => *seq = n,
             Self::DirectMessage { seq, .. } => *seq = n,
+            Self::Event { seq, .. } => *seq = n,
         }
     }
 }
@@ -439,6 +499,25 @@ pub fn make_dm(room: &str, user: &str, to: &str, content: impl Into<String>) -> 
         ts: Utc::now(),
         to: to.to_owned(),
         content: content.into(),
+        seq: None,
+    }
+}
+
+pub fn make_event(
+    room: &str,
+    user: &str,
+    event_type: EventType,
+    content: impl Into<String>,
+    params: Option<serde_json::Value>,
+) -> Message {
+    Message::Event {
+        id: new_id(),
+        room: room.to_owned(),
+        user: user.to_owned(),
+        ts: Utc::now(),
+        event_type,
+        content: content.into(),
+        params,
         seq: None,
     }
 }
@@ -1300,5 +1379,203 @@ mod tests {
         let tier = SubscriptionTier::Full;
         let copy = tier;
         assert_eq!(tier, copy); // both valid — proves Copy
+    }
+
+    // ── EventType tests ─────────────────────────────────────────────────────
+
+    #[test]
+    fn event_type_serde_round_trip() {
+        for et in [
+            EventType::TaskPosted,
+            EventType::TaskAssigned,
+            EventType::TaskClaimed,
+            EventType::TaskPlanned,
+            EventType::TaskApproved,
+            EventType::TaskUpdated,
+            EventType::TaskReleased,
+            EventType::TaskFinished,
+            EventType::TaskCancelled,
+            EventType::StatusChanged,
+            EventType::ReviewRequested,
+        ] {
+            let json = serde_json::to_string(&et).unwrap();
+            let back: EventType = serde_json::from_str(&json).unwrap();
+            assert_eq!(et, back);
+        }
+    }
+
+    #[test]
+    fn event_type_serde_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&EventType::TaskPosted).unwrap(),
+            r#""task_posted""#
+        );
+        assert_eq!(
+            serde_json::to_string(&EventType::TaskAssigned).unwrap(),
+            r#""task_assigned""#
+        );
+        assert_eq!(
+            serde_json::to_string(&EventType::ReviewRequested).unwrap(),
+            r#""review_requested""#
+        );
+    }
+
+    #[test]
+    fn event_type_display() {
+        assert_eq!(EventType::TaskPosted.to_string(), "task_posted");
+        assert_eq!(EventType::TaskCancelled.to_string(), "task_cancelled");
+        assert_eq!(EventType::StatusChanged.to_string(), "status_changed");
+    }
+
+    #[test]
+    fn event_type_is_copy() {
+        let et = EventType::TaskPosted;
+        let copy = et;
+        assert_eq!(et, copy);
+    }
+
+    // ── Event message tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn event_round_trips() {
+        let msg = Message::Event {
+            id: fixed_id(),
+            room: "r".into(),
+            user: "plugin:taskboard".into(),
+            ts: fixed_ts(),
+            seq: None,
+            event_type: EventType::TaskAssigned,
+            content: "task tb-001 claimed by agent".into(),
+            params: None,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let back: Message = serde_json::from_str(&json).unwrap();
+        assert_eq!(msg, back);
+    }
+
+    #[test]
+    fn event_round_trips_with_params() {
+        let params = serde_json::json!({"task_id": "tb-001", "assignee": "r2d2"});
+        let msg = Message::Event {
+            id: fixed_id(),
+            room: "r".into(),
+            user: "plugin:taskboard".into(),
+            ts: fixed_ts(),
+            seq: None,
+            event_type: EventType::TaskAssigned,
+            content: "task tb-001 assigned to r2d2".into(),
+            params: Some(params),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let back: Message = serde_json::from_str(&json).unwrap();
+        assert_eq!(msg, back);
+    }
+
+    #[test]
+    fn event_json_has_type_and_event_type() {
+        let msg = Message::Event {
+            id: fixed_id(),
+            room: "r".into(),
+            user: "plugin:taskboard".into(),
+            ts: fixed_ts(),
+            seq: None,
+            event_type: EventType::TaskFinished,
+            content: "task done".into(),
+            params: None,
+        };
+        let v: serde_json::Value = serde_json::to_value(&msg).unwrap();
+        assert_eq!(v["type"], "event");
+        assert_eq!(v["event_type"], "task_finished");
+        assert_eq!(v["content"], "task done");
+        assert!(v.get("params").is_none(), "null params should be omitted");
+    }
+
+    #[test]
+    fn event_json_includes_params_when_present() {
+        let msg = Message::Event {
+            id: fixed_id(),
+            room: "r".into(),
+            user: "broker".into(),
+            ts: fixed_ts(),
+            seq: None,
+            event_type: EventType::StatusChanged,
+            content: "alice set status: busy".into(),
+            params: Some(serde_json::json!({"user": "alice", "status": "busy"})),
+        };
+        let v: serde_json::Value = serde_json::to_value(&msg).unwrap();
+        assert_eq!(v["params"]["user"], "alice");
+        assert_eq!(v["params"]["status"], "busy");
+    }
+
+    #[test]
+    fn deserialize_event_from_literal() {
+        let raw = r#"{"type":"event","id":"abc","room":"r","user":"bot","ts":"2026-03-05T10:00:00Z","event_type":"task_posted","content":"posted"}"#;
+        let msg: Message = serde_json::from_str(raw).unwrap();
+        assert!(matches!(
+            &msg,
+            Message::Event { event_type, content, .. }
+            if *event_type == EventType::TaskPosted && content == "posted"
+        ));
+    }
+
+    #[test]
+    fn event_accessors_work() {
+        let msg = make_event("r", "bot", EventType::TaskClaimed, "claimed", None);
+        assert_eq!(msg.room(), "r");
+        assert_eq!(msg.user(), "bot");
+        assert_eq!(msg.content(), Some("claimed"));
+        assert!(msg.seq().is_none());
+    }
+
+    #[test]
+    fn event_set_seq() {
+        let mut msg = make_event("r", "bot", EventType::TaskPosted, "posted", None);
+        msg.set_seq(42);
+        assert_eq!(msg.seq(), Some(42));
+    }
+
+    #[test]
+    fn event_is_visible_to_everyone() {
+        let msg = make_event("r", "bot", EventType::TaskFinished, "done", None);
+        assert!(msg.is_visible_to("anyone", None));
+        assert!(msg.is_visible_to("other", Some("host")));
+    }
+
+    #[test]
+    fn event_mentions_extracted() {
+        let msg = make_event(
+            "r",
+            "plugin:taskboard",
+            EventType::TaskAssigned,
+            "task assigned to @r2d2 by @ba",
+            None,
+        );
+        assert_eq!(msg.mentions(), vec!["r2d2", "ba"]);
+    }
+
+    #[test]
+    fn make_event_constructor() {
+        let params = serde_json::json!({"key": "value"});
+        let msg = make_event(
+            "room1",
+            "user1",
+            EventType::ReviewRequested,
+            "review pls",
+            Some(params.clone()),
+        );
+        assert_eq!(msg.room(), "room1");
+        assert_eq!(msg.user(), "user1");
+        assert_eq!(msg.content(), Some("review pls"));
+        if let Message::Event {
+            event_type,
+            params: p,
+            ..
+        } = &msg
+        {
+            assert_eq!(*event_type, EventType::ReviewRequested);
+            assert_eq!(p.as_ref().unwrap(), &params);
+        } else {
+            panic!("expected Event variant");
+        }
     }
 }

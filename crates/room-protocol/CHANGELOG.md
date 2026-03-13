@@ -7,6 +7,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `EventType` enum (`#[non_exhaustive]`) — typed event categories for structured
+  event filtering: task lifecycle, status changes, review requests. (#430)
+- `Message::Event` variant — carries `event_type`, `content`, and optional `params`
+  (structured JSON). Broadcast like any other message; no filtering in this release. (#430)
+- `make_event()` constructor for building typed events. (#430)
+
 ## [3.0.0-rc.6] - 2026-03-10
 
 Version bump to stay in sync with room-cli 3.0.0-rc.6. No protocol changes.

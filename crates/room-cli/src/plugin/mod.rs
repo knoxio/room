@@ -21,7 +21,7 @@ use crate::{
         state::{ClientMap, StatusMap},
     },
     history,
-    message::{make_system, Message},
+    message::{make_event, make_system, EventType, Message},
 };
 
 /// Boxed future type used by [`Plugin::handle`] for dyn compatibility.
@@ -271,6 +271,18 @@ impl ChatWriter {
                 let _ = tx.send(line.clone());
             }
         }
+        Ok(())
+    }
+
+    /// Broadcast a typed event to all connected clients and persist to history.
+    pub async fn emit_event(
+        &self,
+        event_type: EventType,
+        content: &str,
+        params: Option<serde_json::Value>,
+    ) -> anyhow::Result<()> {
+        let msg = make_event(&self.room_id, &self.identity, event_type, content, params);
+        broadcast_and_persist(&msg, &self.clients, &self.chat_path, &self.seq_counter).await?;
         Ok(())
     }
 }

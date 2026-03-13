@@ -6,6 +6,8 @@ use std::time::Duration;
 
 use task::{next_id, LiveTask, Task, TaskStatus};
 
+use room_protocol::EventType;
+
 use crate::plugin::{
     BoxFuture, CommandContext, CommandInfo, ParamSchema, ParamType, Plugin, PluginResult,
 };
@@ -612,6 +614,21 @@ impl Plugin for TaskboardPlugin {
                 other => (format!("unknown action: {other}. use: post, list, show, claim, assign, plan, approve, update, release, finish, cancel"), false),
             };
             if broadcast {
+                // Emit a typed event alongside the system broadcast.
+                let event_type = match action {
+                    "post" => Some(EventType::TaskPosted),
+                    "claim" | "assign" => Some(EventType::TaskAssigned),
+                    "plan" => Some(EventType::TaskPlanned),
+                    "approve" => Some(EventType::TaskApproved),
+                    "update" => Some(EventType::TaskUpdated),
+                    "release" => Some(EventType::TaskReleased),
+                    "finish" => Some(EventType::TaskFinished),
+                    "cancel" => Some(EventType::TaskCancelled),
+                    _ => None,
+                };
+                if let Some(et) = event_type {
+                    let _ = ctx.writer.emit_event(et, &result, None).await;
+                }
                 Ok(PluginResult::Broadcast(result))
             } else {
                 Ok(PluginResult::Reply(result))

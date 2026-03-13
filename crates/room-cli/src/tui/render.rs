@@ -442,6 +442,35 @@ pub(super) fn format_message(
             }
             Text::from(lines)
         }
+        Message::Event {
+            ts,
+            event_type,
+            content,
+            ..
+        } => {
+            let ts_str = ts.format("%H:%M:%S").to_string();
+            let tag = format!("[event:{event_type}]");
+            let prefix_plain = format!("[{ts_str}] {tag} ");
+            let prefix_width = prefix_plain.chars().count();
+            let content_width = available_width.saturating_sub(prefix_width);
+            let chunks = wrap_words(content, content_width);
+            let indent = " ".repeat(prefix_width);
+            let mut lines: Vec<Line<'static>> = Vec::new();
+            for (i, chunk) in chunks.into_iter().enumerate() {
+                if i == 0 {
+                    lines.push(Line::from(vec![
+                        Span::styled(format!("[{ts_str}] "), Style::default().fg(Color::DarkGray)),
+                        Span::styled(format!("{tag} {chunk}"), Style::default().fg(Color::Yellow)),
+                    ]));
+                } else {
+                    lines.push(Line::from(vec![
+                        Span::raw(indent.clone()),
+                        Span::styled(chunk, Style::default().fg(Color::Yellow)),
+                    ]));
+                }
+            }
+            Text::from(lines)
+        }
     }
 }
 
