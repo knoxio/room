@@ -287,8 +287,8 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let state = make_state(&dir);
         assert!(
-            state.plugin_registry.resolve("help").is_some(),
-            "help plugin should be registered"
+            state.plugin_registry.resolve("help").is_none(),
+            "help is a builtin, not a plugin"
         );
         assert!(
             state.plugin_registry.resolve("stats").is_some(),

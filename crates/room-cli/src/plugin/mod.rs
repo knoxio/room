@@ -1,4 +1,3 @@
-pub mod help;
 pub mod queue;
 pub mod stats;
 pub mod taskboard;
@@ -330,6 +329,7 @@ impl RoomMetadata {
 /// Built-in command names that plugins may not override.
 const RESERVED_COMMANDS: &[&str] = &[
     "who",
+    "help",
     "kick",
     "reauth",
     "clear-tokens",
@@ -369,8 +369,6 @@ impl PluginRegistry {
     /// room has the same set of `/` commands available.
     pub(crate) fn with_all_plugins(chat_path: &Path, claim_map: ClaimMap) -> anyhow::Result<Self> {
         let mut registry = Self::new();
-
-        registry.register(Box::new(help::HelpPlugin))?;
 
         let queue_path = queue::QueuePlugin::queue_path_from_chat(chat_path);
         registry.register(Box::new(queue::QueuePlugin::new(queue_path, claim_map)?))?;
@@ -631,6 +629,17 @@ pub fn builtin_command_infos() -> Vec<CommandInfo> {
             usage: "/subscriptions".to_owned(),
             params: vec![],
         },
+        CommandInfo {
+            name: "help".to_owned(),
+            description: "List available commands or get help for a specific command".to_owned(),
+            usage: "/help [command]".to_owned(),
+            params: vec![ParamSchema {
+                name: "command".to_owned(),
+                param_type: ParamType::Text,
+                required: false,
+                description: "Command name to get help for".to_owned(),
+            }],
+        },
     ]
 }
 
@@ -640,7 +649,6 @@ pub fn builtin_command_infos() -> Vec<CommandInfo> {
 /// access to the broker's `PluginRegistry`.
 pub fn all_known_commands() -> Vec<CommandInfo> {
     let mut cmds = builtin_command_infos();
-    cmds.extend(help::HelpPlugin.commands());
     cmds.extend(queue::QueuePlugin::default_commands());
     cmds.extend(stats::StatsPlugin.commands());
     cmds.extend(taskboard::TaskboardPlugin::default_commands());
@@ -882,6 +890,7 @@ mod tests {
             "claimed",
             "reply",
             "who",
+            "help",
             "kick",
             "reauth",
             "clear-tokens",
@@ -937,8 +946,8 @@ mod tests {
         assert!(names.contains(&"dm"));
         assert!(names.contains(&"who"));
         assert!(names.contains(&"kick"));
-        // Plugins
         assert!(names.contains(&"help"));
+        // Plugins
         assert!(names.contains(&"stats"));
     }
 

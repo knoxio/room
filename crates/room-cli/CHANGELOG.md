@@ -25,6 +25,7 @@ For changes prior to the workspace restructure (v0.1.2 through v1.0.2), see the
 
 - `/set_status` moved from plugin to builtin command — no behavior change, removes
   `PluginResult::SetStatus` variant and `plugin/status.rs`. (#508)
+- `/help` moved from plugin to builtin command — handled directly in `route_command` alongside `/who` and `/room-info`, eliminating the circular dependency on `CommandContext.available_commands`. (#509)
 
 ### Fixed
 

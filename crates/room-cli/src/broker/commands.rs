@@ -264,6 +264,16 @@ pub(crate) async fn route_command(
             return Ok(CommandResult::Handled);
         }
 
+        // Help command — handled inline because it needs access to both
+        // builtin_command_infos() and the plugin registry, which makes it
+        // infrastructure rather than a user plugin (#509).
+        if cmd == "help" {
+            let reply = handle_help(params, state);
+            let sys = make_system(&state.room_id, "broker", reply);
+            let json = serde_json::to_string(&sys)?;
+            return Ok(CommandResult::Reply(json));
+        }
+
         // Plugin dispatch — check registry before falling through to Passthrough.
         if let Some(plugin) = state.plugin_registry.resolve(cmd) {
             let plugin_name = plugin.name().to_owned();
@@ -445,6 +455,67 @@ async fn handle_room_info(state: &RoomState) -> String {
             )
         }
     }
+}
+
+// ── Help command ──────────────────────────────────────────────────────────────
+
+/// Handle `/help [command]` — lists all commands or shows detail for one.
+fn handle_help(params: &[String], state: &RoomState) -> String {
+    let builtins = builtin_command_infos();
+    let plugin_cmds = state.plugin_registry.all_commands();
+
+    if let Some(target) = params.first() {
+        let target = target.strip_prefix('/').unwrap_or(target);
+
+        // Check plugin commands first (matches original behaviour)
+        if let Some(cmd) = plugin_cmds.iter().find(|c| c.name == target) {
+            return format_command_help(cmd);
+        }
+        // Then builtins
+        if let Some(cmd) = builtins.iter().find(|c| c.name == target) {
+            return format_command_help(cmd);
+        }
+        return format!("unknown command: /{target}");
+    }
+
+    // List all commands: builtins first, then plugins
+    let mut lines = vec!["available commands:".to_owned()];
+    for cmd in &builtins {
+        lines.push(format!("  {} — {}", cmd.usage, cmd.description));
+    }
+    for cmd in &plugin_cmds {
+        lines.push(format!("  {} — {}", cmd.usage, cmd.description));
+    }
+    lines.join("\n")
+}
+
+/// Format detailed help for a single command, including typed parameter info.
+fn format_command_help(cmd: &CommandInfo) -> String {
+    let mut lines = vec![cmd.usage.clone(), format!("  {}", cmd.description)];
+    if !cmd.params.is_empty() {
+        lines.push("  parameters:".to_owned());
+        for p in &cmd.params {
+            let req = if p.required { "required" } else { "optional" };
+            let type_hint = match &p.param_type {
+                ParamType::Text => "text".to_owned(),
+                ParamType::Username => "username".to_owned(),
+                ParamType::Number { min, max } => match (min, max) {
+                    (Some(lo), Some(hi)) => format!("number ({lo}..{hi})"),
+                    (Some(lo), None) => format!("number ({lo}..)"),
+                    (None, Some(hi)) => format!("number (..{hi})"),
+                    (None, None) => "number".to_owned(),
+                },
+                ParamType::Choice(values) => {
+                    format!("one of: {}", values.join(", "))
+                }
+            };
+            lines.push(format!(
+                "    <{}> — {} [{}] {}",
+                p.name, p.description, req, type_hint
+            ));
+        }
+    }
+    lines.join("\n")
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -1645,5 +1716,103 @@ mod tests {
             json.contains("plugin:taskboard"),
             "reply should identify plugin source"
         );
+    }
+
+    // ── route_command: help ───────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn help_no_args_lists_all_commands() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+        let msg = make_command("test-room", "alice", "help", vec![]);
+        let result = route_command(msg, "alice", &state).await.unwrap();
+        let CommandResult::Reply(json) = result else {
+            panic!("expected Reply for /help");
+        };
+        assert!(json.contains("available commands:"));
+        assert!(json.contains("/who"));
+        assert!(json.contains("/help"));
+        // Plugin commands should also appear
+        assert!(json.contains("/stats"));
+    }
+
+    #[tokio::test]
+    async fn help_specific_builtin_command() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+        let msg = make_command("test-room", "alice", "help", vec!["who".to_owned()]);
+        let result = route_command(msg, "alice", &state).await.unwrap();
+        let CommandResult::Reply(json) = result else {
+            panic!("expected Reply for /help who");
+        };
+        assert!(json.contains("/who"));
+        assert!(json.contains("List users in the room"));
+    }
+
+    #[tokio::test]
+    async fn help_specific_plugin_command() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+        let msg = make_command("test-room", "alice", "help", vec!["stats".to_owned()]);
+        let result = route_command(msg, "alice", &state).await.unwrap();
+        let CommandResult::Reply(json) = result else {
+            panic!("expected Reply for /help stats");
+        };
+        assert!(json.contains("/stats"));
+        assert!(json.contains("statistical summary"));
+    }
+
+    #[tokio::test]
+    async fn help_unknown_command() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+        let msg = make_command("test-room", "alice", "help", vec!["nonexistent".to_owned()]);
+        let result = route_command(msg, "alice", &state).await.unwrap();
+        let CommandResult::Reply(json) = result else {
+            panic!("expected Reply for /help nonexistent");
+        };
+        assert!(json.contains("unknown command: /nonexistent"));
+    }
+
+    #[tokio::test]
+    async fn help_strips_leading_slash_from_arg() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+        let msg = make_command("test-room", "alice", "help", vec!["/kick".to_owned()]);
+        let result = route_command(msg, "alice", &state).await.unwrap();
+        let CommandResult::Reply(json) = result else {
+            panic!("expected Reply for /help /kick");
+        };
+        assert!(json.contains("/kick"));
+        assert!(json.contains("parameters:"));
+        assert!(json.contains("username"));
+    }
+
+    #[tokio::test]
+    async fn help_builtin_shows_param_info() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+        let msg = make_command("test-room", "alice", "help", vec!["kick".to_owned()]);
+        let result = route_command(msg, "alice", &state).await.unwrap();
+        let CommandResult::Reply(json) = result else {
+            panic!("expected Reply for /help kick");
+        };
+        assert!(json.contains("parameters:"));
+        assert!(json.contains("username"));
+        assert!(json.contains("required"));
+    }
+
+    #[tokio::test]
+    async fn help_reply_comes_from_broker_not_plugin() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+        let msg = make_command("test-room", "alice", "help", vec![]);
+        let result = route_command(msg, "alice", &state).await.unwrap();
+        let CommandResult::Reply(json) = result else {
+            panic!("expected Reply");
+        };
+        // Should be from "broker", not "plugin:help"
+        assert!(json.contains("\"user\":\"broker\""));
+        assert!(!json.contains("plugin:help"));
     }
 }

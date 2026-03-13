@@ -1315,8 +1315,8 @@ mod tests {
         let daemon = DaemonState::new(DaemonConfig::default());
         daemon.create_room("plugtest").await.unwrap();
         let state = get_room(&daemon, "plugtest").await;
-        // help and stats should be registered
-        assert!(state.plugin_registry.resolve("help").is_some());
+        // help is a builtin (not in plugin registry), stats should be registered
+        assert!(state.plugin_registry.resolve("help").is_none());
         assert!(state.plugin_registry.resolve("stats").is_some());
     }
 
