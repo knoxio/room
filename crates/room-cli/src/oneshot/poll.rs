@@ -246,8 +246,10 @@ pub async fn cmd_watch(room_id: &str, token: &str, interval_secs: u64) -> anyhow
     let cursor_path = paths::cursor_path(room_id, &username);
     let host = read_host_from_meta(&meta_path);
 
+    let ef = load_user_event_filter(room_id, &username);
+
     loop {
-        let messages = poll_messages(
+        let mut messages = poll_messages(
             &chat_path,
             &cursor_path,
             Some(&username),
@@ -256,11 +258,14 @@ pub async fn cmd_watch(room_id: &str, token: &str, interval_secs: u64) -> anyhow
         )
         .await?;
 
+        apply_event_filter(&mut messages, &ef);
+
         let foreign: Vec<&Message> = messages
             .iter()
             .filter(|m| match m {
                 Message::Message { user, .. } | Message::System { user, .. } => user != &username,
                 Message::DirectMessage { to, .. } => to == &username,
+                Message::Event { user, .. } => user != &username,
                 _ => false,
             })
             .collect();
@@ -293,7 +298,7 @@ pub async fn cmd_poll(
     let cursor_path = paths::cursor_path(room_id, &username);
     let host = read_host_from_meta(&meta_path);
 
-    let messages = poll_messages(
+    let mut messages = poll_messages(
         &chat_path,
         &cursor_path,
         Some(&username),
@@ -301,6 +306,10 @@ pub async fn cmd_poll(
         since.as_deref(),
     )
     .await?;
+
+    let ef = load_user_event_filter(room_id, &username);
+    apply_event_filter(&mut messages, &ef);
+
     for msg in &messages {
         if mentions_only && !msg.mentions().iter().any(|m| m == &username) {
             continue;
@@ -361,7 +370,11 @@ pub async fn cmd_poll_multi(
     }
 
     let room_refs: Vec<(&str, &Path)> = rooms.iter().map(|(id, p)| (*id, p.as_path())).collect();
-    let messages = poll_messages_multi(&room_refs, &username).await?;
+    let mut messages = poll_messages_multi(&room_refs, &username).await?;
+
+    let room_id_strings: Vec<String> = room_ids.iter().map(|s| s.to_string()).collect();
+    apply_per_room_event_filter(&mut messages, &room_id_strings, &username);
+
     for msg in &messages {
         if mentions_only && !msg.mentions().iter().any(|m| m == &username) {
             continue;

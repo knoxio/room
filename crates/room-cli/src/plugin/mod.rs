@@ -354,6 +354,8 @@ const RESERVED_COMMANDS: &[&str] = &[
     "subscribe",
     "set_subscription",
     "unsubscribe",
+    "subscribe_events",
+    "set_event_filter",
     "set_status",
     "subscriptions",
 ];
@@ -612,6 +614,28 @@ pub fn builtin_command_infos() -> Vec<CommandInfo> {
             params: vec![],
         },
         CommandInfo {
+            name: "subscribe_events".to_owned(),
+            description: "Set event type filter for this room".to_owned(),
+            usage: "/subscribe_events [filter]".to_owned(),
+            params: vec![ParamSchema {
+                name: "filter".to_owned(),
+                param_type: ParamType::Text,
+                required: false,
+                description: "all, none, or comma-separated event types (default: all)".to_owned(),
+            }],
+        },
+        CommandInfo {
+            name: "set_event_filter".to_owned(),
+            description: "Alias for /subscribe_events — set event type filter".to_owned(),
+            usage: "/set_event_filter [filter]".to_owned(),
+            params: vec![ParamSchema {
+                name: "filter".to_owned(),
+                param_type: ParamType::Text,
+                required: false,
+                description: "all, none, or comma-separated event types (default: all)".to_owned(),
+            }],
+        },
+        CommandInfo {
             name: "set_status".to_owned(),
             description: "Set your presence status".to_owned(),
             usage: "/set_status <status>".to_owned(),
@@ -624,7 +648,7 @@ pub fn builtin_command_infos() -> Vec<CommandInfo> {
         },
         CommandInfo {
             name: "subscriptions".to_owned(),
-            description: "List subscription tiers for this room".to_owned(),
+            description: "List subscription tiers and event filters for this room".to_owned(),
             usage: "/subscriptions".to_owned(),
             params: vec![],
         },
@@ -898,6 +922,8 @@ mod tests {
             "subscribe",
             "set_subscription",
             "unsubscribe",
+            "subscribe_events",
+            "set_event_filter",
             "subscriptions",
         ] {
             assert!(
