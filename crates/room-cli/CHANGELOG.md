@@ -15,6 +15,9 @@ For changes prior to the workspace restructure (v0.1.2 through v1.0.2), see the
 - 16 unit tests for `broker/ws/rest.rs` error paths: `extract_bearer_token` (4 tests),
   `build_query_filter` (3 tests), `apply_query_filter` (3 tests),
   `dispatch_to_response` (3 tests), `require_auth` (3 tests). (#575)
+- 3 taskboard lease expiry boundary tests: exact TTL boundary (`>=` semantics),
+  multiple simultaneous expirations via `sweep_expired`, and Finished tasks
+  skipped during sweep. (#580)
 
 ### Changed
 

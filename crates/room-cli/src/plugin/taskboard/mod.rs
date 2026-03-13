@@ -213,4 +213,81 @@ mod tests {
         assert_eq!(default[0].name, instance[0].name);
         assert_eq!(default[0].params.len(), instance[0].params.len());
     }
+
+    /// Multiple tasks with expired leases must all be swept in a single call,
+    /// and Finished tasks must be left untouched even with a stale lease.
+    #[test]
+    fn sweep_expired_multiple_simultaneous_and_skips_finished() {
+        let (plugin, _tmp) = make_plugin();
+
+        // Seed 4 tasks: 3 Claimed (will expire) + 1 Finished (must survive).
+        {
+            let mut board = plugin.board.lock().unwrap();
+            let stale = std::time::Instant::now() - std::time::Duration::from_secs(700);
+            for i in 1..=3 {
+                let mut t = task::Task {
+                    id: format!("tb-{i:03}"),
+                    description: format!("expiry test {i}"),
+                    status: TaskStatus::Claimed,
+                    posted_by: "alice".to_owned(),
+                    assigned_to: Some(format!("agent-{i}")),
+                    posted_at: chrono::Utc::now(),
+                    claimed_at: Some(chrono::Utc::now()),
+                    plan: None,
+                    approved_by: None,
+                    approved_at: None,
+                    updated_at: None,
+                    notes: None,
+                };
+                let mut lt = LiveTask::new(t.clone());
+                lt.lease_start = Some(stale);
+                board.push(lt);
+            }
+            // Finished task with a stale lease — must NOT be swept.
+            let mut finished = task::Task {
+                id: "tb-004".to_owned(),
+                description: "finished task".to_owned(),
+                status: TaskStatus::Finished,
+                posted_by: "alice".to_owned(),
+                assigned_to: Some("bob".to_owned()),
+                posted_at: chrono::Utc::now(),
+                claimed_at: Some(chrono::Utc::now()),
+                plan: Some("done".to_owned()),
+                approved_by: None,
+                approved_at: None,
+                updated_at: None,
+                notes: None,
+            };
+            let mut lt_finished = LiveTask::new(finished.clone());
+            // Manually inject stale lease to simulate edge case.
+            lt_finished.lease_start = Some(stale);
+            board.push(lt_finished);
+        }
+
+        let expired = plugin.sweep_expired();
+
+        // All 3 Claimed tasks should have expired.
+        assert_eq!(
+            expired.len(),
+            3,
+            "expected 3 expired tasks, got {expired:?}"
+        );
+        for id in &expired {
+            assert!(!id.contains("tb-004"), "Finished task must not be swept");
+        }
+
+        // Verify board state after sweep.
+        let board = plugin.board.lock().unwrap();
+        for lt in board.iter() {
+            if lt.task.id == "tb-004" {
+                assert_eq!(lt.task.status, TaskStatus::Finished);
+                assert_eq!(lt.task.assigned_to.as_deref(), Some("bob"));
+                assert_eq!(lt.task.plan.as_deref(), Some("done"));
+            } else {
+                assert_eq!(lt.task.status, TaskStatus::Open);
+                assert!(lt.task.assigned_to.is_none());
+                assert!(lt.lease_start.is_none());
+            }
+        }
+    }
 }
