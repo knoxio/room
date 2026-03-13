@@ -434,8 +434,31 @@ async fn ws_oneshot_send(
     if trimmed.is_empty() {
         return Ok(());
     }
-    let msg = parse_client_line(trimmed, &state.room_id, &username)?;
-    match route_command(msg, &username, state).await? {
+    let msg = match parse_client_line(trimmed, &state.room_id, &username) {
+        Ok(m) => m,
+        Err(e) => {
+            let err = serde_json::json!({
+                "type": "error",
+                "code": "parse_error",
+                "message": format!("{e:#}")
+            });
+            let _ = ws_tx.send(WsMessage::Text(err.to_string().into())).await;
+            return Ok(());
+        }
+    };
+    let cmd_result = match route_command(msg, &username, state).await {
+        Ok(r) => r,
+        Err(e) => {
+            let err = serde_json::json!({
+                "type": "error",
+                "code": "plugin_error",
+                "message": format!("{e:#}")
+            });
+            let _ = ws_tx.send(WsMessage::Text(err.to_string().into())).await;
+            return Ok(());
+        }
+    };
+    match cmd_result {
         CommandResult::Handled | CommandResult::Shutdown => {
             // Always send a response so oneshot clients don't get EOF.
             let ack = make_system(&state.room_id, "broker", "ok");

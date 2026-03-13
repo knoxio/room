@@ -816,3 +816,50 @@ async fn deprecated_send_message_fn_still_delivers() {
         "deprecated send_message should still deliver messages"
     );
 }
+
+// ── Regression: oneshot must return error JSON, not EOF (#601) ───────────────
+
+/// Regression test for #601: sending malformed JSON over the oneshot TOKEN:
+/// path previously caused `parse_client_line` to fail, propagating the error
+/// via `?` and dropping the connection (EOF). After the fix, the client
+/// receives a `{"type":"error","code":"parse_error",...}` JSON response.
+#[tokio::test]
+async fn oneshot_malformed_json_returns_error_not_eof() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use tokio::net::UnixStream;
+
+    let broker = TestBroker::start("t_oneshot_parse_err").await;
+
+    // Join to get a valid token.
+    let (_, token) = room_cli::oneshot::join_session(&broker.socket_path, "agent")
+        .await
+        .expect("join_session failed");
+
+    // Connect with TOKEN: handshake and send malformed JSON.
+    let stream = UnixStream::connect(&broker.socket_path).await.unwrap();
+    let (read_half, mut write_half) = stream.into_split();
+
+    write_half
+        .write_all(format!("TOKEN:{token}\n").as_bytes())
+        .await
+        .unwrap();
+    // Malformed JSON — starts with '{' so parse_client_line tries JSON parsing.
+    write_half.write_all(b"{not valid json\n").await.unwrap();
+
+    let mut reader = BufReader::new(read_half);
+    let mut line = String::new();
+    let n = timeout(Duration::from_secs(2), reader.read_line(&mut line))
+        .await
+        .expect("timed out waiting for error response")
+        .expect("read_line failed");
+
+    assert!(n > 0, "expected error JSON response, got EOF");
+    let parsed: serde_json::Value = serde_json::from_str(line.trim())
+        .unwrap_or_else(|_| panic!("response is not valid JSON: {line}"));
+    assert_eq!(parsed["type"], "error");
+    assert_eq!(parsed["code"], "parse_error");
+    assert!(
+        parsed["message"].as_str().unwrap().len() > 0,
+        "error message should not be empty"
+    );
+}

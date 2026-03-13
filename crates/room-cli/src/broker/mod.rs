@@ -593,8 +593,31 @@ pub(crate) async fn handle_oneshot_send(
     if trimmed.is_empty() {
         return Ok(());
     }
-    let msg = parse_client_line(trimmed, &state.room_id, &username)?;
-    match route_command(msg, &username, state).await? {
+    let msg = match parse_client_line(trimmed, &state.room_id, &username) {
+        Ok(m) => m,
+        Err(e) => {
+            let err = serde_json::json!({
+                "type": "error",
+                "code": "parse_error",
+                "message": format!("{e:#}")
+            });
+            write_half.write_all(format!("{err}\n").as_bytes()).await?;
+            return Ok(());
+        }
+    };
+    let cmd_result = match route_command(msg, &username, state).await {
+        Ok(r) => r,
+        Err(e) => {
+            let err = serde_json::json!({
+                "type": "error",
+                "code": "plugin_error",
+                "message": format!("{e:#}")
+            });
+            write_half.write_all(format!("{err}\n").as_bytes()).await?;
+            return Ok(());
+        }
+    };
+    match cmd_result {
         CommandResult::Handled | CommandResult::Shutdown => {
             // Always send a response so oneshot clients don't get EOF.
             let ack = make_system(&state.room_id, "broker", "ok");
