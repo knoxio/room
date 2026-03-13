@@ -17,6 +17,9 @@ For changes prior to the workspace restructure (v0.1.2 through v1.0.2), see the
 - REST handlers: extracted shared inner functions (`join_inner`, `send_inner`, `poll_inner`,
   `query_inner`) from 4 duplicated single-room/daemon endpoint pairs. Added unified
   `validate_token_with_fallback` and `require_auth` helpers. Net -170 lines. (#554)
+- Split `oneshot/poll.rs` (1824 lines) into 6 focused modules under `oneshot/poll/`:
+  `mod.rs`, `meta.rs`, `filter_tier.rs`, `filter_events.rs`, `commands.rs`, `multi_room.rs`.
+  No API changes — all public functions remain re-exported at the same paths. (#555)
 
 ### Fixed
 
