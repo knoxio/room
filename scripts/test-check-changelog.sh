@@ -103,21 +103,21 @@ git add crates/room-cli/CHANGELOG.md
 git commit -q -m "add per-crate changelog entry"
 assert_exit "per-crate CHANGELOG changed exits 0" 0 bash "$CHECK_SCRIPT" origin/master
 
-# ── Test: [skip changelog] in commit message → exit 0 ────────────────
+# ── Test: SKIP_CHANGELOG env var → exit 0 ────────────────────────────
 
 setup_repo
 echo "some code" > src.rs
 git add src.rs
-git commit -q -m "docs: update readme [skip changelog]"
-assert_exit "[skip changelog] marker exits 0" 0 bash "$CHECK_SCRIPT" origin/master
+git commit -q -m "docs: update readme"
+assert_exit "SKIP_CHANGELOG=1 exits 0" 0 env SKIP_CHANGELOG=1 bash "$CHECK_SCRIPT" origin/master
 
-# ── Test: [skip changelog] case insensitive ──────────────────────────
+# ── Test: SKIP_CHANGELOG unset → normal check applies ────────────────
 
 setup_repo
 echo "some code" > src.rs
 git add src.rs
-git commit -q -m "ci: update workflow [Skip Changelog]"
-assert_exit "[Skip Changelog] case insensitive exits 0" 0 bash "$CHECK_SCRIPT" origin/master
+git commit -q -m "code without changelog"
+assert_exit "SKIP_CHANGELOG unset still checks changelog" 1 bash "$CHECK_SCRIPT" origin/master
 
 # ── Test: multiple commits, one has changelog → exit 0 ───────────────
 

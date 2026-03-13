@@ -41,6 +41,9 @@ jobs:
           fetch-depth: 0
       - name: Check changelog entry
         run: bash scripts/check-changelog.sh origin/${{ github.base_ref }}
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          GH_TOKEN: ${{ github.token }}
 
   scripts:
     name: Shell Scripts
