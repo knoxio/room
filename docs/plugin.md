@@ -1,3 +1,122 @@
+# Plugins
+
+This document covers two systems: the **broker plugin system** (compiled-in
+Rust plugins that extend the broker with custom commands) and the **Claude
+Code plugin** (the external skill that teaches Claude agents the coordination
+protocol).
+
+---
+
+## Broker plugin system
+
+The broker has a compiled-in plugin system defined in
+`crates/room-cli/src/plugin/mod.rs`. Plugins can register slash commands,
+react to user join/leave events, read chat history, and write messages back
+to the room.
+
+### Plugin trait
+
+```rust
+pub trait Plugin: Send + Sync {
+    fn name(&self) -> &str;
+    fn commands(&self) -> Vec<CommandInfo> { vec![] }
+    fn handle(&self, ctx: CommandContext) -> BoxFuture<'_, anyhow::Result<PluginResult>>;
+    fn on_user_join(&self, _user: &str) {}
+    fn on_user_leave(&self, _user: &str) {}
+}
+```
+
+Only `name()` and `handle()` are required. Lifecycle hooks default to no-ops.
+
+### PluginResult
+
+A plugin returns one of three results:
+
+| Variant | Effect |
+|---------|--------|
+| `Reply(String)` | Private response sent only to the invoker |
+| `Broadcast(String)` | Message broadcast to the entire room |
+| `Handled` | Silent — plugin already wrote via `ChatWriter` |
+
+### CommandContext
+
+Every `handle()` call receives a `CommandContext` with:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `command` | `String` | Command name (without `/`) |
+| `params` | `Vec<String>` | Arguments after the command name |
+| `sender` | `String` | Username of the invoker |
+| `room_id` | `String` | Room ID |
+| `message_id` | `String` | ID of the triggering message |
+| `timestamp` | `DateTime<Utc>` | When the command was sent |
+| `history` | `HistoryReader` | Read-only access to chat history |
+| `writer` | `ChatWriter` | Write access to the room |
+| `metadata` | `RoomMetadata` | Snapshot of online users, host, message count |
+| `available_commands` | `Vec<CommandInfo>` | All registered commands (for `/help`) |
+
+### ChatWriter
+
+Plugins write to the room via `ChatWriter`. All messages are posted as
+`plugin:<name>` — plugins cannot impersonate users.
+
+| Method | Description |
+|--------|-------------|
+| `broadcast(content)` | System message to all clients, persisted |
+| `reply_to(username, content)` | Private system message to one user, persisted |
+| `emit_event(event_type, content, params)` | Typed event broadcast and persisted |
+
+### HistoryReader
+
+Read-only access to the room's chat history, filtered by DM visibility.
+
+| Method | Description |
+|--------|-------------|
+| `all()` | All messages (filtered) |
+| `tail(n)` | Last N messages (filtered) |
+| `since(message_id)` | Messages after a given ID (filtered) |
+| `count()` | Total message count |
+
+### CommandInfo and ParamSchema
+
+Commands declare their metadata via `CommandInfo`:
+
+```rust
+pub struct CommandInfo {
+    pub name: String,        // command name without "/"
+    pub description: String, // one-line description
+    pub usage: String,       // e.g. "/stats [last N]"
+    pub params: Vec<ParamSchema>,
+}
+```
+
+Parameters are typed via `ParamSchema`:
+
+| ParamType | Description |
+|-----------|-------------|
+| `Text` | Free-form text |
+| `Choice(Vec<String>)` | One of a fixed set of values |
+| `Username` | Online username — TUI shows mention picker |
+| `Number { min, max }` | Integer with optional bounds |
+
+### PluginRegistry
+
+Plugins are registered at broker startup in `PluginRegistry`. The registry
+resolves command names to plugin instances and enforces reserved command names
+(builtins like `who`, `help`, `info`, `dm`, etc. cannot be overridden).
+
+### Built-in plugins
+
+| Plugin | Commands | Description |
+|--------|----------|-------------|
+| `stats` | `/stats` | Room statistics (message count, users, uptime) |
+| `queue` | `/queue add\|list\|remove\|pop` | Simple task backlog |
+| `taskboard` | `/taskboard post\|list\|show\|claim\|assign\|plan\|approve\|update\|release\|finish\|cancel` | Full task lifecycle with leases, plans, and approval gates |
+
+See [commands.md](commands.md) for detailed usage of each plugin command.
+
+---
+
 # Claude Code Plugin
 
 The `room` Claude Code plugin teaches Claude when to announce intent, poll for
