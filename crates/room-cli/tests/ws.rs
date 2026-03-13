@@ -223,6 +223,7 @@ async fn rest_health_returns_ok() {
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["status"], "ok");
     assert_eq!(body["room"], "ws_health");
+    assert_eq!(body["version"], env!("CARGO_PKG_VERSION"));
 }
 
 #[tokio::test]

@@ -122,6 +122,7 @@ async fn smoke_rest_health() {
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["status"], "ok");
     assert_eq!(body["room"], "smoke_health");
+    assert_eq!(body["version"], env!("CARGO_PKG_VERSION"));
 
     child.kill().await.ok();
 }

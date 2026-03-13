@@ -411,7 +411,8 @@ pub(super) async fn api_health(State(state): State<WsAppState>) -> impl IntoResp
     Json(serde_json::json!({
         "status": "ok",
         "room": rs.room_id(),
-        "users": users
+        "users": users,
+        "version": env!("CARGO_PKG_VERSION"),
     }))
 }
 
@@ -597,6 +598,7 @@ pub(super) async fn daemon_api_health(State(state): State<DaemonWsState>) -> imp
     Json(serde_json::json!({
         "status": "ok",
         "rooms": room_info,
+        "version": env!("CARGO_PKG_VERSION"),
     }))
 }
 
