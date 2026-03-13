@@ -19,6 +19,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **refactor:** Decomposed `broker/daemon.rs` (1780 lines) into a module directory with
+  focused submodules: `config.rs`, `dispatcher.rs`, `lifecycle.rs`, `migration.rs`,
+  `pid.rs`, and `mod.rs`. (#562)
+
 - **refactor:** Extracted persistence functions from `broker/commands.rs` to `broker/persistence.rs`
   and split `route_command()` into dedicated handler functions. (#557)
 
