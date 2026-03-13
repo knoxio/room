@@ -262,9 +262,15 @@ async fn handle_event(
                         username: cfg.username,
                         history_lines: cfg.history_lines,
                     };
-                    if let Err(e) =
-                        handle_dm_action(tabs, active_tab, input_state, &dm_cfg, target_user, content)
-                            .await
+                    if let Err(e) = handle_dm_action(
+                        tabs,
+                        active_tab,
+                        input_state,
+                        &dm_cfg,
+                        target_user,
+                        content,
+                    )
+                    .await
                     {
                         return Ok(EventAction::Error(e));
                     }
