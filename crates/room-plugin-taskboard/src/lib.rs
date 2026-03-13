@@ -116,6 +116,10 @@ impl Plugin for TaskboardPlugin {
         "taskboard"
     }
 
+    fn version(&self) -> &str {
+        env!("CARGO_PKG_VERSION")
+    }
+
     fn commands(&self) -> Vec<CommandInfo> {
         Self::default_commands()
     }
@@ -177,6 +181,28 @@ mod tests {
     fn plugin_name() {
         let (plugin, _tmp) = make_plugin();
         assert_eq!(plugin.name(), "taskboard");
+    }
+
+    #[test]
+    fn plugin_version_matches_crate() {
+        let (plugin, _tmp) = make_plugin();
+        assert_eq!(plugin.version(), env!("CARGO_PKG_VERSION"));
+    }
+
+    #[test]
+    fn plugin_api_version_is_current() {
+        let (plugin, _tmp) = make_plugin();
+        assert_eq!(
+            plugin.api_version(),
+            room_protocol::plugin::PLUGIN_API_VERSION
+        );
+    }
+
+    #[test]
+    fn plugin_min_protocol_is_compatible() {
+        let (plugin, _tmp) = make_plugin();
+        // Default min_protocol is "0.0.0", which is always satisfied.
+        assert_eq!(plugin.min_protocol(), "0.0.0");
     }
 
     #[test]

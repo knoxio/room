@@ -12,7 +12,7 @@ use std::{collections::HashMap, path::Path};
 // imports from `crate::plugin::*` continue to work without changes.
 pub use room_protocol::plugin::{
     BoxFuture, CommandContext, CommandInfo, HistoryAccess, MessageWriter, ParamSchema, ParamType,
-    Plugin, PluginResult, RoomMetadata, UserInfo,
+    Plugin, PluginResult, RoomMetadata, UserInfo, PLUGIN_API_VERSION, PROTOCOL_VERSION,
 };
 
 // Re-export concrete bridge types. ChatWriter and HistoryReader are public
@@ -81,9 +81,29 @@ impl PluginRegistry {
         Ok(registry)
     }
 
-    /// Register a plugin. Returns an error if any command name collides with
-    /// a built-in command or another plugin's command.
+    /// Register a plugin. Returns an error if:
+    /// - any command name collides with a built-in or another plugin's command
+    /// - `api_version()` exceeds the current [`PLUGIN_API_VERSION`]
+    /// - `min_protocol()` is newer than the running [`PROTOCOL_VERSION`]
     pub fn register(&mut self, plugin: Box<dyn Plugin>) -> anyhow::Result<()> {
+        // ── Version compatibility checks ────────────────────────────────
+        let api_v = plugin.api_version();
+        if api_v > PLUGIN_API_VERSION {
+            anyhow::bail!(
+                "plugin '{}' requires api_version {api_v} but broker supports up to {PLUGIN_API_VERSION}",
+                plugin.name(),
+            );
+        }
+
+        let min_proto = plugin.min_protocol();
+        if !semver_satisfies(PROTOCOL_VERSION, min_proto) {
+            anyhow::bail!(
+                "plugin '{}' requires room-protocol >= {min_proto} but broker has {PROTOCOL_VERSION}",
+                plugin.name(),
+            );
+        }
+
+        // ── Command name uniqueness checks ──────────────────────────────
         let idx = self.plugins.len();
         for cmd in plugin.commands() {
             if RESERVED_COMMANDS.contains(&cmd.name.as_str()) {
@@ -159,6 +179,19 @@ impl Default for PluginRegistry {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Returns `true` if `running >= required` using semver major.minor.patch
+/// comparison. Malformed versions are treated as `(0, 0, 0)`.
+fn semver_satisfies(running: &str, required: &str) -> bool {
+    let parse = |s: &str| -> (u64, u64, u64) {
+        let mut parts = s.split('.');
+        let major = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
+        let minor = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
+        let patch = parts.next().and_then(|p| p.parse().ok()).unwrap_or(0);
+        (major, minor, patch)
+    };
+    parse(running) >= parse(required)
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────
@@ -554,5 +587,208 @@ mod tests {
         .unwrap();
         // Number params must not produce completions — only Choice does.
         assert!(reg.completions_for("repeat", 0).is_empty());
+    }
+
+    // ── semver_satisfies tests ──────────────────────────────────────────
+
+    #[test]
+    fn semver_satisfies_equal_versions() {
+        assert!(super::semver_satisfies("3.1.0", "3.1.0"));
+    }
+
+    #[test]
+    fn semver_satisfies_running_newer_major() {
+        assert!(super::semver_satisfies("4.0.0", "3.1.0"));
+    }
+
+    #[test]
+    fn semver_satisfies_running_newer_minor() {
+        assert!(super::semver_satisfies("3.2.0", "3.1.0"));
+    }
+
+    #[test]
+    fn semver_satisfies_running_newer_patch() {
+        assert!(super::semver_satisfies("3.1.1", "3.1.0"));
+    }
+
+    #[test]
+    fn semver_satisfies_running_older_fails() {
+        assert!(!super::semver_satisfies("3.0.9", "3.1.0"));
+    }
+
+    #[test]
+    fn semver_satisfies_running_older_major_fails() {
+        assert!(!super::semver_satisfies("2.9.9", "3.0.0"));
+    }
+
+    #[test]
+    fn semver_satisfies_zero_required_always_passes() {
+        assert!(super::semver_satisfies("0.0.1", "0.0.0"));
+        assert!(super::semver_satisfies("3.1.0", "0.0.0"));
+    }
+
+    #[test]
+    fn semver_satisfies_malformed_treated_as_zero() {
+        assert!(super::semver_satisfies("garbage", "0.0.0"));
+        assert!(super::semver_satisfies("3.1.0", "garbage"));
+        assert!(super::semver_satisfies("garbage", "garbage"));
+    }
+
+    // ── Version compatibility in register() ─────────────────────────────
+
+    /// A plugin that reports a future api_version the broker does not support.
+    struct FutureApiPlugin;
+
+    impl Plugin for FutureApiPlugin {
+        fn name(&self) -> &str {
+            "future-api"
+        }
+
+        fn api_version(&self) -> u32 {
+            PLUGIN_API_VERSION + 1
+        }
+
+        fn commands(&self) -> Vec<CommandInfo> {
+            vec![CommandInfo {
+                name: "future".to_owned(),
+                description: "from the future".to_owned(),
+                usage: "/future".to_owned(),
+                params: vec![],
+            }]
+        }
+
+        fn handle(&self, _ctx: CommandContext) -> BoxFuture<'_, anyhow::Result<PluginResult>> {
+            Box::pin(async { Ok(PluginResult::Handled) })
+        }
+    }
+
+    #[test]
+    fn register_rejects_future_api_version() {
+        let mut reg = PluginRegistry::new();
+        let result = reg.register(Box::new(FutureApiPlugin));
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("api_version"),
+            "error should mention api_version: {err}"
+        );
+        assert!(
+            err.contains("future-api"),
+            "error should mention plugin name: {err}"
+        );
+    }
+
+    /// A plugin that requires a protocol version newer than what we have.
+    struct FutureProtocolPlugin;
+
+    impl Plugin for FutureProtocolPlugin {
+        fn name(&self) -> &str {
+            "future-proto"
+        }
+
+        fn min_protocol(&self) -> &str {
+            "99.0.0"
+        }
+
+        fn commands(&self) -> Vec<CommandInfo> {
+            vec![CommandInfo {
+                name: "proto".to_owned(),
+                description: "needs future protocol".to_owned(),
+                usage: "/proto".to_owned(),
+                params: vec![],
+            }]
+        }
+
+        fn handle(&self, _ctx: CommandContext) -> BoxFuture<'_, anyhow::Result<PluginResult>> {
+            Box::pin(async { Ok(PluginResult::Handled) })
+        }
+    }
+
+    #[test]
+    fn register_rejects_incompatible_min_protocol() {
+        let mut reg = PluginRegistry::new();
+        let result = reg.register(Box::new(FutureProtocolPlugin));
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("room-protocol"),
+            "error should mention room-protocol: {err}"
+        );
+        assert!(
+            err.contains("99.0.0"),
+            "error should mention required version: {err}"
+        );
+    }
+
+    #[test]
+    fn register_accepts_compatible_versioned_plugin() {
+        let mut reg = PluginRegistry::new();
+        // DummyPlugin uses defaults: api_version=1, min_protocol="0.0.0"
+        let result = reg.register(Box::new(DummyPlugin {
+            name: "compat",
+            cmd: "compat_cmd",
+        }));
+        assert!(result.is_ok());
+        assert!(reg.resolve("compat_cmd").is_some());
+    }
+
+    #[test]
+    fn register_version_check_runs_before_command_check() {
+        // A plugin with a future api_version AND a reserved command name.
+        // The api_version check should fire first.
+        struct DoubleBadPlugin;
+
+        impl Plugin for DoubleBadPlugin {
+            fn name(&self) -> &str {
+                "double-bad"
+            }
+
+            fn api_version(&self) -> u32 {
+                PLUGIN_API_VERSION + 1
+            }
+
+            fn commands(&self) -> Vec<CommandInfo> {
+                vec![CommandInfo {
+                    name: "kick".to_owned(),
+                    description: "bad".to_owned(),
+                    usage: "/kick".to_owned(),
+                    params: vec![],
+                }]
+            }
+
+            fn handle(&self, _ctx: CommandContext) -> BoxFuture<'_, anyhow::Result<PluginResult>> {
+                Box::pin(async { Ok(PluginResult::Handled) })
+            }
+        }
+
+        let mut reg = PluginRegistry::new();
+        let result = reg.register(Box::new(DoubleBadPlugin));
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        // Should fail on api_version, not on the reserved command
+        assert!(
+            err.contains("api_version"),
+            "should reject on api_version first: {err}"
+        );
+    }
+
+    #[test]
+    fn failed_version_check_does_not_pollute_registry() {
+        let mut reg = PluginRegistry::new();
+        reg.register(Box::new(DummyPlugin {
+            name: "good",
+            cmd: "foo",
+        }))
+        .unwrap();
+
+        // Attempt to register a plugin with incompatible protocol
+        let result = reg.register(Box::new(FutureProtocolPlugin));
+        assert!(result.is_err());
+
+        // Original registration must be intact
+        assert!(reg.resolve("foo").is_some());
+        assert_eq!(reg.all_commands().len(), 1);
+        // Failed plugin's command must not appear
+        assert!(reg.resolve("proto").is_none());
     }
 }

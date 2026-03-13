@@ -14,6 +14,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `CommandContext`, `RoomMetadata`, `UserInfo`, `BoxFuture`, and new
   `MessageWriter`/`HistoryAccess` async traits. External crates can implement
   plugins by depending only on `room-protocol`. (#558)
+- Plugin versioning: `version()`, `api_version()`, `min_protocol()` methods on `Plugin`
+  trait with backward-compatible defaults. `PLUGIN_API_VERSION` and `PROTOCOL_VERSION`
+  constants for broker-side compatibility checking. (#512)
 
 ## [3.1.0] - 2026-03-13
 

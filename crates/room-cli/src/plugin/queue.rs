@@ -91,6 +91,10 @@ impl Plugin for QueuePlugin {
         "queue"
     }
 
+    fn version(&self) -> &str {
+        env!("CARGO_PKG_VERSION")
+    }
+
     fn commands(&self) -> Vec<CommandInfo> {
         Self::default_commands()
     }

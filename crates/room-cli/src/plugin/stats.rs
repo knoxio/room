@@ -16,6 +16,10 @@ impl Plugin for StatsPlugin {
         "stats"
     }
 
+    fn version(&self) -> &str {
+        env!("CARGO_PKG_VERSION")
+    }
+
     fn commands(&self) -> Vec<CommandInfo> {
         vec![CommandInfo {
             name: "stats".to_owned(),

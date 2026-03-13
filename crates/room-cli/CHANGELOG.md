@@ -32,6 +32,10 @@ For changes prior to the workspace restructure (v0.1.2 through v1.0.2), see the
 - 3 DM room semantics integration tests: symmetric ID join+message,
   non-participant poll DirectMessage filtering, offline recipient message
   visibility on rejoin. (#581)
+- Plugin versioning and compatibility: `PluginRegistry::register()` now validates
+  `api_version()` and `min_protocol()` before accepting a plugin. Rejects plugins
+  compiled against a future API or requiring a newer protocol than the running broker.
+  `semver_satisfies()` helper for version comparison. 15 new unit tests. (#512)
 
 ### Changed
 

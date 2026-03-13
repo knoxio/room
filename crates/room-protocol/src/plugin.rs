@@ -32,6 +32,35 @@ pub trait Plugin: Send + Sync {
     /// Unique identifier for this plugin (e.g. `"stats"`, `"help"`).
     fn name(&self) -> &str;
 
+    /// Semantic version of this plugin (e.g. `"1.0.0"`).
+    ///
+    /// Used for diagnostics and `/info` output. Defaults to `"0.0.0"` for
+    /// plugins that do not track their own version.
+    fn version(&self) -> &str {
+        "0.0.0"
+    }
+
+    /// Plugin API version this plugin was written against.
+    ///
+    /// The broker rejects plugins whose `api_version()` exceeds the current
+    /// [`PLUGIN_API_VERSION`]. Bump this constant when the `Plugin` trait
+    /// gains new required methods or changes existing method signatures.
+    ///
+    /// Defaults to `1` (the initial API revision).
+    fn api_version(&self) -> u32 {
+        1
+    }
+
+    /// Minimum `room-protocol` crate version this plugin requires, as a
+    /// semver string (e.g. `"3.1.0"`).
+    ///
+    /// The broker rejects plugins whose `min_protocol()` is newer than the
+    /// running `room-protocol` version. Defaults to `"0.0.0"` (compatible
+    /// with any protocol version).
+    fn min_protocol(&self) -> &str {
+        "0.0.0"
+    }
+
     /// Commands this plugin handles. Each entry drives `/help` output
     /// and TUI autocomplete.
     ///
@@ -59,6 +88,19 @@ pub trait Plugin: Send + Sync {
     /// must not block — spawn a task if async work is needed.
     fn on_user_leave(&self, _user: &str) {}
 }
+
+/// Current Plugin API version. Increment when the `Plugin` trait changes in
+/// a way that requires plugin authors to update their code (new required
+/// methods, changed signatures, removed defaults).
+///
+/// Plugins returning an `api_version()` higher than this are rejected at
+/// registration.
+pub const PLUGIN_API_VERSION: u32 = 1;
+
+/// The `room-protocol` crate version, derived from `Cargo.toml` at compile
+/// time. Used by the broker to reject plugins that require a newer protocol
+/// than the one currently running.
+pub const PROTOCOL_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 // ── CommandInfo ─────────────────────────────────────────────────────────────
 
@@ -246,5 +288,88 @@ mod tests {
             }
         );
         assert_ne!(ParamType::Text, ParamType::Choice(vec!["a".to_owned()]));
+    }
+
+    // ── Versioning defaults ─────────────────────────────────────────────
+
+    struct DefaultsPlugin;
+
+    impl Plugin for DefaultsPlugin {
+        fn name(&self) -> &str {
+            "defaults"
+        }
+
+        fn handle(&self, _ctx: CommandContext) -> BoxFuture<'_, anyhow::Result<PluginResult>> {
+            Box::pin(async { Ok(PluginResult::Handled) })
+        }
+    }
+
+    #[test]
+    fn default_version_is_zero() {
+        assert_eq!(DefaultsPlugin.version(), "0.0.0");
+    }
+
+    #[test]
+    fn default_api_version_is_one() {
+        assert_eq!(DefaultsPlugin.api_version(), 1);
+    }
+
+    #[test]
+    fn default_min_protocol_is_zero() {
+        assert_eq!(DefaultsPlugin.min_protocol(), "0.0.0");
+    }
+
+    #[test]
+    fn plugin_api_version_const_is_one() {
+        assert_eq!(PLUGIN_API_VERSION, 1);
+    }
+
+    #[test]
+    fn protocol_version_const_matches_cargo() {
+        // PROTOCOL_VERSION is set at compile time via env!("CARGO_PKG_VERSION").
+        // It must be a non-empty semver string with at least major.minor.patch.
+        assert!(!PROTOCOL_VERSION.is_empty());
+        let parts: Vec<&str> = PROTOCOL_VERSION.split('.').collect();
+        assert!(
+            parts.len() >= 3,
+            "PROTOCOL_VERSION must be major.minor.patch, got: {PROTOCOL_VERSION}"
+        );
+        for part in &parts {
+            assert!(
+                part.parse::<u64>().is_ok(),
+                "each segment must be numeric, got: {part}"
+            );
+        }
+    }
+
+    struct VersionedPlugin;
+
+    impl Plugin for VersionedPlugin {
+        fn name(&self) -> &str {
+            "versioned"
+        }
+
+        fn version(&self) -> &str {
+            "2.5.1"
+        }
+
+        fn api_version(&self) -> u32 {
+            1
+        }
+
+        fn min_protocol(&self) -> &str {
+            "3.0.0"
+        }
+
+        fn handle(&self, _ctx: CommandContext) -> BoxFuture<'_, anyhow::Result<PluginResult>> {
+            Box::pin(async { Ok(PluginResult::Handled) })
+        }
+    }
+
+    #[test]
+    fn custom_version_methods_override_defaults() {
+        assert_eq!(VersionedPlugin.version(), "2.5.1");
+        assert_eq!(VersionedPlugin.api_version(), 1);
+        assert_eq!(VersionedPlugin.min_protocol(), "3.0.0");
     }
 }

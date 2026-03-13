@@ -28,6 +28,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **plugin:** Plugin versioning and compatibility system — `version()`, `api_version()`,
+  `min_protocol()` on `Plugin` trait with backward-compatible defaults. Broker rejects
+  incompatible plugins at registration. `PLUGIN_API_VERSION` and `PROTOCOL_VERSION`
+  constants. (#512)
 - **broker:** Cross-room command routing via `--room <id>` flag. Plugin commands in daemon
   mode can now target a different room (e.g. `/taskboard post --room other-room fix bug`).
   Replies go to the source room, broadcasts go to the target room. (#517)
