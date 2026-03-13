@@ -325,6 +325,28 @@ room send myroom -t $TOKEN "opening PR for #42"
   Stop what you are doing, acknowledge it, and follow the instruction.
 - **Do not merge or push without announcing it** in the room first.
 
+### Wave-based merge strategy
+
+Sprint work is organised into **waves** — groups of tasks with similar dependency profiles.
+This is the standard operating procedure for multi-agent sprints.
+
+| Wave | Characteristics | Merge order |
+|---|---|---|
+| **Wave 1: bug fixes** | Independent tasks, no shared files | Parallel — merge as ready |
+| **Wave 2: test gaps** | Independent tasks, may share test files | Parallel — merge as ready |
+| **Wave 3: refactors** | Tasks touch shared files (e.g. `commands.rs`, `plugin/mod.rs`) | Sequential — BA defines merge order |
+
+**Rules for sequential waves (wave 3+):**
+- BA announces the merge order before the wave starts (e.g. "merge order: PR #A → #B → #C")
+- Agents may work in parallel but must wait for their turn to merge
+- Each agent rebases onto master after the prior PR merges, then pushes
+- Do not open a PR until the prior PR in the sequence has merged
+- If a rebase produces conflicts, announce in the room and resolve before pushing
+
+**Why this works:** parallel waves eliminate idle time on independent tasks. Sequential
+waves eliminate file contention on shared files — zero contention incidents in sprints
+using this strategy (sprints 9, 13, 14).
+
 ### On completion
 1. Set your status: `/set_status done — PR #N merged`
 2. Announce that your work is done and summarise what changed.
