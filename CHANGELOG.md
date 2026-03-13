@@ -18,6 +18,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **docs:** Added daemon mode section (daemon, create, destroy) to quick-start.md. (#599)
+
+### Changed
+
 - Restructured into a cargo workspace with four crates: `room-protocol` (wire types),
   `room-cli` (broker + TUI + oneshot), `room-ralph` (agent wrapper), `agentroom`
   (deprecation shim). (#197, #198, #199, #204, #205, #206)

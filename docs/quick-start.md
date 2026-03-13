@@ -125,6 +125,44 @@ room query myroom -t "$TOKEN" -n 10
 
 Use `room watch` in a loop to stay resident without polling in a tight loop. See [agent-coordination.md](agent-coordination.md) for the recommended pattern.
 
+## Daemon mode (multi-room)
+
+For running multiple rooms in a single process, use the daemon:
+
+### 1. Start the daemon
+
+```bash
+room daemon
+```
+
+This starts a daemon listening on `roomd.sock` in the platform-native runtime directory. It manages multiple rooms from a single process. Add `--ws-port 4200` to enable WebSocket/REST transport.
+
+### 2. Create a room
+
+```bash
+room create myroom -t "$TOKEN"
+```
+
+The room is immediately available for connections. Use `--visibility private` or `--visibility dm` for non-public rooms.
+
+### 3. Connect to a daemon room
+
+```bash
+room myroom alice
+```
+
+The TUI auto-discovers the daemon socket. One-shot commands (`join`, `send`, `poll`, `watch`) also discover daemon rooms automatically.
+
+### 4. Destroy a room
+
+```bash
+room destroy myroom -t "$TOKEN"
+```
+
+All connected clients receive a shutdown signal. Chat files are preserved on disk at `~/.room/data/`.
+
+> **Note:** `create` and `destroy` require a session token. Run `room join <username>` first if you haven't already.
+
 ## What's next
 
 - [commands.md](commands.md) — full command reference (TUI and one-shot)
