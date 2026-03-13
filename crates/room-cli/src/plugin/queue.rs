@@ -10,7 +10,6 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use super::{BoxFuture, CommandContext, CommandInfo, ParamSchema, ParamType, Plugin, PluginResult};
-use crate::broker::state::{ClaimEntry, ClaimMap};
 
 /// A single item in the task queue backlog.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -29,8 +28,7 @@ pub struct QueueItem {
 
 /// Plugin that manages a persistent task backlog.
 ///
-/// Agents can add tasks to the queue and self-assign from it using `/queue pop`,
-/// which integrates with the built-in `/claim` system.
+/// Agents can add tasks to the queue and self-assign from it using `/queue pop`.
 ///
 /// Queue state is persisted to an NDJSON file alongside the room's `.chat` file.
 pub struct QueuePlugin {
@@ -38,8 +36,6 @@ pub struct QueuePlugin {
     queue: Arc<Mutex<Vec<QueueItem>>>,
     /// Path to the NDJSON persistence file (`<room-data-dir>/<room-id>.queue`).
     queue_path: PathBuf,
-    /// Shared reference to the broker's claim map — same Arc the broker uses.
-    claim_map: ClaimMap,
 }
 
 impl QueuePlugin {
@@ -47,13 +43,11 @@ impl QueuePlugin {
     ///
     /// # Arguments
     /// * `queue_path` — path to the `.queue` NDJSON file
-    /// * `claim_map` — the broker's `ClaimMap` Arc (not a data clone)
-    pub(crate) fn new(queue_path: PathBuf, claim_map: ClaimMap) -> anyhow::Result<Self> {
+    pub(crate) fn new(queue_path: PathBuf) -> anyhow::Result<Self> {
         let items = load_queue(&queue_path)?;
         Ok(Self {
             queue: Arc::new(Mutex::new(items)),
             queue_path,
-            claim_map,
         })
     }
 
@@ -206,7 +200,7 @@ impl QueuePlugin {
             let mut queue = self.queue.lock().await;
             if queue.is_empty() {
                 return Ok(PluginResult::Reply(
-                    "queue pop: backlog is empty, nothing to claim".to_owned(),
+                    "queue pop: backlog is empty, nothing to pop".to_owned(),
                 ));
             }
             queue.remove(0)
@@ -214,20 +208,8 @@ impl QueuePlugin {
 
         self.rewrite_queue().await?;
 
-        // Integrate with /claim — set the claim on the invoker
-        {
-            let mut claims = self.claim_map.lock().await;
-            claims.insert(
-                sender.to_owned(),
-                ClaimEntry {
-                    task: popped.description.clone(),
-                    claimed_at: std::time::Instant::now(),
-                },
-            );
-        }
-
         Ok(PluginResult::Broadcast(format!(
-            "{sender} claimed from queue: \"{}\"",
+            "{sender} popped from queue: \"{}\"",
             popped.description
         )))
     }
@@ -301,11 +283,10 @@ mod tests {
     use tempfile::TempDir;
     use tokio::sync::broadcast;
 
-    /// Helper: create a QueuePlugin with a temp directory and empty claim map.
+    /// Helper: create a QueuePlugin with a temp directory.
     fn make_test_plugin(dir: &TempDir) -> QueuePlugin {
         let queue_path = dir.path().join("test-room.queue");
-        let claim_map: ClaimMap = Arc::new(Mutex::new(HashMap::new()));
-        QueuePlugin::new(queue_path, claim_map).unwrap()
+        QueuePlugin::new(queue_path).unwrap()
     }
 
     /// Helper: create a CommandContext wired to a test plugin.
@@ -459,8 +440,7 @@ mod tests {
         };
         append_item(&path, &item).unwrap();
 
-        let claim_map: ClaimMap = Arc::new(Mutex::new(HashMap::new()));
-        let plugin = QueuePlugin::new(path, claim_map).unwrap();
+        let plugin = QueuePlugin::new(path).unwrap();
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
@@ -709,11 +689,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pop_claims_first_item() {
+    async fn pop_removes_first_item() {
         let dir = TempDir::new().unwrap();
-        let queue_path = dir.path().join("test-room.queue");
-        let claim_map: ClaimMap = Arc::new(Mutex::new(HashMap::new()));
-        let plugin = QueuePlugin::new(queue_path, claim_map.clone()).unwrap();
+        let plugin = make_test_plugin(&dir);
 
         let chat_tmp = tempfile::NamedTempFile::new().unwrap();
         let (clients, _rx, seq) = make_test_clients();
@@ -739,16 +717,11 @@ mod tests {
         let result = plugin.handle(ctx).await.unwrap();
         match &result {
             PluginResult::Broadcast(msg) => {
-                assert!(msg.contains("alice"), "broadcast should mention claimer");
+                assert!(msg.contains("alice"), "broadcast should mention popper");
                 assert!(msg.contains("urgent fix"), "broadcast should mention task");
             }
             _ => panic!("expected Broadcast"),
         }
-
-        // Verify claim was set
-        let claims = claim_map.lock().await;
-        assert_eq!(claims.get("alice").unwrap().task, "urgent fix");
-        drop(claims);
 
         // Verify queue has only 1 item left
         let queue = plugin.queue.lock().await;
@@ -784,31 +757,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pop_replaces_existing_claim() {
+    async fn pop_fifo_order() {
         let dir = TempDir::new().unwrap();
-        let queue_path = dir.path().join("test-room.queue");
-        let claim_map: ClaimMap = Arc::new(Mutex::new(HashMap::new()));
-
-        // Pre-existing claim
-        {
-            let mut claims = claim_map.lock().await;
-            claims.insert(
-                "alice".to_owned(),
-                ClaimEntry {
-                    task: "old task".to_owned(),
-                    claimed_at: std::time::Instant::now(),
-                },
-            );
-        }
-
-        let plugin = QueuePlugin::new(queue_path, claim_map.clone()).unwrap();
+        let plugin = make_test_plugin(&dir);
         let chat_tmp = tempfile::NamedTempFile::new().unwrap();
         let (clients, _rx, seq) = make_test_clients();
 
-        // Add an item and pop it
+        // Add two items
         let ctx = make_test_ctx(
             "queue",
-            vec!["add", "new", "task"],
+            vec!["add", "first"],
+            "ba",
+            chat_tmp.path(),
+            &clients,
+            &seq,
+        );
+        plugin.handle(ctx).await.unwrap();
+        let ctx = make_test_ctx(
+            "queue",
+            vec!["add", "second"],
             "ba",
             chat_tmp.path(),
             &clients,
@@ -816,6 +783,7 @@ mod tests {
         );
         plugin.handle(ctx).await.unwrap();
 
+        // Pop should return first item
         let ctx = make_test_ctx(
             "queue",
             vec!["pop"],
@@ -824,11 +792,22 @@ mod tests {
             &clients,
             &seq,
         );
-        plugin.handle(ctx).await.unwrap();
+        let result = plugin.handle(ctx).await.unwrap();
+        match &result {
+            PluginResult::Broadcast(msg) => assert!(msg.contains("first")),
+            _ => panic!("expected Broadcast"),
+        }
 
-        // Verify claim was replaced
-        let claims = claim_map.lock().await;
-        assert_eq!(claims.get("alice").unwrap().task, "new task");
+        // Pop again should return second item
+        let ctx = make_test_ctx("queue", vec!["pop"], "bob", chat_tmp.path(), &clients, &seq);
+        let result = plugin.handle(ctx).await.unwrap();
+        match &result {
+            PluginResult::Broadcast(msg) => assert!(msg.contains("second")),
+            _ => panic!("expected Broadcast"),
+        }
+
+        // Queue is now empty
+        assert!(plugin.queue.lock().await.is_empty());
     }
 
     #[tokio::test]
@@ -857,11 +836,10 @@ mod tests {
     async fn queue_survives_reload() {
         let dir = TempDir::new().unwrap();
         let queue_path = dir.path().join("test-room.queue");
-        let claim_map: ClaimMap = Arc::new(Mutex::new(HashMap::new()));
 
         // First plugin instance — add items
         {
-            let plugin = QueuePlugin::new(queue_path.clone(), claim_map.clone()).unwrap();
+            let plugin = QueuePlugin::new(queue_path.clone()).unwrap();
             let chat_tmp = tempfile::NamedTempFile::new().unwrap();
             let (clients, _rx, seq) = make_test_clients();
 
@@ -875,7 +853,7 @@ mod tests {
         }
 
         // Second plugin instance — simulates broker restart
-        let plugin2 = QueuePlugin::new(queue_path, claim_map).unwrap();
+        let plugin2 = QueuePlugin::new(queue_path).unwrap();
         let queue = plugin2.queue.lock().await;
         assert_eq!(queue.len(), 3);
         assert_eq!(queue[0].description, "task a");

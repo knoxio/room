@@ -27,6 +27,11 @@ For changes prior to the workspace restructure (v0.1.2 through v1.0.2), see the
   `PluginResult::SetStatus` variant and `plugin/status.rs`. (#508)
 - `/help` moved from plugin to builtin command — handled directly in `route_command` alongside `/who` and `/room-info`, eliminating the circular dependency on `CommandContext.available_commands`. (#509)
 
+### Removed
+
+- `/claim`, `/unclaim`, `/claimed` builtins and backing `ClaimMap`/`ClaimEntry` types.
+  Queue `/pop` no longer auto-claims; it broadcasts "popped from queue" instead. (#510)
+
 ### Fixed
 
 - Standalone broker now registers all plugins (queue, taskboard) — previously only help, stats, status were available outside daemon mode. (#513)

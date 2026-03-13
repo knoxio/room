@@ -18,7 +18,7 @@ use chrono::{DateTime, Utc};
 use crate::{
     broker::{
         fanout::broadcast_and_persist,
-        state::{ClaimMap, ClientMap, StatusMap},
+        state::{ClientMap, StatusMap},
     },
     history,
     message::{make_system, Message},
@@ -334,9 +334,6 @@ const RESERVED_COMMANDS: &[&str] = &[
     "reauth",
     "clear-tokens",
     "dm",
-    "claim",
-    "unclaim",
-    "claimed",
     "reply",
     "room-info",
     "exit",
@@ -367,11 +364,11 @@ impl PluginRegistry {
     ///
     /// Both standalone and daemon broker modes should call this so that every
     /// room has the same set of `/` commands available.
-    pub(crate) fn with_all_plugins(chat_path: &Path, claim_map: ClaimMap) -> anyhow::Result<Self> {
+    pub(crate) fn with_all_plugins(chat_path: &Path) -> anyhow::Result<Self> {
         let mut registry = Self::new();
 
         let queue_path = queue::QueuePlugin::queue_path_from_chat(chat_path);
-        registry.register(Box::new(queue::QueuePlugin::new(queue_path, claim_map)?))?;
+        registry.register(Box::new(queue::QueuePlugin::new(queue_path)?))?;
 
         registry.register(Box::new(stats::StatsPlugin))?;
 
@@ -489,29 +486,6 @@ pub fn builtin_command_infos() -> Vec<CommandInfo> {
                     description: "Message content".to_owned(),
                 },
             ],
-        },
-        CommandInfo {
-            name: "claim".to_owned(),
-            description: "Claim a task".to_owned(),
-            usage: "/claim <task>".to_owned(),
-            params: vec![ParamSchema {
-                name: "task".to_owned(),
-                param_type: ParamType::Text,
-                required: true,
-                description: "Task description".to_owned(),
-            }],
-        },
-        CommandInfo {
-            name: "unclaim".to_owned(),
-            description: "Release your current task claim".to_owned(),
-            usage: "/unclaim".to_owned(),
-            params: vec![],
-        },
-        CommandInfo {
-            name: "claimed".to_owned(),
-            description: "Show the task claim board".to_owned(),
-            usage: "/claimed".to_owned(),
-            params: vec![],
         },
         CommandInfo {
             name: "reply".to_owned(),
@@ -885,9 +859,6 @@ mod tests {
         let names: Vec<&str> = cmds.iter().map(|c| c.name.as_str()).collect();
         for expected in &[
             "dm",
-            "claim",
-            "unclaim",
-            "claimed",
             "reply",
             "who",
             "help",

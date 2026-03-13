@@ -25,21 +25,6 @@ pub(crate) type HostUser = Arc<Mutex<Option<String>>>;
 /// Cleared when the broker process exits; token files on disk survive restarts.
 pub(crate) type TokenMap = Arc<Mutex<HashMap<String, String>>>;
 
-/// Default claim TTL: 30 minutes. Claims expire after this duration unless renewed.
-pub(crate) const CLAIM_TTL: std::time::Duration = std::time::Duration::from_secs(30 * 60);
-
-/// A single task claim with creation timestamp for lease-based expiry.
-#[derive(Debug, Clone)]
-pub(crate) struct ClaimEntry {
-    pub(crate) task: String,
-    pub(crate) claimed_at: std::time::Instant,
-}
-
-/// Maps username → claim entry. Ephemeral; cleared on broker exit.
-/// Users can hold at most one claim at a time (new claim replaces old).
-/// Claims expire after [`CLAIM_TTL`] and are lazily swept on access.
-pub(crate) type ClaimMap = Arc<Mutex<HashMap<String, ClaimEntry>>>;
-
 /// Maps username → subscription tier for this room. Persisted as JSON at
 /// `~/.room/state/<room_id>.subscriptions` on every mutation; loaded on
 /// broker/daemon startup.
@@ -52,7 +37,6 @@ pub(crate) struct RoomState {
     pub(crate) status_map: StatusMap,
     pub(crate) host_user: HostUser,
     pub(crate) token_map: TokenMap,
-    pub(crate) claim_map: ClaimMap,
     pub(crate) subscription_map: SubscriptionMap,
     pub(crate) chat_path: Arc<PathBuf>,
     /// Path to the persisted token-map file (e.g. `~/.room/state/<room_id>.tokens`).
@@ -88,7 +72,7 @@ impl RoomState {
 
     /// Construct a fully wired `Arc<RoomState>` with default empty collections.
     ///
-    /// Creates fresh empty maps for `clients`, `status_map`, `host_user`, `claim_map`,
+    /// Creates fresh empty maps for `clients`, `status_map`, `host_user`,
     /// a fresh `seq_counter`, and a new `watch::channel` for `shutdown`. Callers that
     /// need a `watch::Receiver` should call `state.shutdown.subscribe()` after construction.
     ///
@@ -113,10 +97,8 @@ impl RoomState {
         subscription_map: SubscriptionMap,
         config: Option<RoomConfig>,
     ) -> Result<Arc<Self>, String> {
-        let claim_map: ClaimMap = Arc::new(Mutex::new(HashMap::new()));
-        let plugins =
-            crate::plugin::PluginRegistry::with_all_plugins(&chat_path, claim_map.clone())
-                .map_err(|e| format!("plugin error: {e}"))?;
+        let plugins = crate::plugin::PluginRegistry::with_all_plugins(&chat_path)
+            .map_err(|e| format!("plugin error: {e}"))?;
 
         let (shutdown_tx, _) = watch::channel(false);
 
@@ -125,7 +107,6 @@ impl RoomState {
             status_map: Arc::new(Mutex::new(HashMap::new())),
             host_user: Arc::new(Mutex::new(None)),
             token_map,
-            claim_map,
             subscription_map,
             chat_path: Arc::new(chat_path),
             token_map_path: Arc::new(token_map_path),
@@ -178,39 +159,6 @@ impl RoomState {
     /// Number of users currently in the status map (i.e. online).
     pub(crate) async fn status_count(&self) -> usize {
         self.status_map.lock().await.len()
-    }
-
-    // ── claim_map accessors ───────────────────────────────────────────────────
-
-    /// Record a task claim for `user`. Replaces any existing claim.
-    /// Stores the current timestamp for lease-based expiry.
-    pub(crate) async fn set_claim(&self, user: &str, task: String) {
-        self.claim_map.lock().await.insert(
-            user.to_owned(),
-            ClaimEntry {
-                task,
-                claimed_at: std::time::Instant::now(),
-            },
-        );
-    }
-
-    /// Remove and return a user's active claim task, if any.
-    pub(crate) async fn remove_claim(&self, user: &str) -> Option<String> {
-        self.claim_map.lock().await.remove(user).map(|e| e.task)
-    }
-
-    /// Sweep expired claims and return remaining (username, task, elapsed)
-    /// triples, sorted by username.
-    pub(crate) async fn claim_entries(&self) -> Vec<(String, String, std::time::Duration)> {
-        let mut map = self.claim_map.lock().await;
-        let now = std::time::Instant::now();
-        map.retain(|_, entry| now.duration_since(entry.claimed_at) < CLAIM_TTL);
-        let mut entries: Vec<(String, String, std::time::Duration)> = map
-            .iter()
-            .map(|(u, e)| (u.clone(), e.task.clone(), now.duration_since(e.claimed_at)))
-            .collect();
-        entries.sort_by(|a, b| a.0.cmp(&b.0));
-        entries
     }
 
     // ── subscription_map accessors ────────────────────────────────────────────
@@ -301,7 +249,6 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let state = make_state(&dir);
         assert_eq!(state.status_count().await, 0);
-        assert!(state.claim_entries().await.is_empty());
         assert_eq!(state.subscription_count().await, 0);
     }
 
@@ -369,90 +316,6 @@ mod tests {
         assert_eq!(entries[0].0, "alice");
         assert_eq!(entries[1].0, "bob");
         assert_eq!(entries[2].0, "carol");
-    }
-
-    // ── claim_map accessors ───────────────────────────────────────────────────
-
-    #[tokio::test]
-    async fn set_claim_and_claim_entries() {
-        let dir = TempDir::new().unwrap();
-        let state = make_state(&dir);
-        state.set_claim("alice", "fix #42".to_owned()).await;
-        let entries = state.claim_entries().await;
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].0, "alice");
-        assert_eq!(entries[0].1, "fix #42");
-        // elapsed should be very small (just created)
-        assert!(entries[0].2.as_secs() < 2);
-    }
-
-    #[tokio::test]
-    async fn remove_claim_returns_task_and_deletes() {
-        let dir = TempDir::new().unwrap();
-        let state = make_state(&dir);
-        state.set_claim("alice", "task".to_owned()).await;
-        let removed = state.remove_claim("alice").await;
-        assert_eq!(removed, Some("task".to_owned()));
-        assert!(state.claim_entries().await.is_empty());
-    }
-
-    #[tokio::test]
-    async fn remove_claim_missing_returns_none() {
-        let dir = TempDir::new().unwrap();
-        let state = make_state(&dir);
-        assert_eq!(state.remove_claim("nobody").await, None);
-    }
-
-    #[tokio::test]
-    async fn claim_entries_sorted_by_username() {
-        let dir = TempDir::new().unwrap();
-        let state = make_state(&dir);
-        state.set_claim("bob", "b".to_owned()).await;
-        state.set_claim("alice", "a".to_owned()).await;
-        let entries = state.claim_entries().await;
-        assert_eq!(entries[0].0, "alice");
-        assert_eq!(entries[1].0, "bob");
-    }
-
-    #[tokio::test]
-    async fn claim_entries_sweeps_expired() {
-        let dir = TempDir::new().unwrap();
-        let state = make_state(&dir);
-        // Insert a claim with a backdated timestamp (expired)
-        {
-            let mut map = state.claim_map.lock().await;
-            map.insert(
-                "stale".to_owned(),
-                ClaimEntry {
-                    task: "old task".to_owned(),
-                    claimed_at: std::time::Instant::now()
-                        - CLAIM_TTL
-                        - std::time::Duration::from_secs(1),
-                },
-            );
-        }
-        // Also insert a fresh claim
-        state.set_claim("fresh", "new task".to_owned()).await;
-        let entries = state.claim_entries().await;
-        assert_eq!(entries.len(), 1, "expired claim should be swept");
-        assert_eq!(entries[0].0, "fresh");
-    }
-
-    #[tokio::test]
-    async fn claim_reclaim_by_owner_resets_timestamp() {
-        let dir = TempDir::new().unwrap();
-        let state = make_state(&dir);
-        state.set_claim("alice", "task A".to_owned()).await;
-        // Re-claim should replace entry
-        state.set_claim("alice", "task B".to_owned()).await;
-        let entries = state.claim_entries().await;
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].1, "task B");
-    }
-
-    #[tokio::test]
-    async fn claim_ttl_is_30_minutes() {
-        assert_eq!(CLAIM_TTL, std::time::Duration::from_secs(30 * 60));
     }
 
     // ── subscription_map accessors ────────────────────────────────────────────

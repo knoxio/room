@@ -26,7 +26,7 @@ use auth::{handle_oneshot_join, validate_token};
 use commands::{route_command, CommandResult};
 use fanout::{broadcast_and_persist, dm_and_persist};
 use room_protocol::SubscriptionTier;
-use state::{ClaimMap, RoomState};
+use state::RoomState;
 use tokio::{
     io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::{
@@ -122,8 +122,7 @@ impl Broker {
 
         let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
 
-        let claim_map: ClaimMap = Arc::new(Mutex::new(HashMap::new()));
-        let registry = PluginRegistry::with_all_plugins(&self.chat_path, claim_map.clone())?;
+        let registry = PluginRegistry::with_all_plugins(&self.chat_path)?;
 
         // Load persisted state from a previous broker session (if any).
         let persisted_tokens = auth::load_token_map(&self.token_map_path);
@@ -146,7 +145,6 @@ impl Broker {
             status_map: Arc::new(Mutex::new(HashMap::new())),
             host_user: Arc::new(Mutex::new(None)),
             token_map: Arc::new(Mutex::new(persisted_tokens)),
-            claim_map,
             subscription_map: Arc::new(Mutex::new(persisted_subs)),
             chat_path: Arc::new(self.chat_path.clone()),
             token_map_path: Arc::new(self.token_map_path.clone()),
@@ -716,7 +714,6 @@ mod tests {
             status_map: Arc::new(Mutex::new(HashMap::new())),
             host_user: Arc::new(Mutex::new(None)),
             token_map: Arc::new(Mutex::new(HashMap::new())),
-            claim_map: Arc::new(Mutex::new(HashMap::new())),
             subscription_map: Arc::new(Mutex::new(HashMap::new())),
             chat_path: Arc::new(chat_path.clone()),
             token_map_path: Arc::new(chat_path.with_extension("tokens")),

@@ -1007,10 +1007,10 @@ mod tests {
 
     #[test]
     fn build_payload_slash_command_becomes_command_type() {
-        let payload = build_payload("/claim issue #42");
+        let payload = build_payload("/kick alice");
         let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
         assert_eq!(v["type"], "command");
-        assert_eq!(v["cmd"], "claim");
+        assert_eq!(v["cmd"], "kick");
     }
 
     #[test]

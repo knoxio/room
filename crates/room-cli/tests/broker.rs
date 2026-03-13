@@ -1433,7 +1433,7 @@ async fn queue_pop_oneshot_returns_response() {
     );
     let content = resp["content"].as_str().unwrap();
     assert!(
-        content.contains("bot claimed from queue"),
+        content.contains("bot popped from queue"),
         "response should credit the popper: {content}"
     );
     assert!(
