@@ -12,6 +12,7 @@ pub enum TaskStatus {
     Claimed,
     Planned,
     Approved,
+    AwaitingReview,
     Finished,
     Cancelled,
 }
@@ -23,6 +24,7 @@ impl std::fmt::Display for TaskStatus {
             TaskStatus::Claimed => write!(f, "claimed"),
             TaskStatus::Planned => write!(f, "planned"),
             TaskStatus::Approved => write!(f, "approved"),
+            TaskStatus::AwaitingReview => write!(f, "in_review"),
             TaskStatus::Finished => write!(f, "finished"),
             TaskStatus::Cancelled => write!(f, "cancelled"),
         }
@@ -66,6 +68,7 @@ impl LiveTask {
             TaskStatus::Claimed | TaskStatus::Planned | TaskStatus::Approved => {
                 Some(Instant::now())
             }
+            // AwaitingReview has no lease (indefinite — paused during review).
             _ => None,
         };
         Self { task, lease_start }
@@ -169,6 +172,7 @@ mod tests {
         assert_eq!(TaskStatus::Claimed.to_string(), "claimed");
         assert_eq!(TaskStatus::Planned.to_string(), "planned");
         assert_eq!(TaskStatus::Approved.to_string(), "approved");
+        assert_eq!(TaskStatus::AwaitingReview.to_string(), "in_review");
         assert_eq!(TaskStatus::Finished.to_string(), "finished");
         assert_eq!(TaskStatus::Cancelled.to_string(), "cancelled");
     }
@@ -199,6 +203,13 @@ mod tests {
     #[test]
     fn live_task_no_lease_for_finished() {
         let task = make_task("tb-001", TaskStatus::Finished);
+        let live = LiveTask::new(task);
+        assert!(live.lease_start.is_none());
+    }
+
+    #[test]
+    fn live_task_no_lease_for_awaiting_review() {
+        let task = make_task("tb-001", TaskStatus::AwaitingReview);
         let live = LiveTask::new(task);
         assert!(live.lease_start.is_none());
     }
@@ -296,6 +307,7 @@ mod tests {
             TaskStatus::Claimed,
             TaskStatus::Planned,
             TaskStatus::Approved,
+            TaskStatus::AwaitingReview,
             TaskStatus::Finished,
             TaskStatus::Cancelled,
         ] {

@@ -319,11 +319,14 @@ impl TaskboardPlugin {
         };
         if !matches!(
             lt.task.status,
-            TaskStatus::Claimed | TaskStatus::Planned | TaskStatus::Approved
+            TaskStatus::Claimed
+                | TaskStatus::Planned
+                | TaskStatus::Approved
+                | TaskStatus::AwaitingReview
         ) {
             return (
                 format!(
-                    "task {task_id} is {} (must be claimed/planned/approved to update)",
+                    "task {task_id} is {} (must be claimed/planned/approved/in_review to update)",
                     lt.task.status
                 ),
                 false,
@@ -333,7 +336,10 @@ impl TaskboardPlugin {
             return (format!("task {task_id} is assigned to someone else"), false);
         }
         let mut warning = String::new();
-        if lt.task.status != TaskStatus::Approved {
+        if !matches!(
+            lt.task.status,
+            TaskStatus::Approved | TaskStatus::AwaitingReview
+        ) {
             warning = format!(" [warning: task is {} — not yet approved]", lt.task.status);
         }
         if let Some(n) = notes {
@@ -361,11 +367,14 @@ impl TaskboardPlugin {
         };
         if !matches!(
             lt.task.status,
-            TaskStatus::Claimed | TaskStatus::Planned | TaskStatus::Approved
+            TaskStatus::Claimed
+                | TaskStatus::Planned
+                | TaskStatus::Approved
+                | TaskStatus::AwaitingReview
         ) {
             return (
                 format!(
-                    "task {task_id} is {} (must be claimed/planned/approved to release)",
+                    "task {task_id} is {} (must be claimed/planned/approved/in_review to release)",
                     lt.task.status
                 ),
                 false,
@@ -502,10 +511,10 @@ impl TaskboardPlugin {
         )
     }
 
-    pub(super) fn handle_finish(&self, ctx: &CommandContext) -> (String, bool) {
+    pub(super) fn handle_review(&self, ctx: &CommandContext) -> (String, bool) {
         let task_id = match ctx.params.get(1) {
             Some(id) => id,
-            None => return ("usage: /taskboard finish <task-id>".to_owned(), false),
+            None => return ("usage: /taskboard review <task-id>".to_owned(), false),
         };
         self.sweep_expired();
         let mut board = self.board.lock().unwrap();
@@ -519,7 +528,53 @@ impl TaskboardPlugin {
         ) {
             return (
                 format!(
-                    "task {task_id} is {} (must be claimed/planned/approved to finish)",
+                    "task {task_id} is {} (must be claimed/planned/approved to move to review)",
+                    lt.task.status
+                ),
+                false,
+            );
+        }
+        if lt.task.assigned_to.as_deref() != Some(&ctx.sender) {
+            return (
+                format!("task {task_id} can only be moved to review by the assignee"),
+                false,
+            );
+        }
+        lt.task.status = TaskStatus::AwaitingReview;
+        lt.lease_start = None; // Indefinite — no lease expiry during review.
+        lt.task.updated_at = Some(chrono::Utc::now());
+        let tasks: Vec<Task> = board.iter().map(|lt| lt.task.clone()).collect();
+        let _ = task::save_tasks(&self.storage_path, &tasks);
+        (
+            format!(
+                "task {task_id} moved to review by {} — lease paused",
+                ctx.sender
+            ),
+            true,
+        )
+    }
+
+    pub(super) fn handle_finish(&self, ctx: &CommandContext) -> (String, bool) {
+        let task_id = match ctx.params.get(1) {
+            Some(id) => id,
+            None => return ("usage: /taskboard finish <task-id>".to_owned(), false),
+        };
+        self.sweep_expired();
+        let mut board = self.board.lock().unwrap();
+        let lt = match board.iter_mut().find(|lt| lt.task.id == *task_id) {
+            Some(lt) => lt,
+            None => return (format!("task {task_id} not found"), false),
+        };
+        if !matches!(
+            lt.task.status,
+            TaskStatus::Claimed
+                | TaskStatus::Planned
+                | TaskStatus::Approved
+                | TaskStatus::AwaitingReview
+        ) {
+            return (
+                format!(
+                    "task {task_id} is {} (must be claimed/planned/approved/in_review to finish)",
                     lt.task.status
                 ),
                 false,
@@ -1181,6 +1236,38 @@ mod tests {
         assert!(!broadcast);
     }
 
+    // -- Review status tests ---------------------------------------------------
+
+    #[test]
+    fn handle_review_moves_to_awaiting_review() {
+        let (plugin, _tmp) = make_plugin();
+        plugin.handle_post(&test_ctx("ba", &["post", "implement feature"]));
+        plugin.handle_claim(&test_ctx("agent", &["claim", "tb-001"]));
+        plugin.handle_plan(&test_ctx("agent", &["plan", "tb-001", "my plan"]));
+        plugin.handle_approve(&test_ctx_with_host(
+            "ba",
+            &["approve", "tb-001"],
+            Some("ba"),
+        ));
+        let (result, broadcast) = plugin.handle_review(&test_ctx("agent", &["review", "tb-001"]));
+        assert!(result.contains("moved to review"));
+        assert!(result.contains("lease paused"));
+        assert!(broadcast);
+        let board = plugin.board.lock().unwrap();
+        assert_eq!(board[0].task.status, TaskStatus::AwaitingReview);
+        assert!(board[0].lease_start.is_none()); // No lease — indefinite.
+    }
+
+    #[test]
+    fn handle_review_wrong_user() {
+        let (plugin, _tmp) = make_plugin();
+        plugin.handle_post(&test_ctx("ba", &["post", "task"]));
+        plugin.handle_claim(&test_ctx("agent-a", &["claim", "tb-001"]));
+        let (result, broadcast) = plugin.handle_review(&test_ctx("agent-b", &["review", "tb-001"]));
+        assert!(result.contains("only be moved to review by the assignee"));
+        assert!(!broadcast);
+    }
+
     #[test]
     fn handle_post_team_requires_daemon_mode() {
         let (plugin, _tmp) = make_plugin();
@@ -1188,6 +1275,16 @@ mod tests {
         let ctx = test_ctx("alice", &["post", "--team", "backend", "task"]);
         let (result, broadcast) = plugin.handle_post(&ctx);
         assert!(result.contains("daemon mode"));
+        assert!(!broadcast);
+    }
+
+    #[test]
+    fn handle_review_wrong_status() {
+        let (plugin, _tmp) = make_plugin();
+        plugin.handle_post(&test_ctx("ba", &["post", "task"]));
+        // Task is Open — cannot move to review.
+        let (result, broadcast) = plugin.handle_review(&test_ctx("ba", &["review", "tb-001"]));
+        assert!(result.contains("must be claimed/planned/approved"));
         assert!(!broadcast);
     }
 
@@ -1203,6 +1300,60 @@ mod tests {
         let ctx2 = test_ctx_with_team_access("bob", &["claim", "tb-001"], ta2);
         let (result, broadcast) = plugin.handle_claim(&ctx2);
         assert!(result.contains("claimed by bob"));
+        assert!(broadcast);
+    }
+
+    #[test]
+    fn handle_review_not_found() {
+        let (plugin, _tmp) = make_plugin();
+        let (result, broadcast) = plugin.handle_review(&test_ctx("agent", &["review", "tb-999"]));
+        assert!(result.contains("not found"));
+        assert!(!broadcast);
+    }
+
+    #[test]
+    fn handle_review_no_args() {
+        let (plugin, _tmp) = make_plugin();
+        let (result, broadcast) = plugin.handle_review(&test_ctx("agent", &["review"]));
+        assert!(result.contains("usage"));
+        assert!(!broadcast);
+    }
+
+    #[test]
+    fn handle_review_then_finish() {
+        let (plugin, _tmp) = make_plugin();
+        plugin.handle_post(&test_ctx("ba", &["post", "task"]));
+        plugin.handle_claim(&test_ctx("agent", &["claim", "tb-001"]));
+        plugin.handle_review(&test_ctx("agent", &["review", "tb-001"]));
+        let (result, broadcast) = plugin.handle_finish(&test_ctx("agent", &["finish", "tb-001"]));
+        assert!(result.contains("finished"));
+        assert!(broadcast);
+        let board = plugin.board.lock().unwrap();
+        assert_eq!(board[0].task.status, TaskStatus::Finished);
+    }
+
+    #[test]
+    fn handle_review_then_release() {
+        let (plugin, _tmp) = make_plugin();
+        plugin.handle_post(&test_ctx("ba", &["post", "task"]));
+        plugin.handle_claim(&test_ctx("agent", &["claim", "tb-001"]));
+        plugin.handle_review(&test_ctx("agent", &["review", "tb-001"]));
+        let (result, broadcast) = plugin.handle_release(&test_ctx("agent", &["release", "tb-001"]));
+        assert!(result.contains("released"));
+        assert!(broadcast);
+        let board = plugin.board.lock().unwrap();
+        assert_eq!(board[0].task.status, TaskStatus::Open);
+    }
+
+    #[test]
+    fn handle_review_then_cancel() {
+        let (plugin, _tmp) = make_plugin();
+        plugin.handle_post(&test_ctx("ba", &["post", "task"]));
+        plugin.handle_claim(&test_ctx("agent", &["claim", "tb-001"]));
+        plugin.handle_review(&test_ctx("agent", &["review", "tb-001"]));
+        let (result, broadcast) =
+            plugin.handle_cancel(&test_ctx("ba", &["cancel", "tb-001", "scope changed"]));
+        assert!(result.contains("cancelled"));
         assert!(broadcast);
     }
 
@@ -1246,6 +1397,32 @@ mod tests {
         let ctx2 = test_ctx_with_team_access("alice", &["assign", "tb-001", "bob"], ta2);
         let (result, broadcast) = plugin.handle_assign(&ctx2);
         assert!(result.contains("assigned to bob"));
+        assert!(broadcast);
+    }
+
+    #[test]
+    fn handle_review_not_swept_by_expiry() {
+        let (plugin, _tmp) = make_plugin();
+        plugin.handle_post(&test_ctx("ba", &["post", "task"]));
+        plugin.handle_claim(&test_ctx("agent", &["claim", "tb-001"]));
+        plugin.handle_review(&test_ctx("agent", &["review", "tb-001"]));
+        // sweep_expired should NOT touch AwaitingReview tasks.
+        let expired = plugin.sweep_expired();
+        assert!(expired.is_empty());
+        let board = plugin.board.lock().unwrap();
+        assert_eq!(board[0].task.status, TaskStatus::AwaitingReview);
+    }
+
+    #[test]
+    fn handle_update_in_review_no_warning() {
+        let (plugin, _tmp) = make_plugin();
+        plugin.handle_post(&test_ctx("ba", &["post", "task"]));
+        plugin.handle_claim(&test_ctx("agent", &["claim", "tb-001"]));
+        plugin.handle_review(&test_ctx("agent", &["review", "tb-001"]));
+        let (result, broadcast) =
+            plugin.handle_update(&test_ctx("agent", &["update", "tb-001", "review notes"]));
+        assert!(result.contains("lease renewed"));
+        assert!(!result.contains("warning"));
         assert!(broadcast);
     }
 
@@ -1370,6 +1547,24 @@ mod tests {
         task.team = None;
         let json2 = serde_json::to_string(&task).unwrap();
         assert!(!json2.contains("team"));
+    }
+
+    #[test]
+    fn full_lifecycle_with_review() {
+        let (plugin, _tmp) = make_plugin();
+        // post -> claim -> plan -> approve -> review -> finish
+        plugin.handle_post(&test_ctx("ba", &["post", "implement #636"]));
+        plugin.handle_claim(&test_ctx("agent", &["claim", "tb-001"]));
+        plugin.handle_plan(&test_ctx("agent", &["plan", "tb-001", "add review status"]));
+        plugin.handle_approve(&test_ctx_with_host(
+            "ba",
+            &["approve", "tb-001"],
+            Some("ba"),
+        ));
+        plugin.handle_review(&test_ctx("agent", &["review", "tb-001"]));
+        plugin.handle_finish(&test_ctx("agent", &["finish", "tb-001"]));
+        let board = plugin.board.lock().unwrap();
+        assert_eq!(board[0].task.status, TaskStatus::Finished);
     }
 
     // -- Test helpers -----------------------------------------------------------

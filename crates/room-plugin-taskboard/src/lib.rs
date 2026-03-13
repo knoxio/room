@@ -54,7 +54,7 @@ impl TaskboardPlugin {
         vec![CommandInfo {
             name: "taskboard".to_owned(),
             description:
-                "Manage task lifecycle — post, list, show, claim, assign, plan, approve, update, release, finish, cancel"
+                "Manage task lifecycle — post, list, show, claim, assign, plan, approve, update, review, release, finish, cancel"
                     .to_owned(),
             usage: "/taskboard <action> [args...]".to_owned(),
             params: vec![
@@ -69,6 +69,7 @@ impl TaskboardPlugin {
                         "plan".to_owned(),
                         "approve".to_owned(),
                         "update".to_owned(),
+                        "review".to_owned(),
                         "release".to_owned(),
                         "finish".to_owned(),
                         "cancel".to_owned(),
@@ -140,10 +141,11 @@ impl Plugin for TaskboardPlugin {
                 "show" => (self.handle_show(&ctx), false),
                 "update" => self.handle_update(&ctx),
                 "release" => self.handle_release(&ctx),
+                "review" => self.handle_review(&ctx),
                 "finish" => self.handle_finish(&ctx),
                 "cancel" => self.handle_cancel(&ctx),
-                "" => ("usage: /taskboard <post|list|show|claim|assign|plan|approve|update|release|finish|cancel> [args...]".to_owned(), false),
-                other => (format!("unknown action: {other}. use: post, list, show, claim, assign, plan, approve, update, release, finish, cancel"), false),
+                "" => ("usage: /taskboard <post|list|show|claim|assign|plan|approve|update|review|release|finish|cancel> [args...]".to_owned(), false),
+                other => (format!("unknown action: {other}. use: post, list, show, claim, assign, plan, approve, update, review, release, finish, cancel"), false),
             };
             if broadcast {
                 // Emit a typed event alongside the system broadcast.
@@ -154,6 +156,7 @@ impl Plugin for TaskboardPlugin {
                     "plan" => Some(EventType::TaskPlanned),
                     "approve" => Some(EventType::TaskApproved),
                     "update" => Some(EventType::TaskUpdated),
+                    "review" => Some(EventType::ReviewRequested),
                     "release" => Some(EventType::TaskReleased),
                     "finish" => Some(EventType::TaskFinished),
                     "cancel" => Some(EventType::TaskCancelled),
@@ -219,7 +222,7 @@ mod tests {
             assert!(choices.contains(&"post".to_owned()));
             assert!(choices.contains(&"approve".to_owned()));
             assert!(choices.contains(&"assign".to_owned()));
-            assert_eq!(choices.len(), 11);
+            assert_eq!(choices.len(), 12);
         } else {
             panic!("expected Choice param type");
         }
