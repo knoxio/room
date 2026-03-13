@@ -14,6 +14,9 @@ For changes prior to the workspace restructure (v0.1.2 through v1.0.2), see the
 
 - Deduplicated `MentionPicker` and `ChoicePicker` into shared `PickerState` struct with
   `Deref`/`DerefMut` composition — removes ~35 lines of duplicated picker logic. (#559)
+- REST handlers: extracted shared inner functions (`join_inner`, `send_inner`, `poll_inner`,
+  `query_inner`) from 4 duplicated single-room/daemon endpoint pairs. Added unified
+  `validate_token_with_fallback` and `require_auth` helpers. Net -170 lines. (#554)
 
 ### Fixed
 
