@@ -365,11 +365,21 @@ Open → Claimed → Planned → Approved → Finished
 4. Implement after approval
 5. Finish: `/taskboard finish <task-id>`
 
+**Fast-track for small tasks:** Tasks estimated at <30 minutes (doc updates, single-file
+fixes, config changes) may use a streamlined approval:
+1. Claim the task normally: `/taskboard claim <task-id>`
+2. Announce intent + plan in a **single room message** (no separate `/taskboard plan` needed)
+3. BA can approve inline in the room — agent proceeds immediately
+4. Still requires a ticket, assignment, and room announcement — only the `/taskboard plan`
+   ceremony is reduced
+
+This does **not** bypass the ticket requirement. All work still needs a GitHub issue.
+
 **Lease TTL:** Claimed/Planned/Approved tasks have a 10-minute lease. Renew with
 `/taskboard update` during long tasks. Expired leases auto-release the task to Open.
 
-**Do not skip the plan step.** Even if the fix is trivial, submit a plan so the board
-has a record and the BA can catch conflicts before they happen.
+**Do not skip the plan step for non-trivial tasks.** Submit a plan so the board has a
+record and the BA can catch conflicts before they happen.
 
 ### Tests-in-same-PR rule
 
