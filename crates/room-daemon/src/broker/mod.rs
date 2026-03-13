@@ -1,4 +1,5 @@
 pub(crate) mod admin;
+pub mod agent_cleanup;
 pub(crate) mod auth;
 pub(crate) mod commands;
 pub mod daemon;
