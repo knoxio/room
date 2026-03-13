@@ -1,3 +1,6 @@
+use std::panic::AssertUnwindSafe;
+
+use futures_util::FutureExt;
 use room_protocol::{EventFilter, SubscriptionTier};
 
 use room_protocol::{make_system, Message};
@@ -676,24 +679,47 @@ async fn dispatch_plugin(
         team_access,
     };
 
-    let result = plugin.handle(ctx).await?;
+    let plugin_name = plugin.name().to_owned();
+    let result = AssertUnwindSafe(plugin.handle(ctx)).catch_unwind().await;
 
-    Ok(match result {
-        PluginResult::Reply(text) => {
-            let sys = make_system(&state.room_id, &format!("plugin:{}", plugin.name()), text);
+    match result {
+        Ok(Ok(plugin_result)) => Ok(match plugin_result {
+            PluginResult::Reply(text) => {
+                let sys = make_system(&state.room_id, &format!("plugin:{plugin_name}"), text);
+                let json = serde_json::to_string(&sys)?;
+                CommandResult::Reply(json)
+            }
+            PluginResult::Broadcast(text) => {
+                let sys = make_system(&state.room_id, &format!("plugin:{plugin_name}"), text);
+                let seq_msg = broadcast_and_persist(
+                    &sys,
+                    &state.clients,
+                    &state.chat_path,
+                    &state.seq_counter,
+                )
+                .await?;
+                let json = serde_json::to_string(&seq_msg)?;
+                CommandResult::HandledWithReply(json)
+            }
+            PluginResult::Handled => CommandResult::Handled,
+        }),
+        Ok(Err(e)) => Err(e),
+        Err(panic_payload) => {
+            let panic_msg = panic_payload
+                .downcast_ref::<String>()
+                .map(|s| s.as_str())
+                .or_else(|| panic_payload.downcast_ref::<&str>().copied())
+                .unwrap_or("unknown panic");
+            eprintln!("[broker] plugin {plugin_name} panicked: {panic_msg}");
+            let sys = make_system(
+                &state.room_id,
+                "broker",
+                format!("plugin:{plugin_name} panicked: {panic_msg}"),
+            );
             let json = serde_json::to_string(&sys)?;
-            CommandResult::Reply(json)
+            Ok(CommandResult::Reply(json))
         }
-        PluginResult::Broadcast(text) => {
-            let sys = make_system(&state.room_id, &format!("plugin:{}", plugin.name()), text);
-            let seq_msg =
-                broadcast_and_persist(&sys, &state.clients, &state.chat_path, &state.seq_counter)
-                    .await?;
-            let json = serde_json::to_string(&seq_msg)?;
-            CommandResult::HandledWithReply(json)
-        }
-        PluginResult::Handled => CommandResult::Handled,
-    })
+    }
 }
 
 /// Execute a plugin command against a different room (cross-room dispatch).
@@ -800,39 +826,58 @@ async fn dispatch_cross_room(
         team_access,
     };
 
-    let result = plugin.handle(ctx).await?;
+    let plugin_name = plugin.name().to_owned();
+    let result = AssertUnwindSafe(plugin.handle(ctx)).catch_unwind().await;
 
     // Replies go to the SOURCE room (the caller sees them), but broadcasts go
     // to the TARGET room (where the state change happened).
-    Ok(match result {
-        PluginResult::Reply(text) => {
+    match result {
+        Ok(Ok(plugin_result)) => Ok(match plugin_result {
+            PluginResult::Reply(text) => {
+                let sys = make_system(
+                    &source_state.room_id,
+                    &format!("plugin:{plugin_name}"),
+                    format!("[→{target_room_id}] {text}"),
+                );
+                let json = serde_json::to_string(&sys)?;
+                CommandResult::Reply(json)
+            }
+            PluginResult::Broadcast(text) => {
+                // Broadcast to the TARGET room.
+                let sys = make_system(
+                    &target_state.room_id,
+                    &format!("plugin:{plugin_name}"),
+                    text,
+                );
+                let seq_msg = broadcast_and_persist(
+                    &sys,
+                    &target_state.clients,
+                    &target_state.chat_path,
+                    &target_state.seq_counter,
+                )
+                .await?;
+                let json = serde_json::to_string(&seq_msg)?;
+                CommandResult::HandledWithReply(json)
+            }
+            PluginResult::Handled => CommandResult::Handled,
+        }),
+        Ok(Err(e)) => Err(e),
+        Err(panic_payload) => {
+            let panic_msg = panic_payload
+                .downcast_ref::<String>()
+                .map(|s| s.as_str())
+                .or_else(|| panic_payload.downcast_ref::<&str>().copied())
+                .unwrap_or("unknown panic");
+            eprintln!("[broker] plugin {plugin_name} panicked (cross-room → {target_room_id}): {panic_msg}");
             let sys = make_system(
                 &source_state.room_id,
-                &format!("plugin:{}", plugin.name()),
-                format!("[→{target_room_id}] {text}"),
+                "broker",
+                format!("plugin:{plugin_name} panicked: {panic_msg}"),
             );
             let json = serde_json::to_string(&sys)?;
-            CommandResult::Reply(json)
+            Ok(CommandResult::Reply(json))
         }
-        PluginResult::Broadcast(text) => {
-            // Broadcast to the TARGET room.
-            let sys = make_system(
-                &target_state.room_id,
-                &format!("plugin:{}", plugin.name()),
-                text,
-            );
-            let seq_msg = broadcast_and_persist(
-                &sys,
-                &target_state.clients,
-                &target_state.chat_path,
-                &target_state.seq_counter,
-            )
-            .await?;
-            let json = serde_json::to_string(&seq_msg)?;
-            CommandResult::HandledWithReply(json)
-        }
-        PluginResult::Handled => CommandResult::Handled,
-    })
+    }
 }
 
 // ── Room management commands ──────────────────────────────────────────────────
@@ -2434,6 +2479,68 @@ mod tests {
         assert!(
             json.contains("plugin:taskboard"),
             "reply should identify plugin source"
+        );
+    }
+
+    // ── plugin panic safety (#603) ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn panicking_plugin_returns_error_instead_of_crashing() {
+        use crate::plugin::{BoxFuture, CommandContext, CommandInfo, Plugin, PluginResult};
+
+        struct PanickingPlugin;
+
+        impl Plugin for PanickingPlugin {
+            fn name(&self) -> &str {
+                "panicker"
+            }
+
+            fn commands(&self) -> Vec<CommandInfo> {
+                vec![CommandInfo {
+                    name: "panicker".to_owned(),
+                    description: "a plugin that panics".to_owned(),
+                    usage: "/panicker".to_owned(),
+                    params: vec![],
+                }]
+            }
+
+            fn handle(&self, _ctx: CommandContext) -> BoxFuture<'_, anyhow::Result<PluginResult>> {
+                Box::pin(async { panic!("intentional test panic") })
+            }
+        }
+
+        let tmp = NamedTempFile::new().unwrap();
+        let chat_path = tmp.path().to_path_buf();
+        let token_map_path = chat_path.with_extension("tokens");
+        let subscription_map_path = chat_path.with_extension("subscriptions");
+
+        // Build a PluginRegistry with the panicking plugin included.
+        let mut plugins = crate::plugin::PluginRegistry::with_all_plugins(&chat_path).unwrap();
+        plugins.register(Box::new(PanickingPlugin)).unwrap();
+
+        let state = RoomState::new_with_plugins(
+            "test-room".to_owned(),
+            chat_path,
+            token_map_path,
+            subscription_map_path,
+            Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(Mutex::new(HashMap::new())),
+            None,
+            plugins,
+        );
+
+        let msg = make_command("test-room", "alice", "panicker", vec![]);
+        let result = route_command(msg, "alice", &state).await.unwrap();
+        let CommandResult::Reply(json) = result else {
+            panic!("expected Reply with panic error, got other variant");
+        };
+        assert!(
+            json.contains("panicked"),
+            "reply should mention panic: {json}"
+        );
+        assert!(
+            json.contains("intentional test panic"),
+            "reply should contain panic message: {json}"
         );
     }
 

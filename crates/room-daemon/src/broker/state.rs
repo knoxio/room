@@ -152,6 +152,45 @@ impl RoomState {
         }))
     }
 
+    /// Build a `RoomState` with a caller-supplied [`PluginRegistry`] instead of
+    /// the default built-in set. Used in tests to inject custom plugins.
+    #[cfg(test)]
+    pub(crate) fn new_with_plugins(
+        room_id: String,
+        chat_path: PathBuf,
+        token_map_path: PathBuf,
+        subscription_map_path: PathBuf,
+        token_map: TokenMap,
+        subscription_map: SubscriptionMap,
+        config: Option<RoomConfig>,
+        plugins: crate::plugin::PluginRegistry,
+    ) -> Arc<Self> {
+        let (shutdown_tx, _) = watch::channel(false);
+
+        Arc::new(Self {
+            clients: Arc::new(Mutex::new(HashMap::new())),
+            status_map: Arc::new(Mutex::new(HashMap::new())),
+            host_user: Arc::new(Mutex::new(None)),
+            auth: AuthState {
+                token_map,
+                token_map_path: Arc::new(token_map_path),
+                registry: OnceLock::new(),
+            },
+            filters: FilterState {
+                subscription_map,
+                subscription_map_path: Arc::new(subscription_map_path),
+                event_filter_state: OnceLock::new(),
+            },
+            chat_path: Arc::new(chat_path),
+            room_id: Arc::new(room_id),
+            shutdown: Arc::new(shutdown_tx),
+            seq_counter: Arc::new(AtomicU64::new(0)),
+            plugin_registry: Arc::new(plugins),
+            config,
+            cross_room_resolver: OnceLock::new(),
+        })
+    }
+
     // ── registry ──────────────────────────────────────────────────────────────
 
     /// Attach the daemon-level [`UserRegistry`] to this room.
