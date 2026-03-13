@@ -7,6 +7,7 @@ pub(crate) mod handshake;
 pub(crate) mod persistence;
 pub(crate) mod service;
 pub(crate) mod state;
+pub(crate) mod token_store;
 pub(crate) mod ws;
 
 use std::{
@@ -126,7 +127,7 @@ impl Broker {
         let registry = PluginRegistry::with_all_plugins(&self.chat_path)?;
 
         // Load persisted state from a previous broker session (if any).
-        let persisted_tokens = auth::load_token_map(&self.token_map_path);
+        let persisted_tokens = token_store::load_token_map(&self.token_map_path);
         if !persisted_tokens.is_empty() {
             eprintln!(
                 "[broker] loaded {} persisted token(s)",

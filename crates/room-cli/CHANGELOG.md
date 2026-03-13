@@ -28,6 +28,8 @@ For changes prior to the workspace restructure (v0.1.2 through v1.0.2), see the
   `Plugin` by depending only on `room-protocol`. (#558)
 - Extracted `builtin_command_infos()` and `all_known_commands()` to `plugin/schema.rs`.
   `plugin/mod.rs` now contains only `PluginRegistry` and re-exports. (#587)
+- Extracted token persistence (`save_token_map`, `load_token_map`) from `broker/auth.rs` to
+  new `broker/token_store.rs`. Separates disk I/O from auth logic. (#588)
 
 ### Fixed
 

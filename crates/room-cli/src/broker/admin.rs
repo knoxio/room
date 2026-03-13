@@ -5,7 +5,7 @@
 
 use crate::message::make_system;
 
-use super::{auth::save_token_map, fanout::broadcast_and_persist, state::RoomState};
+use super::{fanout::broadcast_and_persist, state::RoomState, token_store::save_token_map};
 
 /// Admin command names — routed through `handle_admin_cmd` when received as
 /// a `Message::Command` with one of these cmd values.
@@ -368,7 +368,7 @@ mod tests {
         handle_admin_cmd("kick bob", "alice", &state).await;
 
         // Load from disk — KICKED sentinel must be persisted
-        let loaded = crate::broker::auth::load_token_map(&state.auth.token_map_path);
+        let loaded = crate::broker::token_store::load_token_map(&state.auth.token_map_path);
         assert!(
             loaded.contains_key("KICKED:bob"),
             "KICKED sentinel must be persisted to disk"
@@ -394,7 +394,7 @@ mod tests {
 
         handle_admin_cmd("reauth bob", "alice", &state).await;
 
-        let loaded = crate::broker::auth::load_token_map(&state.auth.token_map_path);
+        let loaded = crate::broker::token_store::load_token_map(&state.auth.token_map_path);
         assert!(
             !loaded.values().any(|u| u == "bob"),
             "bob must be fully removed from disk after reauth"
@@ -416,7 +416,7 @@ mod tests {
 
         handle_admin_cmd("clear-tokens", "alice", &state).await;
 
-        let loaded = crate::broker::auth::load_token_map(&state.auth.token_map_path);
+        let loaded = crate::broker::token_store::load_token_map(&state.auth.token_map_path);
         assert!(
             loaded.is_empty(),
             "token map on disk must be empty after clear-tokens"
@@ -440,7 +440,7 @@ mod tests {
         handle_admin_cmd("kick bob", "alice", &state).await;
 
         // Simulate broker restart: load token map from disk into fresh state
-        let loaded = crate::broker::auth::load_token_map(&state.auth.token_map_path);
+        let loaded = crate::broker::token_store::load_token_map(&state.auth.token_map_path);
         let new_map: super::super::state::TokenMap = Arc::new(Mutex::new(loaded));
 
         // The original token must be invalid

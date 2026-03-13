@@ -26,7 +26,7 @@ pub(crate) fn load_or_migrate_registry(config: &DaemonConfig) -> UserRegistry {
         // Migration path: import from legacy tokens.json if present.
         let tokens_path = config.system_tokens_path();
         if tokens_path.exists() {
-            let legacy = crate::broker::auth::load_token_map(&tokens_path);
+            let legacy = crate::broker::token_store::load_token_map(&tokens_path);
             if !legacy.is_empty() {
                 eprintln!(
                     "[daemon] migrating {} token(s) from tokens.json to users.json",
