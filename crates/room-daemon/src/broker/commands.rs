@@ -1,4 +1,5 @@
 use std::panic::AssertUnwindSafe;
+use std::time::Duration;
 
 use futures_util::FutureExt;
 use room_protocol::{EventFilter, SubscriptionTier};
@@ -17,6 +18,9 @@ use super::{
     persistence::{persist_event_filters, persist_subscriptions},
     state::RoomState,
 };
+
+/// Maximum time a plugin is allowed to run before being cancelled.
+const PLUGIN_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The result of routing an inbound command line.
 pub(crate) enum CommandResult {
@@ -679,9 +683,14 @@ async fn dispatch_plugin(
         team_access,
     };
 
-    let result = match AssertUnwindSafe(plugin.handle(ctx)).catch_unwind().await {
-        Ok(r) => r?,
-        Err(panic_info) => {
+    let result = match tokio::time::timeout(
+        PLUGIN_TIMEOUT,
+        AssertUnwindSafe(plugin.handle(ctx)).catch_unwind(),
+    )
+    .await
+    {
+        Ok(Ok(r)) => r?,
+        Ok(Err(panic_info)) => {
             let msg = panic_info
                 .downcast_ref::<String>()
                 .map(|s| s.as_str())
@@ -692,6 +701,24 @@ async fn dispatch_plugin(
                 &state.room_id,
                 &format!("plugin:{}", plugin.name()),
                 format!("plugin '{}' panicked: {msg}", plugin.name()),
+            );
+            let json = serde_json::to_string(&sys)?;
+            return Ok(CommandResult::Reply(json));
+        }
+        Err(_elapsed) => {
+            eprintln!(
+                "[broker] plugin '{}' timed out after {}s",
+                plugin.name(),
+                PLUGIN_TIMEOUT.as_secs()
+            );
+            let sys = make_system(
+                &state.room_id,
+                &format!("plugin:{}", plugin.name()),
+                format!(
+                    "plugin '{}' timed out after {}s",
+                    plugin.name(),
+                    PLUGIN_TIMEOUT.as_secs()
+                ),
             );
             let json = serde_json::to_string(&sys)?;
             return Ok(CommandResult::Reply(json));
@@ -2926,6 +2953,68 @@ mod tests {
             }
             other => panic!(
                 "expected CommandResult::Reply, got {:?}",
+                std::mem::discriminant(&other)
+            ),
+        }
+    }
+
+    // ── Plugin timeout (#602) ───────────────────────────────────────────
+
+    #[tokio::test]
+    async fn dispatch_plugin_times_out_slow_plugin() {
+        use crate::plugin::{BoxFuture, CommandContext, CommandInfo, Plugin, PluginResult};
+
+        struct SlowPlugin;
+
+        impl Plugin for SlowPlugin {
+            fn name(&self) -> &str {
+                "slow-test"
+            }
+
+            fn commands(&self) -> Vec<CommandInfo> {
+                vec![CommandInfo {
+                    name: "slow".to_owned(),
+                    description: "hangs forever".to_owned(),
+                    usage: "/slow".to_owned(),
+                    params: vec![],
+                }]
+            }
+
+            fn handle(&self, _ctx: CommandContext) -> BoxFuture<'_, anyhow::Result<PluginResult>> {
+                Box::pin(async {
+                    // Sleep longer than PLUGIN_TIMEOUT
+                    tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                    Ok(PluginResult::Reply("should not reach".to_owned()))
+                })
+            }
+        }
+
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+        let msg = make_command("test-room", "alice", "slow", vec![]);
+
+        // Override PLUGIN_TIMEOUT for test by using a short timeout directly.
+        // We can't change the const, so we test the actual dispatch_plugin
+        // which uses the 30s timeout. For a fast test, we test the timeout
+        // machinery via tokio::time::pause.
+        tokio::time::pause();
+
+        let result = super::dispatch_plugin(&SlowPlugin, &msg, "alice", &state).await;
+
+        let result = result.expect("dispatch_plugin should not error on timeout");
+        match result {
+            CommandResult::Reply(json) => {
+                assert!(
+                    json.contains("timed out"),
+                    "reply should mention timeout: {json}"
+                );
+                assert!(
+                    json.contains("slow-test"),
+                    "reply should mention plugin name: {json}"
+                );
+            }
+            other => panic!(
+                "expected CommandResult::Reply for timeout, got {:?}",
                 std::mem::discriminant(&other)
             ),
         }
