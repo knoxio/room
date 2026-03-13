@@ -556,6 +556,23 @@ pub(super) fn member_panel_row_width(
     username.len() + 1 + tier_len + status_len + 1 // " " + name + tier + status + " "
 }
 
+/// Truncate a status string to fit within `max_chars` characters.
+///
+/// If the status is longer than `max_chars`, it is cut and an ellipsis (`…`)
+/// is appended. The returned string is at most `max_chars` characters wide.
+/// Returns the original string unchanged if it already fits.
+pub(super) fn ellipsize_status(status: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+    if status.chars().count() <= max_chars {
+        return status.to_owned();
+    }
+    // Leave room for the ellipsis character.
+    let truncated: String = status.chars().take(max_chars.saturating_sub(1)).collect();
+    format!("{truncated}\u{2026}")
+}
+
 /// Look up a username's color from the map, falling back to the hash-based
 /// palette index if the user has not been assigned a color yet.
 pub(super) fn user_color(username: &str, color_map: &ColorMap) -> Color {
@@ -1171,5 +1188,54 @@ mod tests {
                 "scroll_offset={offset}, view_top={view_top}"
             );
         }
+    }
+
+    // ── ellipsize_status tests ──────────────────────────────────────────────
+
+    #[test]
+    fn ellipsize_fits_unchanged() {
+        assert_eq!(ellipsize_status("coding", 10), "coding");
+    }
+
+    #[test]
+    fn ellipsize_exact_length_unchanged() {
+        assert_eq!(ellipsize_status("coding", 6), "coding");
+    }
+
+    #[test]
+    fn ellipsize_truncates_with_ellipsis() {
+        let result = ellipsize_status("implementing feature X", 10);
+        assert_eq!(result, "implement\u{2026}");
+        assert_eq!(result.chars().count(), 10);
+    }
+
+    #[test]
+    fn ellipsize_max_one_returns_ellipsis() {
+        assert_eq!(ellipsize_status("hello", 1), "\u{2026}");
+    }
+
+    #[test]
+    fn ellipsize_max_zero_returns_empty() {
+        assert_eq!(ellipsize_status("hello", 0), "");
+    }
+
+    #[test]
+    fn ellipsize_empty_status_unchanged() {
+        assert_eq!(ellipsize_status("", 10), "");
+    }
+
+    #[test]
+    fn ellipsize_unicode_status() {
+        // 5 chars: "日本語テスト" = 6 chars, truncate to 5 → "日本語テ…"
+        let result = ellipsize_status("日本語テスト", 5);
+        assert_eq!(result.chars().count(), 5);
+        assert!(result.ends_with('\u{2026}'));
+    }
+
+    #[test]
+    fn ellipsize_max_two() {
+        let result = ellipsize_status("hello", 2);
+        assert_eq!(result, "h\u{2026}");
+        assert_eq!(result.chars().count(), 2);
     }
 }

@@ -36,7 +36,7 @@ use input::{
     wrap_input_display, Action, InputState,
 };
 use render::{
-    assign_color, build_member_panel_spans, find_view_start, format_message,
+    assign_color, build_member_panel_spans, ellipsize_status, find_view_start, format_message,
     member_panel_row_width, render_tab_bar, user_color, welcome_splash, ColorMap, TabInfo,
 };
 
@@ -639,16 +639,9 @@ pub async fn run(
             // Hidden when terminal is too narrow (< 80 cols) or no users online.
             const PANEL_MIN_TERM_WIDTH: u16 = 80;
             if f.area().width >= PANEL_MIN_TERM_WIDTH && !online_users_ref.is_empty() {
-                let panel_items: Vec<ListItem> = online_users_ref
-                    .iter()
-                    .map(|u| {
-                        let status = user_statuses_ref.get(u).map(|s| s.as_str()).unwrap_or("");
-                        let tier = subscription_tiers_ref.get(u).copied();
-                        let spans = build_member_panel_spans(u, status, tier, &color_map);
-                        ListItem::new(Line::from(spans))
-                    })
-                    .collect();
-
+                // Compute the ideal panel width from raw (untruncated) statuses,
+                // then cap it. Re-render items with ellipsized statuses that fit
+                // within the capped inner width.
                 let panel_content_width = online_users_ref
                     .iter()
                     .map(|u| {
@@ -661,6 +654,37 @@ pub async fn run(
                 let panel_width = (panel_content_width as u16 + 2)
                     .min(msg_chunk.width / 3)
                     .max(12);
+                // Inner width available for content (excluding left+right border).
+                let inner_width = panel_width.saturating_sub(2) as usize;
+
+                let panel_items: Vec<ListItem> = online_users_ref
+                    .iter()
+                    .map(|u| {
+                        let raw_status = user_statuses_ref.get(u).map(|s| s.as_str()).unwrap_or("");
+                        let tier = subscription_tiers_ref.get(u).copied();
+                        // Compute how many chars are available for status text:
+                        // inner_width - " " (1) - username - tier_indicator - "  " (2 before status) - " " (1 trailing)
+                        let tier_len: usize = match tier {
+                            Some(SubscriptionTier::MentionsOnly)
+                            | Some(SubscriptionTier::Unsubscribed) => 2,
+                            _ => 0,
+                        };
+                        let overhead = 1 + u.len() + tier_len + 1; // leading space + name + tier + trailing space
+                        let max_status_chars = if !raw_status.is_empty() {
+                            // +2 for the "  " prefix before the status text
+                            inner_width.saturating_sub(overhead + 2)
+                        } else {
+                            0
+                        };
+                        let status = if !raw_status.is_empty() {
+                            ellipsize_status(raw_status, max_status_chars)
+                        } else {
+                            String::new()
+                        };
+                        let spans = build_member_panel_spans(u, &status, tier, &color_map);
+                        ListItem::new(Line::from(spans))
+                    })
+                    .collect();
                 let panel_height =
                     (online_users_ref.len() as u16 + 2).min(msg_chunk.height.saturating_sub(1));
 
