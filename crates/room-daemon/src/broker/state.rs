@@ -123,7 +123,7 @@ impl RoomState {
         subscription_map: SubscriptionMap,
         config: Option<RoomConfig>,
     ) -> Result<Arc<Self>, String> {
-        let plugins = crate::plugin::PluginRegistry::with_all_plugins(&chat_path)
+        let plugins = crate::plugin::PluginRegistry::with_all_plugins(&chat_path, None)
             .map_err(|e| format!("plugin error: {e}"))?;
 
         let (shutdown_tx, _) = watch::channel(false);

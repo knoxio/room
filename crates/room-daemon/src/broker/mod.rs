@@ -118,7 +118,7 @@ impl Broker {
 
         let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
 
-        let registry = PluginRegistry::with_all_plugins(&self.chat_path)?;
+        let registry = PluginRegistry::with_all_plugins(&self.chat_path, Some(&self.socket_path))?;
 
         // Load persisted state from a previous broker session (if any).
         let persisted_tokens = token_store::load_token_map(&self.token_map_path);

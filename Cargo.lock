@@ -1983,6 +1983,7 @@ dependencies = [
  "chrono",
  "futures-util",
  "regex",
+ "room-plugin-agent",
  "room-plugin-taskboard",
  "room-protocol",
  "serde",
@@ -1991,6 +1992,20 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "uuid",
+]
+
+[[package]]
+name = "room-plugin-agent"
+version = "3.2.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "libc",
+ "room-protocol",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]
