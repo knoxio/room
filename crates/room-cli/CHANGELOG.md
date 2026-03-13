@@ -19,6 +19,8 @@ For changes prior to the workspace restructure (v0.1.2 through v1.0.2), see the
 - `/taskboard assign <task-id> <username>` subcommand — poster or host can assign an open task to a specific user. (#502)
 - `/info [username]` command — shows room metadata (no args) or user info (status,
   subscription tier, host flag, online status). `/room-info` is now an alias. (#507)
+- Integration tests: taskboard oneshot response — list, post, and show return valid
+  system messages to oneshot (TOKEN:) senders.
 
 ### Fixed
 
