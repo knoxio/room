@@ -1365,3 +1365,112 @@ async fn taskboard_assignee_cannot_self_approve() {
         .unwrap()
         .contains("only the task poster or host"));
 }
+
+// ── Queue plugin oneshot integration tests ────────────────────────────────
+//
+// These verify that oneshot senders (`room send /queue ...`) get a response
+// back instead of EOF. The bug (#493) was that the queue plugin used
+// `PluginResult::Handled` which gave no response to oneshot clients.
+// After the fix (PR #500), it returns `PluginResult::Broadcast` which
+// echoes the system message back to the oneshot sender.
+
+/// Build a queue command JSON envelope for oneshot sends.
+fn queue_cmd_wire(action: &str, args: &[&str]) -> String {
+    let mut params: Vec<serde_json::Value> = vec![serde_json::Value::String(action.to_owned())];
+    for arg in args {
+        params.push(serde_json::Value::String((*arg).to_owned()));
+    }
+    serde_json::json!({"type": "command", "cmd": "queue", "params": params}).to_string()
+}
+
+/// Oneshot `/queue add` returns a system message echo to the sender.
+#[tokio::test]
+async fn queue_add_oneshot_returns_response() {
+    let td = common::TestDaemon::start(&["q-os-add"]).await;
+    let token = common::daemon_join(&td.socket_path, "q-os-add", "bot").await;
+
+    let wire = queue_cmd_wire("add", &["fix", "the", "flaky", "test"]);
+    let resp = common::daemon_send(&td.socket_path, "q-os-add", &token, &wire).await;
+
+    assert_eq!(
+        resp["type"], "system",
+        "expected system message, got: {resp}"
+    );
+    let content = resp["content"].as_str().unwrap();
+    assert!(
+        content.contains("bot added"),
+        "response should credit the sender: {content}"
+    );
+    assert!(
+        content.contains("fix the flaky test"),
+        "response should echo the task description: {content}"
+    );
+    assert!(
+        content.contains("#1 in backlog"),
+        "response should show queue position: {content}"
+    );
+}
+
+/// Oneshot `/queue pop` returns a system message with the claimed item (FIFO).
+#[tokio::test]
+async fn queue_pop_oneshot_returns_response() {
+    let td = common::TestDaemon::start(&["q-os-pop"]).await;
+    let token = common::daemon_join(&td.socket_path, "q-os-pop", "bot").await;
+
+    // seed two items
+    let add1 = queue_cmd_wire("add", &["first-task"]);
+    common::daemon_send(&td.socket_path, "q-os-pop", &token, &add1).await;
+    let add2 = queue_cmd_wire("add", &["second-task"]);
+    common::daemon_send(&td.socket_path, "q-os-pop", &token, &add2).await;
+
+    // pop should return first-task (FIFO)
+    let pop_wire = queue_cmd_wire("pop", &[]);
+    let resp = common::daemon_send(&td.socket_path, "q-os-pop", &token, &pop_wire).await;
+
+    assert_eq!(
+        resp["type"], "system",
+        "expected system message, got: {resp}"
+    );
+    let content = resp["content"].as_str().unwrap();
+    assert!(
+        content.contains("bot claimed from queue"),
+        "response should credit the popper: {content}"
+    );
+    assert!(
+        content.contains("first-task"),
+        "pop should return the first-added item (FIFO): {content}"
+    );
+    assert!(
+        !content.contains("second-task"),
+        "second item should NOT be popped: {content}"
+    );
+}
+
+/// Oneshot `/queue remove` returns a system message with the removed item.
+#[tokio::test]
+async fn queue_remove_oneshot_returns_response() {
+    let td = common::TestDaemon::start(&["q-os-rm"]).await;
+    let token = common::daemon_join(&td.socket_path, "q-os-rm", "bot").await;
+
+    // seed an item
+    let add_wire = queue_cmd_wire("add", &["remove-me-task"]);
+    common::daemon_send(&td.socket_path, "q-os-rm", &token, &add_wire).await;
+
+    // remove by index 1
+    let rm_wire = queue_cmd_wire("remove", &["1"]);
+    let resp = common::daemon_send(&td.socket_path, "q-os-rm", &token, &rm_wire).await;
+
+    assert_eq!(
+        resp["type"], "system",
+        "expected system message, got: {resp}"
+    );
+    let content = resp["content"].as_str().unwrap();
+    assert!(
+        content.contains("remove-me-task"),
+        "response should echo the removed item: {content}"
+    );
+    assert!(
+        content.contains("was #1"),
+        "response should show the original index: {content}"
+    );
+}
