@@ -35,6 +35,8 @@ For changes prior to the workspace restructure (v0.1.2 through v1.0.2), see the
 - Split `tui/input.rs` (2546 lines) into 3 modules: `tui/parse.rs` (message parsing
   utilities), `tui/display.rs` (text/cursor calculations), `tui/input.rs` (key handlers).
   `input.rs` prod code reduced to ~497 lines. (#583)
+- Split `main.rs` (897 lines) into `cli.rs` (Cmd enum + Args struct) and `cmd_daemon.rs`
+  (run_daemon function). main.rs drops to ~490 lines. No logic changes. (#582)
 
 ### Fixed
 
