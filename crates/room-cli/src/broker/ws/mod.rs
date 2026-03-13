@@ -420,3 +420,269 @@ async fn daemon_ws_upgrade(
         }
     })
 }
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures_util::{SinkExt, StreamExt};
+    use std::collections::HashMap;
+    use std::time::Duration;
+    use tempfile::TempDir;
+    use tokio_tungstenite::{connect_async, tungstenite::Message as TungsteniteMsg};
+
+    type TestWsSink = futures_util::stream::SplitSink<
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+        TungsteniteMsg,
+    >;
+
+    type TestWsStream = futures_util::stream::SplitStream<
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+    >;
+
+    // ── Helpers ──────────────────────────────────────────────────────────────
+
+    fn make_daemon_config(dir: &TempDir) -> crate::broker::daemon::DaemonConfig {
+        crate::broker::daemon::DaemonConfig {
+            socket_path: dir.path().join("test.sock"),
+            data_dir: dir.path().to_owned(),
+            state_dir: dir.path().to_owned(),
+            ws_port: None,
+            grace_period_secs: 30,
+        }
+    }
+
+    fn make_room_state(dir: &TempDir, room_id: &str) -> Arc<crate::broker::state::RoomState> {
+        make_room_state_with_config(dir, room_id, None)
+    }
+
+    fn make_room_state_with_config(
+        dir: &TempDir,
+        room_id: &str,
+        config: Option<room_protocol::RoomConfig>,
+    ) -> Arc<crate::broker::state::RoomState> {
+        let chat = dir.path().join(format!("{room_id}.chat"));
+        crate::broker::state::RoomState::new(
+            room_id.to_owned(),
+            chat.clone(),
+            chat.with_extension("tokens"),
+            chat.with_extension("subscriptions"),
+            Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(Mutex::new(HashMap::new())),
+            config,
+        )
+        .unwrap()
+    }
+
+    fn make_ws_app_state(room_state: Arc<crate::broker::state::RoomState>) -> WsAppState {
+        WsAppState {
+            room_state,
+            next_client_id: Arc::new(AtomicU64::new(0)),
+            user_registry: None,
+        }
+    }
+
+    /// Start an axum server on a random port, return the port number.
+    async fn start_test_server(router: Router) -> u16 {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            axum::serve(listener, router).await.ok();
+        });
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        loop {
+            if tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .is_ok()
+            {
+                return port;
+            }
+            assert!(tokio::time::Instant::now() < deadline, "server not ready");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    /// Connect a WS client and send the first handshake frame.
+    async fn test_ws_connect(
+        port: u16,
+        room_id: &str,
+        first_frame: &str,
+    ) -> (TestWsSink, TestWsStream) {
+        let url = format!("ws://127.0.0.1:{port}/ws/{room_id}");
+        let (ws, _) = connect_async(&url).await.expect("WS connect failed");
+        let (mut tx, rx) = ws.split();
+        tx.send(TungsteniteMsg::Text(first_frame.into()))
+            .await
+            .unwrap();
+        (tx, rx)
+    }
+
+    /// Read the next text frame as a JSON value. Panics after 2 seconds.
+    async fn recv_json(rx: &mut TestWsStream) -> serde_json::Value {
+        match tokio::time::timeout(Duration::from_secs(2), rx.next()).await {
+            Ok(Some(Ok(TungsteniteMsg::Text(text)))) => {
+                serde_json::from_str(&text).expect("invalid JSON from server")
+            }
+            Ok(Some(Ok(other))) => panic!("expected text frame, got: {other:?}"),
+            Ok(Some(Err(e))) => panic!("WS read error: {e}"),
+            Ok(None) => panic!("WS stream ended unexpectedly"),
+            Err(_) => panic!("timed out waiting for WS frame"),
+        }
+    }
+
+    // ── DaemonWsState::get_room ──────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn daemon_ws_state_get_room_found() {
+        let dir = TempDir::new().unwrap();
+        let room = make_room_state(&dir, "test-room");
+        let mut rooms = HashMap::new();
+        rooms.insert("test-room".to_owned(), room);
+        let state = DaemonWsState {
+            rooms: Arc::new(Mutex::new(rooms)),
+            next_client_id: Arc::new(AtomicU64::new(0)),
+            config: make_daemon_config(&dir),
+            system_token_map: Arc::new(Mutex::new(HashMap::new())),
+            user_registry: Arc::new(Mutex::new(crate::registry::UserRegistry::new(
+                dir.path().to_owned(),
+            ))),
+        };
+        let result = state.get_room("test-room").await;
+        assert!(result.is_some(), "get_room must find an existing room");
+        assert_eq!(result.unwrap().room_id.as_str(), "test-room");
+    }
+
+    #[tokio::test]
+    async fn daemon_ws_state_get_room_not_found() {
+        let dir = TempDir::new().unwrap();
+        let state = DaemonWsState {
+            rooms: Arc::new(Mutex::new(HashMap::new())),
+            next_client_id: Arc::new(AtomicU64::new(0)),
+            config: make_daemon_config(&dir),
+            system_token_map: Arc::new(Mutex::new(HashMap::new())),
+            user_registry: Arc::new(Mutex::new(crate::registry::UserRegistry::new(
+                dir.path().to_owned(),
+            ))),
+        };
+        assert!(
+            state.get_room("nonexistent").await.is_none(),
+            "get_room must return None for unknown room IDs"
+        );
+    }
+
+    // ── WS handshake tests ───────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn ws_close_frame_during_handshake() {
+        let dir = TempDir::new().unwrap();
+        let room = make_room_state(&dir, "close-test");
+        let port = start_test_server(create_router(make_ws_app_state(room))).await;
+
+        let url = format!("ws://127.0.0.1:{port}/ws/close-test");
+        let (ws, _) = connect_async(&url).await.unwrap();
+        let (mut tx, mut rx) = ws.split();
+        // Send close as the first frame — before any handshake text.
+        tx.send(TungsteniteMsg::Close(None)).await.unwrap();
+
+        // Server handles Close during handshake gracefully — expect close echo or stream end.
+        let frame = tokio::time::timeout(Duration::from_secs(2), rx.next()).await;
+        match frame {
+            Ok(Some(Ok(TungsteniteMsg::Close(_)))) | Ok(None) | Err(_) => {}
+            Ok(Some(Ok(other))) => panic!("expected close, got: {other:?}"),
+            Ok(Some(Err(_))) => {} // transport-level close
+        }
+    }
+
+    #[tokio::test]
+    async fn ws_join_handshake_returns_token() {
+        let dir = TempDir::new().unwrap();
+        let room = make_room_state(&dir, "join-test");
+        let port = start_test_server(create_router(make_ws_app_state(room))).await;
+
+        let (_tx, mut rx) = test_ws_connect(port, "join-test", "JOIN:alice").await;
+        let v = recv_json(&mut rx).await;
+        assert_eq!(v["type"], "token");
+        assert_eq!(v["username"], "alice");
+        assert!(
+            v["token"].as_str().unwrap().len() > 10,
+            "token should be a UUID string"
+        );
+    }
+
+    #[tokio::test]
+    async fn ws_join_private_room_denied() {
+        let dir = TempDir::new().unwrap();
+        let config = room_protocol::RoomConfig {
+            visibility: room_protocol::RoomVisibility::Private,
+            max_members: None,
+            invite_list: std::collections::HashSet::new(),
+            created_by: "owner".to_owned(),
+            created_at: "2026-01-01T00:00:00Z".to_owned(),
+        };
+        let room = make_room_state_with_config(&dir, "private", Some(config));
+        let port = start_test_server(create_router(make_ws_app_state(room))).await;
+
+        let (_tx, mut rx) = test_ws_connect(port, "private", "JOIN:stranger").await;
+        let v = recv_json(&mut rx).await;
+        assert_eq!(v["type"], "error");
+        assert_eq!(v["code"], "join_denied");
+        assert_eq!(v["username"], "stranger");
+    }
+
+    #[tokio::test]
+    async fn ws_invalid_token_returns_error() {
+        let dir = TempDir::new().unwrap();
+        let room = make_room_state(&dir, "token-test");
+        let port = start_test_server(create_router(make_ws_app_state(room))).await;
+
+        let (_tx, mut rx) = test_ws_connect(port, "token-test", "TOKEN:not-a-real-token").await;
+        let v = recv_json(&mut rx).await;
+        assert_eq!(v["type"], "error");
+        assert_eq!(v["code"], "invalid_token");
+    }
+
+    #[tokio::test]
+    async fn ws_session_invalid_token_returns_error() {
+        let dir = TempDir::new().unwrap();
+        let room = make_room_state(&dir, "session-test");
+        let port = start_test_server(create_router(make_ws_app_state(room))).await;
+
+        let (_tx, mut rx) = test_ws_connect(port, "session-test", "SESSION:bad-token").await;
+        let v = recv_json(&mut rx).await;
+        assert_eq!(v["type"], "error");
+        assert_eq!(v["code"], "invalid_token");
+    }
+
+    #[tokio::test]
+    async fn ws_oneshot_send_empty_body_closes() {
+        let dir = TempDir::new().unwrap();
+        let room = make_room_state(&dir, "empty-test");
+        // Pre-populate the token map so TOKEN: handshake resolves.
+        room.auth
+            .token_map
+            .lock()
+            .await
+            .insert("test-tok".to_owned(), "sender".to_owned());
+        let port = start_test_server(create_router(make_ws_app_state(room))).await;
+
+        let (mut tx, mut rx) = test_ws_connect(port, "empty-test", "TOKEN:test-tok").await;
+        // Empty body — ws_oneshot_send returns Ok(()) without replying.
+        tx.send(TungsteniteMsg::Text("".into())).await.unwrap();
+
+        // Server closes connection without sending a message frame.
+        let result = tokio::time::timeout(Duration::from_secs(2), rx.next()).await;
+        match result {
+            Ok(Some(Ok(TungsteniteMsg::Close(_)))) | Ok(None) | Err(_) => {}
+            Ok(Some(Ok(TungsteniteMsg::Text(text)))) => {
+                panic!("expected no response for empty body, got: {text}")
+            }
+            Ok(Some(Ok(other))) => panic!("expected close, got: {other:?}"),
+            Ok(Some(Err(_))) => {} // transport-level close
+        }
+    }
+}

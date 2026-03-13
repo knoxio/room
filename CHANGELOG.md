@@ -24,6 +24,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **test:** Added 6 unit tests for `broker/fanout.rs` (`broadcast_and_persist`, `dm_and_persist`). (#571)
 - **test:** Added 16 unit tests for `broker/ws/rest.rs` error paths (`extract_bearer_token`, `build_query_filter`, `apply_query_filter`, `dispatch_to_response`, `require_auth`). (#575)
 - **test:** Added 5 composite filter edge-case tests for `query.rs`. (#576)
+- **tests:** Added 8 unit tests for `broker/ws/mod.rs` — `DaemonWsState::get_room` lookup,
+  WS close frame during handshake, JOIN/TOKEN/SESSION handshake error paths, private room
+  join denial, and oneshot-send empty body edge case. (#574)
 
 ### Changed
 
