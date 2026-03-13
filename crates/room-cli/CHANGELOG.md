@@ -10,6 +10,11 @@ For changes prior to the workspace restructure (v0.1.2 through v1.0.2), see the
 
 ## [Unreleased]
 
+### Changed
+
+- Deduplicated `MentionPicker` and `ChoicePicker` into shared `PickerState` struct with
+  `Deref`/`DerefMut` composition — removes ~35 lines of duplicated picker logic. (#559)
+
 ### Fixed
 
 - Oneshot send paths now return structured JSON error responses (`parse_error`, `route_error`)
