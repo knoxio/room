@@ -7,6 +7,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `plugin` module with framework types for external plugin development:
+  `Plugin` trait, `CommandInfo`, `ParamSchema`, `ParamType`, `PluginResult`,
+  `CommandContext`, `RoomMetadata`, `UserInfo`, `BoxFuture`, and new
+  `MessageWriter`/`HistoryAccess` async traits. External crates can implement
+  plugins by depending only on `room-protocol`. (#558)
+
 ## [3.1.0] - 2026-03-13
 
 ### Added

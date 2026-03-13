@@ -3,8 +3,8 @@ use room_protocol::{EventFilter, SubscriptionTier};
 use crate::{
     message::{make_system, Message},
     plugin::{
-        builtin_command_infos, ChatWriter, CommandContext, CommandInfo, HistoryReader, ParamType,
-        PluginResult, RoomMetadata,
+        builtin_command_infos, snapshot_metadata, ChatWriter, CommandContext, CommandInfo,
+        HistoryReader, ParamType, PluginResult,
     },
 };
 
@@ -380,8 +380,7 @@ async fn dispatch_plugin(
         &state.seq_counter,
         plugin.name(),
     );
-    let metadata =
-        RoomMetadata::snapshot(&state.status_map, &state.host_user, &state.chat_path).await;
+    let metadata = snapshot_metadata(&state.status_map, &state.host_user, &state.chat_path).await;
     let available_commands = state.plugin_registry.all_commands();
 
     let ctx = CommandContext {
@@ -391,8 +390,8 @@ async fn dispatch_plugin(
         room_id: state.room_id.as_ref().clone(),
         message_id: id.clone(),
         timestamp: *ts,
-        history,
-        writer,
+        history: Box::new(history),
+        writer: Box::new(writer),
         metadata,
         available_commands,
     };

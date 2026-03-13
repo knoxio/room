@@ -1,3 +1,5 @@
+pub mod plugin;
+
 use std::collections::{BTreeSet, HashSet};
 use std::fmt;
 

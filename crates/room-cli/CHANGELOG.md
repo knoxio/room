@@ -20,6 +20,12 @@ For changes prior to the workspace restructure (v0.1.2 through v1.0.2), see the
 - Split `oneshot/poll.rs` (1824 lines) into 6 focused modules under `oneshot/poll/`:
   `mod.rs`, `meta.rs`, `filter_tier.rs`, `filter_events.rs`, `commands.rs`, `multi_room.rs`.
   No API changes — all public functions remain re-exported at the same paths. (#555)
+- Plugin framework decoupled from broker internals: `Plugin` trait, `CommandInfo`,
+  `ParamSchema`, `ParamType`, `PluginResult`, `CommandContext`, `RoomMetadata`, and new
+  `MessageWriter`/`HistoryAccess` traits moved to `room-protocol`. Concrete
+  `ChatWriter`/`HistoryReader` implementations moved to `plugin/bridge.rs`.
+  `plugin/mod.rs` has zero broker imports. External crates can now implement
+  `Plugin` by depending only on `room-protocol`. (#558)
 
 ### Fixed
 

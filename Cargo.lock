@@ -1976,6 +1976,7 @@ dependencies = [
 name = "room-protocol"
 version = "3.1.0"
 dependencies = [
+ "anyhow",
  "chrono",
  "serde",
  "serde_json",

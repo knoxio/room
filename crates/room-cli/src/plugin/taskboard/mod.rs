@@ -1221,8 +1221,11 @@ mod tests {
             room_id: "test-room".to_owned(),
             message_id: "msg-001".to_owned(),
             timestamp: chrono::Utc::now(),
-            history: crate::plugin::HistoryReader::new(std::path::Path::new("/dev/null"), sender),
-            writer,
+            history: Box::new(crate::plugin::HistoryReader::new(
+                std::path::Path::new("/dev/null"),
+                sender,
+            )),
+            writer: Box::new(writer),
             metadata: RoomMetadata {
                 online_users: vec![UserInfo {
                     username: sender.to_owned(),

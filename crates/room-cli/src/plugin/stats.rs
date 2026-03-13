@@ -162,8 +162,10 @@ mod tests {
             room_id: "r".to_owned(),
             message_id: "msg-1".to_owned(),
             timestamp: Utc::now(),
-            history: HistoryReader::new(path, "alice"),
-            writer: ChatWriter::new(&clients, &chat_path, &room_id, &seq, "stats"),
+            history: Box::new(HistoryReader::new(path, "alice")),
+            writer: Box::new(ChatWriter::new(
+                &clients, &chat_path, &room_id, &seq, "stats",
+            )),
             metadata: RoomMetadata {
                 online_users: vec![UserInfo {
                     username: "alice".to_owned(),

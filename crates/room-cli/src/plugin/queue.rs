@@ -308,8 +308,8 @@ mod tests {
             room_id: "test-room".to_owned(),
             message_id: Uuid::new_v4().to_string(),
             timestamp: Utc::now(),
-            history: HistoryReader::new(chat_path, sender),
-            writer: ChatWriter::new(clients, &chat_arc, &room_id, seq, "queue"),
+            history: Box::new(HistoryReader::new(chat_path, sender)),
+            writer: Box::new(ChatWriter::new(clients, &chat_arc, &room_id, seq, "queue")),
             metadata: RoomMetadata {
                 online_users: vec![UserInfo {
                     username: sender.to_owned(),
