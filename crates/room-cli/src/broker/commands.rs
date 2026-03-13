@@ -195,9 +195,9 @@ pub(crate) async fn route_command(
             return Ok(CommandResult::Reply(json));
         }
 
-        // Room management commands.
-        if cmd == "room-info" {
-            let result = handle_room_info(state).await;
+        // Room/user inspection commands.
+        if cmd == "info" || cmd == "room-info" {
+            let result = handle_info(params, state).await;
             let sys = make_system(&state.room_id, "broker", result);
             let json = serde_json::to_string(&sys)?;
             return Ok(CommandResult::Reply(json));
@@ -387,10 +387,31 @@ async fn dispatch_plugin(
 
 // ── Room management commands ──────────────────────────────────────────────────
 
-/// Handle `/room-info` — display room visibility, config, and member count.
+/// Handle `/info [username]` — show room metadata or user info.
+///
+/// - `/info` (no args): room ID, visibility, config, host, member count, subscribers.
+/// - `/info <username>`: status, subscription tier, host flag, online status.
+///
+/// `/room-info` is an alias that always shows room info (ignores params).
+async fn handle_info(params: &[String], state: &RoomState) -> String {
+    if let Some(target) = params.first() {
+        let target = target.strip_prefix('@').unwrap_or(target);
+        return handle_user_info(target, state).await;
+    }
+    handle_room_info(state).await
+}
+
+/// Room metadata: visibility, config, host, member count, subscribers.
 async fn handle_room_info(state: &RoomState) -> String {
     let member_count = state.status_count().await;
     let sub_count = state.subscription_count().await;
+    let host = state
+        .host_user
+        .lock()
+        .await
+        .clone()
+        .unwrap_or_else(|| "(none)".to_owned());
+
     match &state.config {
         Some(config) => {
             let vis = serde_json::to_string(&config.visibility).unwrap_or_default();
@@ -400,17 +421,53 @@ async fn handle_room_info(state: &RoomState) -> String {
                 .unwrap_or_else(|| "unlimited".to_owned());
             let invites: Vec<&str> = config.invite_list.iter().map(|s| s.as_str()).collect();
             format!(
-                "room: {} | visibility: {} | max members: {} | members online: {} | subscribers: {} | invited: [{}] | created by: {}",
-                state.room_id, vis, max, member_count, sub_count, invites.join(", "), config.created_by
+                "room: {} | visibility: {} | max members: {} | host: {} | members online: {} | subscribers: {} | invited: [{}] | created by: {}",
+                state.room_id, vis, max, host, member_count, sub_count, invites.join(", "), config.created_by
             )
         }
         None => {
             format!(
-                "room: {} | visibility: public (legacy) | members online: {} | subscribers: {}",
-                state.room_id, member_count, sub_count
+                "room: {} | visibility: public (legacy) | host: {} | members online: {} | subscribers: {}",
+                state.room_id, host, member_count, sub_count
             )
         }
     }
+}
+
+/// User info: online status, status text, subscription tier, host flag.
+async fn handle_user_info(target: &str, state: &RoomState) -> String {
+    let status_map = state.status_map.lock().await;
+    let online = status_map.contains_key(target);
+    let status_text = status_map.get(target).cloned().unwrap_or_default();
+    drop(status_map);
+
+    let sub_tier = state.subscription_map.lock().await.get(target).copied();
+
+    let is_host = state.host_user.lock().await.as_deref() == Some(target);
+
+    let mut parts = vec![format!("user: {target}")];
+
+    if online {
+        if status_text.is_empty() {
+            parts.push("online".to_owned());
+        } else {
+            parts.push(format!("online ({status_text})"));
+        }
+    } else {
+        parts.push("offline".to_owned());
+    }
+
+    if let Some(tier) = sub_tier {
+        parts.push(format!("subscription: {tier}"));
+    } else {
+        parts.push("subscription: none".to_owned());
+    }
+
+    if is_host {
+        parts.push("host: yes".to_owned());
+    }
+
+    parts.join(" | ")
 }
 
 // ── Help command ──────────────────────────────────────────────────────────────
@@ -478,7 +535,7 @@ fn format_command_help(cmd: &CommandInfo) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{handle_room_info, route_command, CommandResult};
+    use super::{handle_info, handle_room_info, handle_user_info, route_command, CommandResult};
     use crate::{
         broker::state::RoomState,
         message::{make_command, make_dm, make_message},
@@ -1021,6 +1078,8 @@ mod tests {
         .unwrap()
     }
 
+    // ── /info and /room-info ─────────────────────────────────────────────
+
     #[tokio::test]
     async fn room_info_no_config() {
         let tmp = NamedTempFile::new().unwrap();
@@ -1028,6 +1087,15 @@ mod tests {
         let result = handle_room_info(&state).await;
         assert!(result.contains("legacy"));
         assert!(result.contains("test-room"));
+    }
+
+    #[tokio::test]
+    async fn room_info_includes_host() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+        *state.host_user.lock().await = Some("alice".to_owned());
+        let result = handle_room_info(&state).await;
+        assert!(result.contains("host: alice"), "got: {result}");
     }
 
     #[tokio::test]
@@ -1041,12 +1109,107 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn route_command_room_info_returns_reply() {
+    async fn info_no_args_shows_room_info() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+        let result = handle_info(&[], &state).await;
+        assert!(result.contains("test-room"), "got: {result}");
+        assert!(result.contains("legacy"), "got: {result}");
+    }
+
+    #[tokio::test]
+    async fn info_with_username_shows_user_info() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+        state.set_status("bob", "coding".to_owned()).await;
+        state.set_subscription("bob", SubscriptionTier::Full).await;
+        let result = handle_info(&["bob".to_owned()], &state).await;
+        assert!(result.contains("user: bob"), "got: {result}");
+        assert!(result.contains("online (coding)"), "got: {result}");
+        assert!(result.contains("subscription: full"), "got: {result}");
+    }
+
+    #[tokio::test]
+    async fn info_strips_at_prefix() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+        state.set_status("carol", String::new()).await;
+        let result = handle_info(&["@carol".to_owned()], &state).await;
+        assert!(result.contains("user: carol"), "got: {result}");
+    }
+
+    #[tokio::test]
+    async fn user_info_offline_user() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+        let result = handle_user_info("ghost", &state).await;
+        assert!(result.contains("user: ghost"), "got: {result}");
+        assert!(result.contains("offline"), "got: {result}");
+        assert!(result.contains("subscription: none"), "got: {result}");
+    }
+
+    #[tokio::test]
+    async fn user_info_online_no_status() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+        state.set_status("alice", String::new()).await;
+        let result = handle_user_info("alice", &state).await;
+        assert!(result.contains("online"), "got: {result}");
+        assert!(!result.contains("offline"), "got: {result}");
+    }
+
+    #[tokio::test]
+    async fn user_info_shows_host_flag() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+        *state.host_user.lock().await = Some("alice".to_owned());
+        state.set_status("alice", "hosting".to_owned()).await;
+        let result = handle_user_info("alice", &state).await;
+        assert!(result.contains("host: yes"), "got: {result}");
+    }
+
+    #[tokio::test]
+    async fn user_info_non_host_omits_host_flag() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+        *state.host_user.lock().await = Some("alice".to_owned());
+        state.set_status("bob", String::new()).await;
+        let result = handle_user_info("bob", &state).await;
+        assert!(!result.contains("host"), "got: {result}");
+    }
+
+    #[tokio::test]
+    async fn route_command_info_returns_reply() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+        let msg = make_command("test-room", "alice", "info", vec![]);
+        let result = route_command(msg, "alice", &state).await.unwrap();
+        assert!(matches!(result, CommandResult::Reply(_)));
+    }
+
+    #[tokio::test]
+    async fn route_command_room_info_alias_returns_reply() {
         let tmp = NamedTempFile::new().unwrap();
         let state = make_state(tmp.path().to_path_buf());
         let msg = make_command("test-room", "alice", "room-info", vec![]);
         let result = route_command(msg, "alice", &state).await.unwrap();
         assert!(matches!(result, CommandResult::Reply(_)));
+    }
+
+    #[tokio::test]
+    async fn route_command_info_with_user_returns_reply() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+        state.set_status("bob", "busy".to_owned()).await;
+        let msg = make_command("test-room", "alice", "info", vec!["bob".to_owned()]);
+        let result = route_command(msg, "alice", &state).await.unwrap();
+        match result {
+            CommandResult::Reply(json) => {
+                assert!(json.contains("user: bob"), "got: {json}");
+                assert!(json.contains("online (busy)"), "got: {json}");
+            }
+            _ => panic!("expected Reply"),
+        }
     }
 
     // ── subscription commands ──────────────────────────────────────────────

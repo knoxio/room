@@ -330,6 +330,7 @@ impl RoomMetadata {
 const RESERVED_COMMANDS: &[&str] = &[
     "who",
     "help",
+    "info",
     "kick",
     "reauth",
     "clear-tokens",
@@ -553,8 +554,20 @@ pub fn builtin_command_infos() -> Vec<CommandInfo> {
             params: vec![],
         },
         CommandInfo {
+            name: "info".to_owned(),
+            description: "Show room metadata or user info".to_owned(),
+            usage: "/info [username]".to_owned(),
+            params: vec![ParamSchema {
+                name: "username".to_owned(),
+                param_type: ParamType::Username,
+                required: false,
+                description: "User to inspect (omit for room info)".to_owned(),
+            }],
+        },
+        CommandInfo {
             name: "room-info".to_owned(),
-            description: "Show room visibility, config, and member count".to_owned(),
+            description: "Alias for /info — show room visibility, config, and member count"
+                .to_owned(),
             usage: "/room-info".to_owned(),
             params: vec![],
         },
@@ -862,6 +875,7 @@ mod tests {
             "reply",
             "who",
             "help",
+            "info",
             "kick",
             "reauth",
             "clear-tokens",
