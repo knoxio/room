@@ -17,6 +17,8 @@ For changes prior to the workspace restructure (v0.1.2 through v1.0.2), see the
 - TUI: render `Event` messages with `[event:<type>]` tag in yellow. (#430)
 - `/taskboard cancel <task-id> [reason]` subcommand — cancels a task with optional reason.
   Permission: poster, assignee, or host. Finished/cancelled tasks cannot be re-cancelled. (#506)
+- Integration tests: Event variant flows through UDS, WebSocket, and REST
+  transports — lifecycle events, broadcast, persistence, wire format. (#430)
 - Integration tests: REST/WS global daemon token fallback and kicked user WS reconnection rejection. (#490, #492)
 - Integration tests: queue plugin oneshot response — add, pop (FIFO), and remove return system echo to oneshot senders. (#494)
 - `/taskboard assign <task-id> <username>` subcommand — poster or host can assign an open task to a specific user. (#502)
