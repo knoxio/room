@@ -10,6 +10,8 @@ use tokio::sync::{broadcast, watch, Mutex};
 use crate::{plugin::PluginRegistry, registry::UserRegistry};
 use std::sync::OnceLock;
 
+use super::service::CrossRoomResolver;
+
 /// Maps client ID → (username, broadcast sender).
 /// Username is set after the handshake completes.
 pub(crate) type ClientMap = Arc<Mutex<HashMap<u64, (String, broadcast::Sender<String>)>>>;
@@ -83,6 +85,12 @@ pub(crate) struct RoomState {
     pub(crate) plugin_registry: Arc<PluginRegistry>,
     /// Room visibility and access control configuration.
     pub(crate) config: Option<RoomConfig>,
+    /// Optional cross-room resolver for daemon mode.
+    ///
+    /// When set, `dispatch_plugin` can handle `--room <id>` flags by resolving
+    /// the target room's state and building the `CommandContext` against it.
+    /// Set via [`set_cross_room_resolver`] after construction.
+    pub(crate) cross_room_resolver: OnceLock<Arc<dyn CrossRoomResolver>>,
 }
 
 impl RoomState {
@@ -140,6 +148,7 @@ impl RoomState {
             seq_counter: Arc::new(AtomicU64::new(0)),
             plugin_registry: Arc::new(plugins),
             config,
+            cross_room_resolver: OnceLock::new(),
         }))
     }
 
@@ -152,6 +161,16 @@ impl RoomState {
     /// a second time (consistent with `OnceLock` semantics).
     pub(crate) fn set_registry(&self, registry: Arc<Mutex<UserRegistry>>) {
         let _ = self.auth.registry.set(registry);
+    }
+
+    // ── cross_room_resolver ──────────────────────────────────────────────────
+
+    /// Attach a cross-room resolver so plugins can handle `--room <id>` flags.
+    ///
+    /// Must be called at most once, immediately after construction. Silently
+    /// no-ops if called a second time (consistent with `OnceLock` semantics).
+    pub(crate) fn set_cross_room_resolver(&self, resolver: Arc<dyn CrossRoomResolver>) {
+        let _ = self.cross_room_resolver.set(resolver);
     }
 
     // ── event_filter_map ─────────────────────────────────────────────────────

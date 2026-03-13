@@ -84,6 +84,10 @@ pub(crate) async fn create_room_entry(
         state.set_registry(reg);
     }
 
+    // Attach the cross-room resolver so plugin commands can target other rooms.
+    let resolver = std::sync::Arc::new(super::DaemonRoomResolver::new(rooms.clone()));
+    state.set_cross_room_resolver(resolver);
+
     // Attach persisted event filters.
     let ef_path = daemon_config.event_filter_map_path(room_id);
     let persisted_ef = crate::broker::persistence::load_event_filter_map(&ef_path);

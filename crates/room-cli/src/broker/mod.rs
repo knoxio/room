@@ -156,6 +156,7 @@ impl Broker {
             seq_counter: Arc::new(AtomicU64::new(0)),
             plugin_registry: Arc::new(registry),
             config: None,
+            cross_room_resolver: std::sync::OnceLock::new(),
         });
         // Attach event filter map (parallel to subscription map).
         {

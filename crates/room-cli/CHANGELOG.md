@@ -12,6 +12,9 @@ For changes prior to the workspace restructure (v0.1.2 through v1.0.2), see the
 
 ### Added
 
+- Cross-room command routing via `--room <id>` flag in `dispatch_plugin`. `CrossRoomResolver`
+  trait in `broker/service.rs`, `DaemonRoomResolver` in `broker/daemon/mod.rs`. 13 unit tests
+  and 4 daemon integration tests. (#517)
 - Cross-room `@mention` autocomplete: TUI MentionPicker now shows all daemon-registered
   users (dimmed with bullet suffix) below in-room users. New `/who_all` broker command
   and `GET /api/users` REST endpoint provide the cross-room user list. (#515)

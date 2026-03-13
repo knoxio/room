@@ -7,6 +7,8 @@
 //! The concrete implementation lives on `RoomState` (below). WS handlers
 //! continue to use `RoomState` directly for socket lifecycle management.
 
+use std::{future::Future, pin::Pin, sync::Arc};
+
 use crate::message::Message;
 
 use room_protocol::SubscriptionTier;
@@ -17,6 +19,22 @@ use super::{
     fanout::{broadcast_and_persist, dm_and_persist},
     state::RoomState,
 };
+
+/// Resolves a room ID to its [`RoomState`] in daemon mode.
+///
+/// Implemented by `DaemonRoomResolver` in `broker/daemon/mod.rs`.
+/// Stored on [`RoomState`] as an optional `OnceLock<Arc<dyn CrossRoomResolver>>`
+/// so that `dispatch_plugin` can handle `--room <id>` flags without threading
+/// a resolver parameter through every caller.
+///
+/// In standalone (single-room) mode this is `None` — cross-room commands
+/// are only available when the daemon manages multiple rooms.
+pub(crate) trait CrossRoomResolver: Send + Sync {
+    fn resolve_room(
+        &self,
+        room_id: &str,
+    ) -> Pin<Box<dyn Future<Output = Option<Arc<RoomState>>> + Send + '_>>;
+}
 
 /// Result of dispatching a message through the command router + broadcast pipeline.
 pub(crate) enum DispatchResult {

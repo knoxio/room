@@ -997,3 +997,123 @@ async fn rest_api_users_returns_registered_users() {
     sorted.sort();
     assert_eq!(users, sorted, "users should be returned in sorted order");
 }
+
+// ── Cross-room command routing (#517) ────────────────────────────────────
+
+/// Build a taskboard command JSON envelope for daemon oneshot sends.
+fn taskboard_wire(action: &str, args: &[&str]) -> String {
+    let mut params: Vec<serde_json::Value> = vec![serde_json::Value::String(action.to_owned())];
+    for arg in args {
+        params.push(serde_json::Value::String((*arg).to_owned()));
+    }
+    serde_json::json!({"type": "command", "cmd": "taskboard", "params": params}).to_string()
+}
+
+/// Cross-room taskboard post: `taskboard post --room room-b description`
+/// sent from room-a should create the task in room-b's taskboard.
+#[tokio::test]
+async fn cross_room_taskboard_post() {
+    let td = TestDaemon::start(&["room-a", "room-b"]).await;
+    let token = daemon_global_join(&td.socket_path, "alice").await;
+
+    // Post a task from room-a targeting room-b via JSON command envelope.
+    let wire = taskboard_wire(
+        "post",
+        &["--room", "room-b", "cross-room", "task", "description"],
+    );
+    let resp = daemon_send(&td.socket_path, "room-a", &token, &wire).await;
+    // The reply should indicate the task was posted (either broadcast or reply).
+    let content = resp["content"].as_str().unwrap_or("");
+    assert!(
+        content.contains("posted") || content.contains("tb-"),
+        "expected task posted confirmation, got: {resp}"
+    );
+
+    // List tasks in room-b — should find the cross-room task.
+    let list_wire = taskboard_wire("list", &[]);
+    let list_resp = daemon_send(&td.socket_path, "room-b", &token, &list_wire).await;
+    let list_content = list_resp["content"].as_str().unwrap_or("");
+    assert!(
+        list_content.contains("cross-room task description"),
+        "room-b taskboard should contain the cross-posted task, got: {list_content}"
+    );
+
+    // List tasks in room-a — should NOT contain the task.
+    let list_a = daemon_send(&td.socket_path, "room-a", &token, &list_wire).await;
+    let list_a_content = list_a["content"].as_str().unwrap_or("");
+    assert!(
+        !list_a_content.contains("cross-room task description"),
+        "room-a taskboard should NOT contain the cross-posted task, got: {list_a_content}"
+    );
+}
+
+/// Cross-room list: `taskboard list --room room-y` from room-x shows room-y's tasks.
+#[tokio::test]
+async fn cross_room_taskboard_list() {
+    let td = TestDaemon::start(&["room-x", "room-y"]).await;
+    let token = daemon_global_join(&td.socket_path, "bob").await;
+
+    // Post a task directly in room-y.
+    let post_wire = taskboard_wire("post", &["local", "task", "in", "room-y"]);
+    daemon_send(&td.socket_path, "room-y", &token, &post_wire).await;
+
+    // List room-y tasks from room-x via --room flag.
+    let list_wire = taskboard_wire("list", &["--room", "room-y"]);
+    let resp = daemon_send(&td.socket_path, "room-x", &token, &list_wire).await;
+    let content = resp["content"].as_str().unwrap_or("");
+    assert!(
+        content.contains("local task in room-y"),
+        "cross-room list should show room-y's tasks, got: {content}"
+    );
+}
+
+/// Cross-room claim: `taskboard claim --room room-n <id>` claims a task
+/// posted in room-n from room-m.
+#[tokio::test]
+async fn cross_room_taskboard_claim() {
+    let td = TestDaemon::start(&["room-m", "room-n"]).await;
+    let token = daemon_global_join(&td.socket_path, "carol").await;
+
+    // Post a task directly in room-n.
+    let post_wire = taskboard_wire("post", &["claimable", "cross-room", "task"]);
+    let post_resp = daemon_send(&td.socket_path, "room-n", &token, &post_wire).await;
+    let post_content = post_resp["content"].as_str().unwrap_or("");
+    // Extract the task ID (format: tb-NNN).
+    let task_id = post_content
+        .split_whitespace()
+        .find(|w| w.starts_with("tb-"))
+        .expect("post response should contain task ID");
+
+    // Claim from room-m targeting room-n.
+    let claim_wire = taskboard_wire("claim", &["--room", "room-n", task_id]);
+    let claim_resp = daemon_send(&td.socket_path, "room-m", &token, &claim_wire).await;
+    let claim_content = claim_resp["content"].as_str().unwrap_or("");
+    assert!(
+        claim_content.contains("claimed") || claim_content.contains(task_id),
+        "cross-room claim should succeed, got: {claim_content}"
+    );
+
+    // Verify via show in room-n that the task is claimed by carol.
+    let show_wire = taskboard_wire("show", &[task_id]);
+    let show_resp = daemon_send(&td.socket_path, "room-n", &token, &show_wire).await;
+    let show_content = show_resp["content"].as_str().unwrap_or("");
+    assert!(
+        show_content.contains("carol"),
+        "task should be claimed by carol, got: {show_content}"
+    );
+}
+
+/// Cross-room targeting a nonexistent room returns an error.
+#[tokio::test]
+async fn cross_room_nonexistent_target_returns_error() {
+    let td = TestDaemon::start(&["room-only"]).await;
+    let token = daemon_global_join(&td.socket_path, "dave").await;
+
+    let wire = taskboard_wire("list", &["--room", "ghost-room"]);
+    let resp = daemon_send(&td.socket_path, "room-only", &token, &wire).await;
+    let content = resp["content"].as_str().unwrap_or("");
+    assert!(
+        content.contains("room not found"),
+        "should report room not found, got: {content}"
+    );
+}

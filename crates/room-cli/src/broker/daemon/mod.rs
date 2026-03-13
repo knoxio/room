@@ -56,6 +56,7 @@ use tokio::{
 use crate::registry::UserRegistry;
 
 use super::{
+    service::CrossRoomResolver,
     state::{RoomState, TokenMap},
     ws::{self, DaemonWsState},
 };
@@ -353,6 +354,32 @@ impl DaemonState {
         }
 
         result
+    }
+}
+
+// ── CrossRoomResolver for daemon mode ────────────────────────────────────────
+
+/// Resolves a room ID to its [`RoomState`] by looking it up in the daemon's
+/// room map. Attached to every room created by the daemon so that plugin
+/// commands can target a different room via `--room <id>`.
+pub(crate) struct DaemonRoomResolver {
+    rooms: RoomMap,
+}
+
+impl DaemonRoomResolver {
+    pub(crate) fn new(rooms: RoomMap) -> Self {
+        Self { rooms }
+    }
+}
+
+impl CrossRoomResolver for DaemonRoomResolver {
+    fn resolve_room(
+        &self,
+        room_id: &str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<Arc<RoomState>>> + Send + '_>>
+    {
+        let room_id = room_id.to_owned();
+        Box::pin(async move { self.rooms.lock().await.get(&room_id).cloned() })
     }
 }
 
@@ -944,5 +971,50 @@ mod tests {
         migration::migrate_legacy_tmpdir_tokens_from(token_dir.path(), &mut registry);
 
         assert!(registry.list_users().is_empty());
+    }
+
+    // ── DaemonRoomResolver ───────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn daemon_room_resolver_finds_existing_room() {
+        let daemon = DaemonState::new(DaemonConfig::default());
+        daemon.create_room("target").await.unwrap();
+
+        let resolver = DaemonRoomResolver::new(daemon.rooms.clone());
+        let result = resolver.resolve_room("target").await;
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().room_id.as_str(), "target");
+    }
+
+    #[tokio::test]
+    async fn daemon_room_resolver_returns_none_for_unknown() {
+        let daemon = DaemonState::new(DaemonConfig::default());
+        let resolver = DaemonRoomResolver::new(daemon.rooms.clone());
+        assert!(resolver.resolve_room("nonexistent").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn created_rooms_have_resolver_attached() {
+        let daemon = DaemonState::new(DaemonConfig::default());
+        daemon.create_room("room-a").await.unwrap();
+
+        let state = get_room(&daemon, "room-a").await;
+        assert!(
+            state.cross_room_resolver.get().is_some(),
+            "daemon-created rooms must have a cross-room resolver attached"
+        );
+    }
+
+    #[tokio::test]
+    async fn cross_room_resolver_resolves_sibling_room() {
+        let daemon = DaemonState::new(DaemonConfig::default());
+        daemon.create_room("room-a").await.unwrap();
+        daemon.create_room("room-b").await.unwrap();
+
+        let state_a = get_room(&daemon, "room-a").await;
+        let resolver = state_a.cross_room_resolver.get().unwrap();
+        let resolved = resolver.resolve_room("room-b").await;
+        assert!(resolved.is_some(), "resolver on room-a should find room-b");
+        assert_eq!(resolved.unwrap().room_id.as_str(), "room-b");
     }
 }

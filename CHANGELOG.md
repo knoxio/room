@@ -22,6 +22,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **broker:** Cross-room command routing via `--room <id>` flag. Plugin commands in daemon
+  mode can now target a different room (e.g. `/taskboard post --room other-room fix bug`).
+  Replies go to the source room, broadcasts go to the target room. (#517)
 - CI changelog enforcement — PRs must include a changelog entry under `[Unreleased]`. (#499)
 - **docs:** Added daemon mode section (daemon, create, destroy) to quick-start.md. (#599)
 - **test:** Added 6 unit tests for `broker/fanout.rs` (`broadcast_and_persist`, `dm_and_persist`). (#571)

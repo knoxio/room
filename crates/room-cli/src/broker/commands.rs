@@ -380,8 +380,42 @@ fn validate_params(params: &[String], schema: &CommandInfo) -> Result<(), String
     Ok(())
 }
 
+/// Extract `--room <room_id>` from a params list, returning the target room ID
+/// and the cleaned params with the flag and its value stripped out.
+///
+/// Returns `None` if no `--room` flag is present. The flag can appear at any
+/// position in the params list; both it and the subsequent value are removed
+/// so the plugin never sees them.
+fn extract_room_flag(params: &[String]) -> Option<(String, Vec<String>)> {
+    let mut target_room = None;
+    let mut cleaned = Vec::with_capacity(params.len());
+    let mut skip_next = false;
+
+    for (i, p) in params.iter().enumerate() {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if p == "--room" {
+            if let Some(val) = params.get(i + 1) {
+                target_room = Some(val.clone());
+                skip_next = true;
+                continue;
+            }
+        }
+        cleaned.push(p.clone());
+    }
+
+    target_room.map(|room_id| (room_id, cleaned))
+}
+
 /// Build a [`CommandContext`] and call a plugin's `handle` method, translating
 /// the [`PluginResult`] into a [`CommandResult`] the broker understands.
+///
+/// If params contain `--room <id>` and the source room has a cross-room
+/// resolver (daemon mode), the command is executed against the target room
+/// instead of the source room. The plugin is resolved from the target room's
+/// registry. This enables e.g. `/taskboard post --room other-room description`.
 async fn dispatch_plugin(
     plugin: &dyn crate::plugin::Plugin,
     msg: &Message,
@@ -398,6 +432,20 @@ async fn dispatch_plugin(
         } => (cmd, params, id, ts),
         _ => return Ok(CommandResult::Passthrough(msg.clone())),
     };
+
+    // Check for --room flag to redirect to a different room.
+    if let Some((target_room_id, cleaned_params)) = extract_room_flag(params) {
+        return dispatch_cross_room(
+            cmd,
+            &cleaned_params,
+            id,
+            *ts,
+            username,
+            state,
+            &target_room_id,
+        )
+        .await;
+    }
 
     // Schema validation — check params against the plugin's declared schema
     // before invoking the handler.
@@ -450,6 +498,138 @@ async fn dispatch_plugin(
             let seq_msg =
                 broadcast_and_persist(&sys, &state.clients, &state.chat_path, &state.seq_counter)
                     .await?;
+            let json = serde_json::to_string(&seq_msg)?;
+            CommandResult::HandledWithReply(json)
+        }
+        PluginResult::Handled => CommandResult::Handled,
+    })
+}
+
+/// Execute a plugin command against a different room (cross-room dispatch).
+///
+/// Resolves the target room via `state.cross_room_resolver`, finds the plugin
+/// in the target room's registry, builds a `CommandContext` pointing at the
+/// target room's state, and runs the plugin handler. Broadcasts go to the
+/// target room's clients and chat file.
+async fn dispatch_cross_room(
+    cmd: &str,
+    params: &[String],
+    id: &str,
+    ts: chrono::DateTime<chrono::Utc>,
+    username: &str,
+    source_state: &RoomState,
+    target_room_id: &str,
+) -> anyhow::Result<CommandResult> {
+    let resolver = match source_state.cross_room_resolver.get() {
+        Some(r) => r,
+        None => {
+            let sys = make_system(
+                &source_state.room_id,
+                "broker",
+                "cross-room commands are only available in daemon mode",
+            );
+            let json = serde_json::to_string(&sys)?;
+            return Ok(CommandResult::Reply(json));
+        }
+    };
+
+    let target_state = match resolver.resolve_room(target_room_id).await {
+        Some(s) => s,
+        None => {
+            let sys = make_system(
+                &source_state.room_id,
+                "broker",
+                format!("room not found: {target_room_id}"),
+            );
+            let json = serde_json::to_string(&sys)?;
+            return Ok(CommandResult::Reply(json));
+        }
+    };
+
+    let plugin = match target_state.plugin_registry.resolve(cmd) {
+        Some(p) => p,
+        None => {
+            let sys = make_system(
+                &source_state.room_id,
+                "broker",
+                format!("command /{cmd} not found in room {target_room_id}"),
+            );
+            let json = serde_json::to_string(&sys)?;
+            return Ok(CommandResult::Reply(json));
+        }
+    };
+
+    // Schema validation against the target plugin's schema.
+    if let Some(cmd_info) = plugin.commands().iter().find(|c| c.name == cmd) {
+        if let Err(err_msg) = validate_params(params, cmd_info) {
+            let sys = make_system(
+                &source_state.room_id,
+                &format!("plugin:{}", plugin.name()),
+                err_msg,
+            );
+            let json = serde_json::to_string(&sys)?;
+            return Ok(CommandResult::Reply(json));
+        }
+    }
+
+    // Build context against the TARGET room's state.
+    let history = HistoryReader::new(&target_state.chat_path, username);
+    let writer = ChatWriter::new(
+        &target_state.clients,
+        &target_state.chat_path,
+        &target_state.room_id,
+        &target_state.seq_counter,
+        plugin.name(),
+    );
+    let metadata = snapshot_metadata(
+        &target_state.status_map,
+        &target_state.host_user,
+        &target_state.chat_path,
+    )
+    .await;
+    let available_commands = target_state.plugin_registry.all_commands();
+
+    let ctx = CommandContext {
+        command: cmd.to_owned(),
+        params: params.to_vec(),
+        sender: username.to_owned(),
+        room_id: target_state.room_id.as_ref().clone(),
+        message_id: id.to_owned(),
+        timestamp: ts,
+        history: Box::new(history),
+        writer: Box::new(writer),
+        metadata,
+        available_commands,
+    };
+
+    let result = plugin.handle(ctx).await?;
+
+    // Replies go to the SOURCE room (the caller sees them), but broadcasts go
+    // to the TARGET room (where the state change happened).
+    Ok(match result {
+        PluginResult::Reply(text) => {
+            let sys = make_system(
+                &source_state.room_id,
+                &format!("plugin:{}", plugin.name()),
+                format!("[→{target_room_id}] {text}"),
+            );
+            let json = serde_json::to_string(&sys)?;
+            CommandResult::Reply(json)
+        }
+        PluginResult::Broadcast(text) => {
+            // Broadcast to the TARGET room.
+            let sys = make_system(
+                &target_state.room_id,
+                &format!("plugin:{}", plugin.name()),
+                text,
+            );
+            let seq_msg = broadcast_and_persist(
+                &sys,
+                &target_state.clients,
+                &target_state.chat_path,
+                &target_state.seq_counter,
+            )
+            .await?;
             let json = serde_json::to_string(&seq_msg)?;
             CommandResult::HandledWithReply(json)
         }
@@ -2208,5 +2388,183 @@ mod tests {
         let users_json = content.strip_prefix("users_all: ").unwrap();
         let users: Vec<String> = serde_json::from_str(users_json).unwrap();
         assert_eq!(users, ["alice", "bob", "charlie"]);
+    }
+
+    // ── extract_room_flag tests ──────────────────────────────────────────
+
+    mod cross_room_tests {
+        use super::super::extract_room_flag;
+
+        #[test]
+        fn extract_room_flag_present_at_start() {
+            let params = vec![
+                "--room".to_owned(),
+                "other-room".to_owned(),
+                "post".to_owned(),
+                "hello".to_owned(),
+            ];
+            let (room, cleaned) = extract_room_flag(&params).unwrap();
+            assert_eq!(room, "other-room");
+            assert_eq!(cleaned, vec!["post", "hello"]);
+        }
+
+        #[test]
+        fn extract_room_flag_present_in_middle() {
+            let params = vec![
+                "post".to_owned(),
+                "--room".to_owned(),
+                "other-room".to_owned(),
+                "hello".to_owned(),
+            ];
+            let (room, cleaned) = extract_room_flag(&params).unwrap();
+            assert_eq!(room, "other-room");
+            assert_eq!(cleaned, vec!["post", "hello"]);
+        }
+
+        #[test]
+        fn extract_room_flag_absent() {
+            let params = vec!["post".to_owned(), "hello".to_owned()];
+            assert!(extract_room_flag(&params).is_none());
+        }
+
+        #[test]
+        fn extract_room_flag_no_value() {
+            // --room at end without a value — not extracted
+            let params = vec!["post".to_owned(), "--room".to_owned()];
+            assert!(extract_room_flag(&params).is_none());
+        }
+
+        #[test]
+        fn extract_room_flag_preserves_order() {
+            let params = vec![
+                "list".to_owned(),
+                "--room".to_owned(),
+                "target".to_owned(),
+                "--verbose".to_owned(),
+            ];
+            let (room, cleaned) = extract_room_flag(&params).unwrap();
+            assert_eq!(room, "target");
+            assert_eq!(cleaned, vec!["list", "--verbose"]);
+        }
+    }
+
+    // ── cross-room dispatch tests ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn cross_room_without_resolver_returns_error() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+        // No cross_room_resolver set — should get an error reply.
+        let msg = make_command(
+            "test-room",
+            "alice",
+            "taskboard",
+            vec![
+                "list".to_owned(),
+                "--room".to_owned(),
+                "other-room".to_owned(),
+            ],
+        );
+        let result = route_command(msg, "alice", &state).await.unwrap();
+        let CommandResult::Reply(json) = result else {
+            panic!("expected Reply with error");
+        };
+        assert!(
+            json.contains("daemon mode"),
+            "should mention daemon mode: {json}"
+        );
+    }
+
+    #[tokio::test]
+    async fn cross_room_nonexistent_room_returns_error() {
+        use crate::broker::service::CrossRoomResolver;
+        use std::pin::Pin;
+
+        struct EmptyResolver;
+        impl CrossRoomResolver for EmptyResolver {
+            fn resolve_room(
+                &self,
+                _room_id: &str,
+            ) -> Pin<Box<dyn std::future::Future<Output = Option<Arc<RoomState>>> + Send + '_>>
+            {
+                Box::pin(async { None })
+            }
+        }
+
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+        state.set_cross_room_resolver(Arc::new(EmptyResolver));
+
+        let msg = make_command(
+            "test-room",
+            "alice",
+            "taskboard",
+            vec![
+                "list".to_owned(),
+                "--room".to_owned(),
+                "nonexistent".to_owned(),
+            ],
+        );
+        let result = route_command(msg, "alice", &state).await.unwrap();
+        let CommandResult::Reply(json) = result else {
+            panic!("expected Reply with not-found error");
+        };
+        assert!(
+            json.contains("room not found"),
+            "should say room not found: {json}"
+        );
+    }
+
+    #[tokio::test]
+    async fn cross_room_resolves_and_dispatches_to_target() {
+        use crate::broker::service::CrossRoomResolver;
+        use std::pin::Pin;
+
+        let tmp_source = NamedTempFile::new().unwrap();
+        let source_state = make_state(tmp_source.path().to_path_buf());
+
+        let tmp_target = NamedTempFile::new().unwrap();
+        let target_state = make_state(tmp_target.path().to_path_buf());
+        let target_clone = target_state.clone();
+
+        struct OneRoomResolver(Arc<RoomState>);
+        impl CrossRoomResolver for OneRoomResolver {
+            fn resolve_room(
+                &self,
+                room_id: &str,
+            ) -> Pin<Box<dyn std::future::Future<Output = Option<Arc<RoomState>>> + Send + '_>>
+            {
+                let result = if room_id == "target-room" {
+                    Some(self.0.clone())
+                } else {
+                    None
+                };
+                Box::pin(async move { result })
+            }
+        }
+
+        source_state.set_cross_room_resolver(Arc::new(OneRoomResolver(target_clone)));
+
+        // /taskboard post --room target-room hello world
+        let msg = make_command(
+            "test-room",
+            "alice",
+            "taskboard",
+            vec![
+                "post".to_owned(),
+                "--room".to_owned(),
+                "target-room".to_owned(),
+                "hello".to_owned(),
+                "world".to_owned(),
+            ],
+        );
+        let result = route_command(msg, "alice", &source_state).await.unwrap();
+        // The taskboard plugin should handle the post and return a reply or broadcast
+        // to the TARGET room. The exact result depends on the taskboard plugin,
+        // but it should NOT be Passthrough (which would mean the command wasn't handled).
+        assert!(
+            !matches!(result, CommandResult::Passthrough(_)),
+            "cross-room dispatch should not fall through to Passthrough"
+        );
     }
 }
