@@ -724,6 +724,21 @@ owns this update unless explicitly delegated.
 | Key invariants | Any new invariants discovered during the sprint |
 | Wire format | New message types or changed fields |
 | TL;DR | If new rules were adopted (e.g. from retro action items) |
+| Notion top-level page | Version, crate versions, test count |
+
+### Test coverage audit
+
+After each sprint closes (as part of the post-sprint update), verify:
+
+1. **Baseline matches reality**: run `cargo test` and compare the total against the
+   "Baseline test count" section above. Update the baseline if it has changed.
+2. **No regressions**: the test count must not decrease without explicit justification
+   in a PR description. If it decreased, investigate and file a ticket.
+3. **New modules have tests**: cross-check the "Codebase overview" against `tests/` —
+   any new module added during the sprint should have corresponding integration tests.
+
+The BA owns this audit unless explicitly delegated. Record results in the sprint
+review notes (Notion).
 
 **Process:**
 1. BA creates a single commit updating all stale sections after the last sprint PR merges
@@ -758,6 +773,10 @@ gh workflow run release.yml --ref v<version>
 
 # 4. Wait for CI to finish — it builds binaries and publishes to crates.io
 gh run watch   # or check GitHub Actions tab
+
+# 5. Update Notion — Room top-level page
+#    Update: version, crate versions, test count
+#    Page ID: 31b40f45-3d91-80c7-a1ca-ce3ef091e1d0
 ```
 
 ### Rules
