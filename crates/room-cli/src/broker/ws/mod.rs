@@ -16,15 +16,8 @@ use axum::{
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::{broadcast, Mutex};
 
-use crate::{
-    history,
-    message::{make_join, make_leave, make_system, parse_client_line, Message},
-};
-
 use super::{
-    auth::{check_join_permission, check_send_permission, issue_token, validate_token},
-    commands::{route_command, CommandResult},
-    fanout::{broadcast_and_persist, dm_and_persist},
+    auth::{check_join_permission, issue_token, validate_token},
     state::RoomState,
 };
 
@@ -190,53 +183,27 @@ async fn run_ws_session(
         return Ok(());
     }
 
-    // Register username in client map.
-    {
-        let mut map = state.clients.lock().await;
-        if let Some(entry) = map.get_mut(&cid) {
-            entry.0 = username.clone();
-        }
-    }
-
-    // First interactive join becomes host.
-    {
-        let mut host = state.host_user.lock().await;
-        if host.is_none() {
-            *host = Some(username.clone());
-        }
-    }
-
-    eprintln!("[broker/ws] {username} joined (cid={cid})");
-
-    state.set_status(&username, String::new()).await;
-
-    // Subscribe before sending history so we don't miss concurrent messages.
+    // Subscribe before setup so we don't miss concurrent messages.
     let mut rx = own_tx.subscribe();
 
-    // Send chat history, filtering DMs the client is not party to.
-    let host_name = state.host_user.lock().await.clone();
-    let history = history::load(&state.chat_path).await.unwrap_or_default();
-    for msg in &history {
-        if msg.is_visible_to(&username, host_name.as_deref()) {
-            let line = serde_json::to_string(msg)?;
-            if ws_tx.send(WsMessage::Text(line.into())).await.is_err() {
-                return Ok(());
-            }
+    // Shared setup: register client, elect host, load history, broadcast join.
+    let history_lines = match super::session::session_setup(cid, &username, state).await {
+        Ok(lines) => lines,
+        Err(e) => {
+            eprintln!("[broker/ws] session_setup failed: {e:#}");
+            return Ok(());
         }
-    }
+    };
 
-    // Broadcast join event.
-    let join_msg = make_join(&state.room_id, &username);
-    if let Err(e) = broadcast_and_persist(
-        &join_msg,
-        &state.clients,
-        &state.chat_path,
-        &state.seq_counter,
-    )
-    .await
-    {
-        eprintln!("[broker/ws] broadcast_and_persist(join) failed: {e:#}");
-        return Ok(());
+    // Send history as WS frames.
+    for line in &history_lines {
+        if ws_tx
+            .send(WsMessage::Text(line.clone().into()))
+            .await
+            .is_err()
+        {
+            return Ok(());
+        }
     }
 
     // Wrap sender for shared use by outbound and shutdown paths.
@@ -274,9 +241,8 @@ async fn run_ws_session(
         }
     });
 
-    // Inbound: read text frames, parse, and route.
+    // Inbound: read text frames, delegate to shared processing.
     let username_in = username.clone();
-    let room_id_in = state.room_id.clone();
     let ws_tx_in = ws_tx.clone();
     let state_in = state.clone();
     let inbound = tokio::spawn(async move {
@@ -287,62 +253,18 @@ async fn run_ws_session(
                     if trimmed.is_empty() {
                         continue;
                     }
-                    match parse_client_line(trimmed, &room_id_in, &username_in) {
-                        Ok(msg) => match route_command(msg, &username_in, &state_in).await {
-                            Ok(CommandResult::Handled | CommandResult::HandledWithReply(_)) => {}
-                            Ok(CommandResult::Reply(json)) => {
-                                let _ = ws_tx_in
-                                    .lock()
-                                    .await
-                                    .send(WsMessage::Text(json.into()))
-                                    .await;
-                            }
-                            Ok(CommandResult::Shutdown) => break,
-                            Ok(CommandResult::Passthrough(msg)) => {
-                                // DM privacy: reject sends from non-participants.
-                                if let Err(reason) =
-                                    check_send_permission(&username_in, state_in.config.as_ref())
-                                {
-                                    let err = serde_json::json!({
-                                        "type": "error",
-                                        "code": "send_denied",
-                                        "message": reason
-                                    });
-                                    let _ = ws_tx_in
-                                        .lock()
-                                        .await
-                                        .send(WsMessage::Text(err.to_string().into()))
-                                        .await;
-                                    continue;
-                                }
-                                let result = match &msg {
-                                    Message::DirectMessage { .. } => {
-                                        dm_and_persist(
-                                            &msg,
-                                            &state_in.host_user,
-                                            &state_in.clients,
-                                            &state_in.chat_path,
-                                            &state_in.seq_counter,
-                                        )
-                                        .await
-                                    }
-                                    _ => {
-                                        broadcast_and_persist(
-                                            &msg,
-                                            &state_in.clients,
-                                            &state_in.chat_path,
-                                            &state_in.seq_counter,
-                                        )
-                                        .await
-                                    }
-                                };
-                                if let Err(e) = result {
-                                    eprintln!("[broker/ws] persist error: {e:#}");
-                                }
-                            }
-                            Err(e) => eprintln!("[broker/ws] route error: {e:#}"),
-                        },
-                        Err(e) => eprintln!("[broker/ws] bad message from {username_in}: {e}"),
+                    match super::session::process_inbound_message(trimmed, &username_in, &state_in)
+                        .await
+                    {
+                        super::session::InboundResult::Ok => {}
+                        super::session::InboundResult::Reply(json) => {
+                            let _ = ws_tx_in
+                                .lock()
+                                .await
+                                .send(WsMessage::Text(json.into()))
+                                .await;
+                        }
+                        super::session::InboundResult::Shutdown => break,
                     }
                 }
                 Ok(WsMessage::Close(_)) => break,
@@ -357,17 +279,8 @@ async fn run_ws_session(
         _ = inbound => {},
     }
 
-    // Cleanup.
-    state.remove_status(&username).await;
-    let leave_msg = make_leave(&state.room_id, &username);
-    let _ = broadcast_and_persist(
-        &leave_msg,
-        &state.clients,
-        &state.chat_path,
-        &state.seq_counter,
-    )
-    .await;
-    eprintln!("[broker/ws] {username} left (cid={cid})");
+    // Shared teardown: remove status, broadcast leave.
+    super::session::session_teardown(cid, &username, state).await;
 
     Ok(())
 }
@@ -441,76 +354,9 @@ async fn ws_oneshot_send(
     if trimmed.is_empty() {
         return Ok(());
     }
-    let msg = match parse_client_line(trimmed, &state.room_id, &username) {
-        Ok(m) => m,
-        Err(e) => {
-            let err = serde_json::json!({
-                "type": "error",
-                "code": "parse_error",
-                "message": format!("{e:#}")
-            });
-            let _ = ws_tx.send(WsMessage::Text(err.to_string().into())).await;
-            return Ok(());
-        }
-    };
-    let cmd_result = match route_command(msg, &username, state).await {
-        Ok(r) => r,
-        Err(e) => {
-            let err = serde_json::json!({
-                "type": "error",
-                "code": "route_error",
-                "message": format!("{e:#}")
-            });
-            let _ = ws_tx.send(WsMessage::Text(err.to_string().into())).await;
-            return Ok(());
-        }
-    };
-    match cmd_result {
-        CommandResult::Handled | CommandResult::Shutdown => {
-            // Always send a response so oneshot clients don't get EOF.
-            let ack = make_system(&state.room_id, "broker", "ok");
-            let json = serde_json::to_string(&ack)?;
-            let _ = ws_tx.send(WsMessage::Text(json.into())).await;
-        }
-        CommandResult::HandledWithReply(json) | CommandResult::Reply(json) => {
-            let _ = ws_tx.send(WsMessage::Text(json.into())).await;
-        }
-        CommandResult::Passthrough(msg) => {
-            // DM privacy: reject sends from non-participants.
-            if let Err(reason) = check_send_permission(&username, state.config.as_ref()) {
-                let err = serde_json::json!({
-                    "type": "error",
-                    "code": "send_denied",
-                    "message": reason
-                });
-                let _ = ws_tx.send(WsMessage::Text(err.to_string().into())).await;
-                return Ok(());
-            }
-            let seq_msg = match &msg {
-                Message::DirectMessage { .. } => {
-                    dm_and_persist(
-                        &msg,
-                        &state.host_user,
-                        &state.clients,
-                        &state.chat_path,
-                        &state.seq_counter,
-                    )
-                    .await?
-                }
-                _ => {
-                    broadcast_and_persist(
-                        &msg,
-                        &state.clients,
-                        &state.chat_path,
-                        &state.seq_counter,
-                    )
-                    .await?
-                }
-            };
-            let echo = serde_json::to_string(&seq_msg)?;
-            let _ = ws_tx.send(WsMessage::Text(echo.into())).await;
-        }
-    }
+    let super::session::OneshotResult::Reply(reply) =
+        super::session::process_oneshot_send(trimmed, &username, state).await?;
+    let _ = ws_tx.send(WsMessage::Text(reply.into())).await;
     Ok(())
 }
 

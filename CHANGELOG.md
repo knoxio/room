@@ -25,6 +25,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **refactor:** Extracted persistence functions from `broker/commands.rs` to `broker/persistence.rs`
   and split `route_command()` into dedicated handler functions. (#557)
+- **refactor:** Extracted shared session lifecycle logic into `broker/session.rs` — both UDS
+  and WS transports now delegate to `session_setup()`, `process_inbound_message()`,
+  `process_oneshot_send()`, and `session_teardown()`. Fixes WS path missing
+  `subscribe_mentioned` before broadcast. (#556)
 - **refactor:** Consolidated duplicate markdown parsers in `tui/render.rs` into a single
   parameterized `render_inline_markdown` function, eliminating `render_bold_inner`. (#560)
 - **refactor:** Consolidated `OnceLock` fields in `RoomState` into `AuthState` and `FilterState`
