@@ -693,6 +693,27 @@ Key invariants to preserve:
   functions `subscribe_mentioned()` → `broadcast_and_persist()` → `broadcast_subscribe_notices()`
   enforce this ordering at both interactive and oneshot call sites.
 
+## Wire format change checklist
+
+When a PR touches protocol types (`room-protocol`) or adds new message variants, the PR
+description **must** include a checklist verifying every consumer site. Authors verify each
+item before opening the PR; reviewers verify before approving.
+
+```markdown
+- [ ] Applied in `cmd_poll` (oneshot/poll.rs)
+- [ ] Applied in `cmd_poll_multi` (oneshot/poll.rs)
+- [ ] Applied in `cmd_pull` (oneshot/poll.rs)
+- [ ] Applied in `cmd_query` / `cmd_query_new` / `cmd_query_history` (oneshot/poll.rs)
+- [ ] Applied in `cmd_watch` (oneshot/poll.rs)
+- [ ] Registered in `builtin_command_infos()` (plugin/mod.rs)
+- [ ] Added to `RESERVED_COMMANDS` (plugin/mod.rs)
+- [ ] CHANGELOG entry added
+- [ ] Protocol-level tests added
+```
+
+Context: sprint 14 retro — PR #537 (event filtering) shipped with the filter missing
+from 3 of 5 poll/watch paths. This checklist prevents that class of bug.
+
 ## Pre-push checklist
 
 Run all four in order before every `git push`. CI enforces all of them and will fail if any
