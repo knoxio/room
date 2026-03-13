@@ -93,7 +93,7 @@ For each interactive connection, the broker spawns two concurrent tasks:
 Reads lines from the client's socket. For each line:
 
 - Parses it via `parse_client_line` into a `Message` enum variant
-- Routes commands via `route_command`: `set_status`, `who`, `claim`, `unclaim`, `claimed`, and `room-info` are handled as built-in commands; admin commands go to `handle_admin_cmd`; plugin commands are dispatched via `PluginRegistry`; all others pass through to broadcast
+- Routes commands via `route_command`: `set_status`, `who`, `subscribe`, `unsubscribe`, `subscribe_events`, `subscriptions`, `info`/`room-info`, and `help` are handled as built-in commands; admin commands go to `handle_admin_cmd`; plugin commands are dispatched via `PluginRegistry`; all others pass through to broadcast
 - DMs (`Message::DirectMessage`) are delivered only to sender, recipient, and host via `dm_and_persist`
 - Everything else goes to `broadcast_and_persist`
 
@@ -172,13 +172,17 @@ All writes go through `history::append`, which opens the file in append mode. To
 | `status_map` | `Arc<Mutex<HashMap<String, String>>>` | Maps username to status string (ephemeral) |
 | `host_user` | `Arc<Mutex<Option<String>>>` | Username of the first connected client |
 | `token_map` | `Arc<Mutex<HashMap<String, String>>>` | Maps token UUID to username (persisted to `.tokens` file) |
-| `claim_map` | `Arc<Mutex<HashMap<String, ClaimEntry>>>` | Maps username to claim entry (task + timestamp, 30min TTL, lazily swept) |
+| `subscription_map` | `SubscriptionMap` (`Arc<Mutex<HashMap<String, SubscriptionTier>>>`) | Per-user subscription tier (Full, MentionsOnly, Unsubscribed) |
 | `chat_path` | `Arc<PathBuf>` | Path to the NDJSON chat file |
+| `token_map_path` | `Arc<PathBuf>` | Path to persisted token-map file (`.tokens`) |
+| `subscription_map_path` | `Arc<PathBuf>` | Path to persisted subscription-map file (`.subscriptions`) |
 | `room_id` | `Arc<String>` | Room identifier |
 | `shutdown` | `Arc<watch::Sender<bool>>` | Shutdown signal |
 | `seq_counter` | `Arc<AtomicU64>` | Monotonic sequence counter |
 | `plugin_registry` | `Arc<PluginRegistry>` | Compiled-in plugin dispatch (`/help`, `/stats`, `/queue`, `/taskboard`) |
 | `config` | `Option<RoomConfig>` | Room visibility and access control (daemon mode) |
+| `registry` | `OnceLock<Arc<Mutex<UserRegistry>>>` | Daemon-level user registry for cross-room identity (unset in single-room mode) |
+| `event_filter_state` | `OnceLock<(EventFilterMap, Arc<PathBuf>)>` | Per-user event type filter with persistence path (unset = all events pass) |
 
 ## Admin commands
 

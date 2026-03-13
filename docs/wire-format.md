@@ -191,7 +191,8 @@ The `EventType` enum is `#[non_exhaustive]` — new types may be added in future
 | Field | Sender provides | Broker assigns |
 |---|---|---|
 | `type` | ✓ | — |
-| `content` / `cmd` / `params` / `to` / `reply_to` / `event_type` | ✓ | — |
+| `content` / `cmd` / `params` / `to` / `reply_to` | ✓ | — |
+| `event_type` | — | ✓ (set by emitting plugin) |
 | `id` | — | ✓ (UUID v4) |
 | `room` | — | ✓ |
 | `user` | — | ✓ (from connection identity) |

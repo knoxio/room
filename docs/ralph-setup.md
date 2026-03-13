@@ -110,9 +110,9 @@ Claude Code has its own permission system. Configure via `.claude/settings.json`
 }
 ```
 
-For fully autonomous operation (e.g. CI pipelines), ralph passes
-`--dangerously-skip-permissions` to the claude subprocess. Do not use this for untrusted
-workloads.
+For fully autonomous operation (e.g. CI pipelines), use the `--allow-all` flag
+(or `RALPH_ALLOW_ALL=true`), which passes auto-approval for all tools to the claude
+subprocess. Do not use this for untrusted workloads.
 
 | Use case | Approach |
 |---|---|

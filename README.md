@@ -314,7 +314,7 @@ Write one JSON object per line. Plain text lines are also accepted and treated a
 {"type":"reply","reply_to":"<message-id>","content":"ack"}
 
 // Structured command
-{"type":"command","cmd":"claim","params":["describe what you are claiming"]}
+{"type":"command","cmd":"who","params":[]}
 
 // Plain text (also works)
 hey everyone

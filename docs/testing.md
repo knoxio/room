@@ -59,7 +59,7 @@ crates/room-cli/src/
   tui/render.rs         — unit tests for wrap_words, format_message
   tui/widgets.rs        — unit tests for CommandPalette, MentionPicker
   oneshot/token.rs      — unit tests for token file I/O, cursor read/write
-  oneshot/poll.rs       — unit tests for DM filter, cursor advancement, multiplexed poll
+  oneshot/poll/         — unit tests for DM filter, cursor advancement, tier/event filtering, multiplexed poll
 crates/room-cli/tests/
   common/mod.rs         — shared test helpers (free_port, wait_for_socket, wait_for_tcp)
   auth.rs               — token issuance, validation, join permissions
@@ -193,12 +193,12 @@ async fn my_feature_works() {
 
 ## Test baseline
 
-**Current: 1371 Rust tests + 107 shell tests** (as of v3.1.0)
+**Current: 1373 Rust tests + 107 shell tests** (as of v3.1.0)
 
 | Crate | Unit | Integration | Total |
 |-------|------|-------------|-------|
 | room-protocol | 116 | — | 116 |
-| room-cli | 888 | 193 | 1081 |
+| room-cli | 888 | 195 | 1083 |
 | room-ralph | 164 | 10 | 174 |
 
 Shell tests: 48 (test-context-monitor.sh) + 59 (test-ralph-room.sh) = 107.

@@ -163,7 +163,7 @@ Every message is a JSON object with a `type` field:
 {"type":"join","id":"...","room":"...","user":"alice","ts":"..."}
 {"type":"message","id":"...","room":"...","user":"bob","ts":"...","content":"hello"}
 {"type":"leave","id":"...","room":"...","user":"alice","ts":"..."}
-{"type":"command","id":"...","room":"...","user":"bob","ts":"...","cmd":"claim","params":["task"]}
+{"type":"command","id":"...","room":"...","user":"bob","ts":"...","cmd":"taskboard","params":["claim","tb-001"]}
 {"type":"reply","id":"...","room":"...","user":"bob","ts":"...","reply_to":"<msg-id>","content":"ack"}
 ```
 
@@ -385,11 +385,13 @@ Open → Claimed → Planned → Approved → Finished
 | `/taskboard list` | Anyone | Show all tasks (ID, status, assignee, elapsed, description) |
 | `/taskboard show <task-id>` | Anyone | Show full task detail |
 | `/taskboard claim <task-id>` | Anyone (Open tasks) | Claim a task — starts lease timer |
+| `/taskboard assign <task-id> <username>` | Poster or host | Assign an open task to a specific user |
 | `/taskboard plan <task-id> <plan>` | Assignee only | Submit implementation plan — **required before coding** |
 | `/taskboard approve <task-id>` | Poster or host | Approve a plan — agent may proceed |
 | `/taskboard update <task-id> [notes]` | Assignee only | Renew lease and update notes |
 | `/taskboard release <task-id>` | Assignee or host | Release task back to Open |
 | `/taskboard finish <task-id>` | Assignee only | Mark task as Finished |
+| `/taskboard cancel <task-id> [reason]` | Poster, assignee, or host | Cancel a task with optional reason |
 
 **Mandatory workflow for every task:**
 1. Claim: `/taskboard claim <task-id>`
@@ -761,11 +763,11 @@ All tests must remain green. Add tests for any new behaviour.
 
 ## Baseline test count
 
-**Current baseline: 1371 Rust tests + 107 shell tests**
+**Current baseline: 1373 Rust tests + 107 shell tests**
 
 Rust breakdown:
 - room-protocol: 116 unit tests
-- room-cli: 888 unit + 193 integration (33 auth + 37 broker + 25 daemon + 10 events + 20 oneshot + 11 rest_query + 29 room_lifecycle + 8 scripted + 20 ws + 7 ws_smoke ignored) = 1081 tests
+- room-cli: 888 unit + 195 integration (33 auth + 37 broker + 25 daemon + 10 events + 22 oneshot + 11 rest_query + 29 room_lifecycle + 8 scripted + 20 ws + 7 ws_smoke ignored) = 1083 tests
 - room-ralph: 164 unit + 10 integration = 174 tests
 
 Note: integration tests are split into focused modules under `tests/` (auth, broker, daemon,
