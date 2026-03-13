@@ -1166,6 +1166,36 @@ mod tests {
         assert_eq!(board[0].task.notes.as_deref(), Some("cancelled by ba"));
     }
 
+    /// Regression test: descriptions with multibyte UTF-8 characters (emoji, CJK)
+    /// longer than 40 chars must not panic on truncation. Before the fix,
+    /// `&description[..37]` would panic with "byte index is not a char boundary".
+    #[test]
+    fn handle_list_multibyte_description_does_not_panic() {
+        let (plugin, _tmp) = make_plugin();
+        // 41 emoji characters — each is 4 bytes, so byte index 37 falls mid-char.
+        let emoji_desc = "\u{1F680}".repeat(41); // 🚀 × 41
+        plugin.handle_post(&test_ctx("ba", &["post", &emoji_desc]));
+
+        // CJK characters (3 bytes each).
+        let cjk_desc = "\u{4E16}\u{754C}".repeat(25); // 世界 × 25 = 50 chars
+        plugin.handle_post(&test_ctx("ba", &["post", &cjk_desc]));
+
+        // Mixed ASCII + emoji that lands the 37th-char boundary mid-codepoint.
+        let mixed = format!("{}🎯🎯🎯🎯🎯", "a".repeat(35)); // 35 ASCII + 5 emoji = 40 chars
+        plugin.handle_post(&test_ctx("ba", &["post", &mixed]));
+
+        // This is the call that panicked before the fix.
+        let result = plugin.handle_list();
+
+        assert!(result.contains("tb-001"));
+        assert!(result.contains("tb-002"));
+        assert!(result.contains("tb-003"));
+        assert!(
+            result.contains("..."),
+            "long descriptions should be truncated with ..."
+        );
+    }
+
     // ── Test helpers ────────────────────────────────────────────────────────
 
     fn test_ctx(sender: &str, params: &[&str]) -> CommandContext {

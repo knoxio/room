@@ -729,6 +729,41 @@ async fn pull_messages_filters_dms_for_viewer() {
     );
 }
 
+// ── Regression: oneshot commands returning Handled must not EOF (#600) ───────
+
+/// Regression test for the P-1 broker crash: commands that return
+/// `PluginResult::Handled` (e.g. /stats) wrote nothing back to oneshot
+/// clients, causing them to receive EOF instead of JSON. The fix sends
+/// a `make_system("ok")` ack for both `Handled` and `Shutdown` results.
+#[tokio::test]
+async fn oneshot_handled_result_returns_ack_not_eof() {
+    let broker = TestBroker::start("t_handled_ack").await;
+
+    // Join as an agent to get a token.
+    let (_, token) = room_cli::oneshot::join_session(&broker.socket_path, "agent")
+        .await
+        .expect("join_session failed");
+
+    // /stats returns PluginResult::Handled (broadcasts via ctx.writer, then
+    // returns Handled). Before the fix, the oneshot client got EOF here.
+    let wire = serde_json::json!({
+        "type": "command",
+        "cmd": "stats",
+        "params": []
+    })
+    .to_string();
+
+    let msg = room_cli::oneshot::send_message_with_token(&broker.socket_path, &token, &wire)
+        .await
+        .expect("oneshot /stats must return JSON, not EOF");
+
+    // The ack is a System message with content "ok".
+    assert!(
+        matches!(&msg, Message::System { content, .. } if content == "ok"),
+        "expected System(\"ok\") ack for Handled result, got: {msg:?}"
+    );
+}
+
 // ── SEND: deprecation tests (#467) ──────────────────────────────────────────
 
 /// The deprecated `SEND:` handshake still delivers messages (backward compat).

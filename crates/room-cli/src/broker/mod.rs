@@ -599,9 +599,7 @@ pub(crate) async fn handle_oneshot_send(
             // Always send a response so oneshot clients don't get EOF.
             let ack = make_system(&state.room_id, "broker", "ok");
             let json = serde_json::to_string(&ack)?;
-            write_half
-                .write_all(format!("{json}\n").as_bytes())
-                .await?;
+            write_half.write_all(format!("{json}\n").as_bytes()).await?;
         }
         CommandResult::HandledWithReply(json) | CommandResult::Reply(json) => {
             write_half.write_all(format!("{json}\n").as_bytes()).await?;
