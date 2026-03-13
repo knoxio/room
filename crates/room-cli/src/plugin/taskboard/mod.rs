@@ -617,7 +617,8 @@ impl Plugin for TaskboardPlugin {
                 // Emit a typed event alongside the system broadcast.
                 let event_type = match action {
                     "post" => Some(EventType::TaskPosted),
-                    "claim" | "assign" => Some(EventType::TaskAssigned),
+                    "claim" => Some(EventType::TaskClaimed),
+                    "assign" => Some(EventType::TaskAssigned),
                     "plan" => Some(EventType::TaskPlanned),
                     "approve" => Some(EventType::TaskApproved),
                     "update" => Some(EventType::TaskUpdated),
