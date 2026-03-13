@@ -12,6 +12,11 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 > - [room-protocol CHANGELOG](crates/room-protocol/CHANGELOG.md)
 > - [room-ralph CHANGELOG](crates/room-ralph/CHANGELOG.md)
 
+### Fixed
+
+- **tui:** Show partial messages at viewport bottom when scrolling — previously the entire
+  message disappeared when its bottom line scrolled off screen. (#644)
+
 ### Added
 
 - CI changelog enforcement — PRs must include a changelog entry under `[Unreleased]`. (#499)

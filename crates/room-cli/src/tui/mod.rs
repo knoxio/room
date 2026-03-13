@@ -561,17 +561,29 @@ pub async fn run(
 
             let (start_msg_idx, skip_first) = find_view_start(&heights, view_top);
 
-            let visible: Vec<ListItem> = msg_texts[start_msg_idx..]
-                .iter()
-                .enumerate()
-                .map(|(i, text)| {
-                    if i == 0 && skip_first > 0 {
-                        ListItem::new(Text::from(text.lines[skip_first..].to_vec()))
-                    } else {
-                        ListItem::new(text.clone())
-                    }
-                })
-                .collect();
+            let mut visible: Vec<ListItem> = Vec::new();
+            let mut lines_remaining = msg_area_height;
+            for (i, text) in msg_texts[start_msg_idx..].iter().enumerate() {
+                if lines_remaining == 0 {
+                    break;
+                }
+                let lines = if i == 0 && skip_first > 0 {
+                    &text.lines[skip_first..]
+                } else {
+                    &text.lines[..]
+                };
+                let line_count = lines.len().max(1);
+                if line_count <= lines_remaining {
+                    visible.push(ListItem::new(Text::from(lines.to_vec())));
+                    lines_remaining -= line_count;
+                } else {
+                    // Partially visible message at viewport bottom — show
+                    // only the lines that fit instead of hiding the entire
+                    // message.
+                    visible.push(ListItem::new(Text::from(lines[..lines_remaining].to_vec())));
+                    lines_remaining = 0;
+                }
+            }
 
             let title = if scroll_offset > 0 {
                 format!(" {} [↑ {} lines] ", room_id_display, scroll_offset)

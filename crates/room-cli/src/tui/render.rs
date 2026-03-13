@@ -311,6 +311,34 @@ pub(super) fn find_view_start(heights: &[usize], view_top: usize) -> (usize, usi
     (heights.len(), 0)
 }
 
+/// Compute per-message visible line counts for a viewport window.
+///
+/// Given message `heights`, the viewport `height`, and the `view_top` line
+/// index, returns a vec of `(message_index, visible_line_count)` pairs for
+/// every message that has at least one line inside the viewport. Messages
+/// partially clipped at the top or bottom are included with only their
+/// visible line count.
+#[cfg(test)]
+fn visible_line_counts(
+    heights: &[usize],
+    view_top: usize,
+    viewport_height: usize,
+) -> Vec<(usize, usize)> {
+    let (start_idx, skip_first) = find_view_start(heights, view_top);
+    let mut result = Vec::new();
+    let mut remaining = viewport_height;
+    for (i, &h) in heights[start_idx..].iter().enumerate() {
+        if remaining == 0 {
+            break;
+        }
+        let lines = if i == 0 { h - skip_first } else { h };
+        let visible = lines.min(remaining);
+        result.push((start_idx + i, visible));
+        remaining -= visible;
+    }
+    result
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -441,5 +469,58 @@ mod tests {
                 "scroll_offset={offset}, view_top={view_top}"
             );
         }
+    }
+
+    // ── visible_line_counts tests ─────────────────────────────────────────
+
+    #[test]
+    fn visible_line_counts_all_fit() {
+        // 3 messages, each 1 line, viewport of 5 — all fit fully.
+        let counts = visible_line_counts(&[1, 1, 1], 0, 5);
+        assert_eq!(counts, vec![(0, 1), (1, 1), (2, 1)]);
+    }
+
+    #[test]
+    fn visible_line_counts_bottom_truncation() {
+        // 3 messages of heights [2, 5, 3], total=10, viewport=4, view_top=0.
+        // msg0 fully visible (2 lines), msg1 partially visible (2 of 5 lines).
+        let counts = visible_line_counts(&[2, 5, 3], 0, 4);
+        assert_eq!(counts, vec![(0, 2), (1, 2)]);
+    }
+
+    #[test]
+    fn visible_line_counts_top_skip_and_bottom_truncation() {
+        // heights [3, 4, 2], total=9, viewport=3, view_top=2.
+        // msg0: 3 lines, skip 2 → 1 visible line.
+        // msg1: 4 lines, only 2 fit → 2 visible lines.
+        let counts = visible_line_counts(&[3, 4, 2], 2, 3);
+        assert_eq!(counts, vec![(0, 1), (1, 2)]);
+    }
+
+    #[test]
+    fn visible_line_counts_single_tall_message() {
+        // One 10-line message, viewport=3, view_top=4.
+        // Skip 4 lines, show 3 of remaining 6.
+        let counts = visible_line_counts(&[10], 4, 3);
+        assert_eq!(counts, vec![(0, 3)]);
+    }
+
+    #[test]
+    fn visible_line_counts_exact_fit() {
+        // heights [2, 3], viewport=5, view_top=0 — exactly fills viewport.
+        let counts = visible_line_counts(&[2, 3], 0, 5);
+        assert_eq!(counts, vec![(0, 2), (1, 3)]);
+    }
+
+    #[test]
+    fn visible_line_counts_empty() {
+        let counts = visible_line_counts(&[], 0, 5);
+        assert_eq!(counts, vec![]);
+    }
+
+    #[test]
+    fn visible_line_counts_zero_viewport() {
+        let counts = visible_line_counts(&[3, 2], 0, 0);
+        assert_eq!(counts, vec![]);
     }
 }
