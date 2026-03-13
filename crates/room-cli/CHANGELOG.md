@@ -18,6 +18,7 @@ For changes prior to the workspace restructure (v0.1.2 through v1.0.2), see the
 
 - TUI: ellipsize long status text in member panel with `…` instead of
   silently clipping at the border. (#497)
+- Admin `/kick` and `/reauth` now strip leading `@` from target username, fixing token invalidation failure and kicked users not being removed from the TUI member panel. (#505)
 
 ## [3.0.1] - 2026-03-12
 
