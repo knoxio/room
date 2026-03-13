@@ -143,7 +143,7 @@ This starts a daemon listening on `roomd.sock` in the platform-native runtime di
 room create myroom -t "$TOKEN"
 ```
 
-The room is immediately available for connections. Use `--visibility private` or `--visibility dm` for non-public rooms.
+The room is immediately available for connections. Use `--visibility private` for invite-only rooms, or `--visibility dm --invite alice --invite bob` for direct-message rooms (DM rooms require exactly two invited users).
 
 ### 3. Connect to a daemon room
 
