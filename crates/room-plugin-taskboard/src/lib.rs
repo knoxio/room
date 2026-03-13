@@ -129,7 +129,10 @@ impl Plugin for TaskboardPlugin {
             let action = ctx.params.first().map(String::as_str).unwrap_or("");
             let (result, broadcast) = match action {
                 "post" => self.handle_post(&ctx),
-                "list" => (self.handle_list(), false),
+                "list" => {
+                    let show_all = ctx.params.get(1).map(|s| s.as_str()) == Some("all");
+                    (self.handle_list(show_all), false)
+                }
                 "claim" => self.handle_claim(&ctx),
                 "assign" => self.handle_assign(&ctx),
                 "plan" => self.handle_plan(&ctx),
@@ -237,6 +240,84 @@ mod tests {
         assert_eq!(default.len(), instance.len());
         assert_eq!(default[0].name, instance[0].name);
         assert_eq!(default[0].params.len(), instance[0].params.len());
+    }
+
+    fn seed_task(plugin: &TaskboardPlugin, id: &str, status: TaskStatus) {
+        let mut board = plugin.board.lock().unwrap();
+        let t = task::Task {
+            id: id.to_owned(),
+            description: format!("task {id}"),
+            status,
+            posted_by: "alice".to_owned(),
+            assigned_to: if status != TaskStatus::Open {
+                Some("bob".to_owned())
+            } else {
+                None
+            },
+            posted_at: chrono::Utc::now(),
+            claimed_at: None,
+            plan: None,
+            approved_by: None,
+            approved_at: None,
+            updated_at: None,
+            notes: None,
+            team: None,
+        };
+        board.push(LiveTask::new(t));
+    }
+
+    #[test]
+    fn handle_list_filters_terminal_tasks() {
+        let (plugin, _tmp) = make_plugin();
+        seed_task(&plugin, "tb-001", TaskStatus::Open);
+        seed_task(&plugin, "tb-002", TaskStatus::Claimed);
+        seed_task(&plugin, "tb-003", TaskStatus::Finished);
+        seed_task(&plugin, "tb-004", TaskStatus::Cancelled);
+
+        let output = plugin.handle_list(false);
+        assert!(output.contains("tb-001"), "open task should appear");
+        assert!(output.contains("tb-002"), "claimed task should appear");
+        assert!(!output.contains("tb-003"), "finished task should be hidden");
+        assert!(
+            !output.contains("tb-004"),
+            "cancelled task should be hidden"
+        );
+    }
+
+    #[test]
+    fn handle_list_all_shows_everything() {
+        let (plugin, _tmp) = make_plugin();
+        seed_task(&plugin, "tb-001", TaskStatus::Open);
+        seed_task(&plugin, "tb-002", TaskStatus::Finished);
+        seed_task(&plugin, "tb-003", TaskStatus::Cancelled);
+
+        let output = plugin.handle_list(true);
+        assert!(output.contains("tb-001"), "open task should appear");
+        assert!(
+            output.contains("tb-002"),
+            "finished task should appear with all"
+        );
+        assert!(
+            output.contains("tb-003"),
+            "cancelled task should appear with all"
+        );
+    }
+
+    #[test]
+    fn handle_list_empty_after_filter() {
+        let (plugin, _tmp) = make_plugin();
+        seed_task(&plugin, "tb-001", TaskStatus::Finished);
+        seed_task(&plugin, "tb-002", TaskStatus::Cancelled);
+
+        let output = plugin.handle_list(false);
+        assert!(
+            output.contains("no active tasks"),
+            "should show helpful empty message, got: {output}"
+        );
+        assert!(
+            output.contains("/taskboard list all"),
+            "should hint at 'list all' command"
+        );
     }
 
     /// Multiple tasks with expired leases must all be swept in a single call,

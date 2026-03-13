@@ -73,18 +73,33 @@ impl TaskboardPlugin {
         )
     }
 
-    pub(super) fn handle_list(&self) -> String {
+    pub(super) fn handle_list(&self, show_all: bool) -> String {
         let expired = self.sweep_expired();
         let board = self.board.lock().unwrap();
         if board.is_empty() {
             return "taskboard is empty".to_owned();
         }
+        // Filter tasks: by default hide finished/cancelled.
+        let visible: Vec<&LiveTask> = if show_all {
+            board.iter().collect()
+        } else {
+            board
+                .iter()
+                .filter(|lt| {
+                    !matches!(lt.task.status, TaskStatus::Finished | TaskStatus::Cancelled)
+                })
+                .collect()
+        };
+        if visible.is_empty() {
+            return "no active tasks (use /taskboard list all to see finished/cancelled)"
+                .to_owned();
+        }
         let mut lines = Vec::new();
         if !expired.is_empty() {
             lines.push(format!("expired: {}", expired.join(", ")));
         }
-        // Show TEAM column only if any task has a team restriction.
-        let has_teams = board.iter().any(|lt| lt.task.team.is_some());
+        // Show TEAM column only if any visible task has a team restriction.
+        let has_teams = visible.iter().any(|lt| lt.task.team.is_some());
         if has_teams {
             lines.push(format!(
                 "{:<8} {:<10} {:<12} {:<10} {:<12} {}",
@@ -96,7 +111,7 @@ impl TaskboardPlugin {
                 "ID", "STATUS", "ASSIGNEE", "ELAPSED", "DESCRIPTION"
             ));
         }
-        for lt in board.iter() {
+        for lt in visible.iter() {
             let elapsed = match lt.lease_start {
                 Some(start) => {
                     let secs = start.elapsed().as_secs();
@@ -769,7 +784,7 @@ mod tests {
         let (plugin, _tmp) = make_plugin();
         plugin.handle_post(&test_ctx("ba", &["post", "first task"]));
         plugin.handle_post(&test_ctx("ba", &["post", "second task"]));
-        let result = plugin.handle_list();
+        let result = plugin.handle_list(true);
         assert!(result.contains("tb-001"));
         assert!(result.contains("tb-002"));
         assert!(result.contains("first task"));
@@ -778,7 +793,7 @@ mod tests {
     #[test]
     fn handle_list_empty() {
         let (plugin, _tmp) = make_plugin();
-        let result = plugin.handle_list();
+        let result = plugin.handle_list(true);
         assert_eq!(result, "taskboard is empty");
     }
 
@@ -847,7 +862,7 @@ mod tests {
             board[0].lease_start =
                 Some(std::time::Instant::now() - std::time::Duration::from_secs(700));
         }
-        let result = plugin.handle_list();
+        let result = plugin.handle_list(true);
         assert!(result.contains("expired"));
         let board = plugin.board.lock().unwrap();
         assert_eq!(board[0].task.status, TaskStatus::Open);
@@ -1092,7 +1107,7 @@ mod tests {
         plugin.handle_post(&test_ctx("ba", &["post", &mixed]));
 
         // This is the call that panicked before the fix.
-        let result = plugin.handle_list();
+        let result = plugin.handle_list(true);
 
         assert!(result.contains("tb-001"));
         assert!(result.contains("tb-002"));
@@ -1275,7 +1290,7 @@ mod tests {
         let ctx = test_ctx_with_team_access("alice", &["post", "--team", "backend", "fix api"], ta);
         plugin.handle_post(&ctx);
         plugin.handle_post(&test_ctx("ba", &["post", "open task"]));
-        let result = plugin.handle_list();
+        let result = plugin.handle_list(true);
         assert!(result.contains("TEAM"));
         assert!(result.contains("backend"));
     }
@@ -1284,7 +1299,7 @@ mod tests {
     fn handle_list_no_team_column_when_no_teams() {
         let (plugin, _tmp) = make_plugin();
         plugin.handle_post(&test_ctx("ba", &["post", "open task"]));
-        let result = plugin.handle_list();
+        let result = plugin.handle_list(true);
         assert!(!result.contains("TEAM"));
     }
 
