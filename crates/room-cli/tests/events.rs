@@ -415,6 +415,58 @@ async fn events_visible_in_rest_poll() {
         .contains("rest poll test"));
 }
 
+/// Event seq < System seq ordering guarantee holds over WebSocket transport.
+///
+/// The UDS-only test `event_seq_numbers_are_monotonic` verifies this over Unix
+/// sockets. This test extends that guarantee to the WebSocket transport.
+#[tokio::test]
+async fn event_seq_ordering_over_websocket() {
+    let (td, port) = common::TestDaemon::start_with_ws_configs(vec![("ev-ws-ord", None)]).await;
+
+    // UDS client triggers the event
+    let mut alice = DaemonClient::connect(&td.socket_path, "ev-ws-ord", "alice").await;
+    alice
+        .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "alice"))
+        .await;
+
+    // WS client observes it
+    let (_ws_tx, mut ws_rx) = common::ws_connect(port, "ev-ws-ord", "bob").await;
+    common::ws_recv_until(
+        &mut ws_rx,
+        |m| matches!(m, Message::Join { user, .. } if user == "bob"),
+    )
+    .await;
+    alice
+        .recv_until(|m| matches!(m, Message::Join { user, .. } if user == "bob"))
+        .await;
+
+    // Alice posts a task via UDS
+    send_taskboard_cmd(&mut alice, "post", &["ws", "ordering", "test"]).await;
+
+    // WS client: Event arrives first (lower seq), then System (higher seq)
+    let ws_evt = common::ws_recv_until(
+        &mut ws_rx,
+        |m| matches!(m, Message::Event { event_type, .. } if *event_type == EventType::TaskPosted),
+    )
+    .await;
+
+    let ws_sys = common::ws_recv_until(&mut ws_rx, |m| {
+        matches!(m,
+            Message::System { user, content, .. }
+            if user == "plugin:taskboard" && content.contains("tb-001")
+        )
+    })
+    .await;
+
+    let evt_seq = ws_evt.seq().expect("WS event should have seq");
+    let sys_seq = ws_sys.seq().expect("WS system msg should have seq");
+
+    assert!(
+        evt_seq < sys_seq,
+        "WS event seq ({evt_seq}) should be < system seq ({sys_seq})"
+    );
+}
+
 /// Event JSON wire format has correct structure when received via REST.
 #[tokio::test]
 async fn event_wire_format_is_correct() {

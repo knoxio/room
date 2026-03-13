@@ -84,3 +84,51 @@ pub(crate) async fn persist_event_filters(state: &RoomState) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use room_protocol::{EventFilter, EventType};
+    use std::collections::{BTreeSet, HashMap};
+
+    #[test]
+    fn save_load_event_filter_map_non_taskboard_types() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("event_filters.json");
+
+        let mut map = HashMap::new();
+
+        // alice: Only{StatusChanged, ReviewRequested} — non-taskboard types
+        let mut types = BTreeSet::new();
+        types.insert(EventType::StatusChanged);
+        types.insert(EventType::ReviewRequested);
+        map.insert("alice".to_string(), EventFilter::Only { types });
+
+        // bob: All
+        map.insert("bob".to_string(), EventFilter::All);
+
+        // carol: None
+        map.insert("carol".to_string(), EventFilter::None);
+
+        save_event_filter_map(&map, &path).unwrap();
+        let loaded = load_event_filter_map(&path);
+
+        assert_eq!(loaded.len(), 3);
+        assert_eq!(loaded.get("bob").unwrap(), &EventFilter::All);
+        assert_eq!(loaded.get("carol").unwrap(), &EventFilter::None);
+
+        // Verify alice's Only filter preserved the exact BTreeSet contents
+        match loaded.get("alice").unwrap() {
+            EventFilter::Only { types } => {
+                assert_eq!(types.len(), 2);
+                assert!(types.contains(&EventType::StatusChanged));
+                assert!(types.contains(&EventType::ReviewRequested));
+                assert!(
+                    !types.contains(&EventType::TaskPosted),
+                    "should not contain taskboard types"
+                );
+            }
+            other => panic!("expected Only filter for alice, got {other}"),
+        }
+    }
+}

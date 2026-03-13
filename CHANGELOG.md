@@ -36,6 +36,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **test:** Added 3 DM room semantics integration tests: symmetric ID join+message,
   non-participant poll DirectMessage filtering, offline recipient message visibility
   on rejoin. (#581)
+- **tests:** Added 5 tests for EventFilter and non-taskboard event types — `apply_event_filter`
+  with `StatusChanged`/`ReviewRequested`, exhaustive all-11-variants coverage, event filter
+  persistence round-trip with non-taskboard types, per-room filtering, and Event→System
+  seq ordering over WebSocket transport. (#579)
 
 ### Changed
 
