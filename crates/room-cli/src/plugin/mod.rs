@@ -20,7 +20,7 @@ use chrono::{DateTime, Utc};
 use crate::{
     broker::{
         fanout::broadcast_and_persist,
-        state::{ClientMap, StatusMap},
+        state::{ClaimMap, ClientMap, StatusMap},
     },
     history,
     message::{make_system, Message},
@@ -367,6 +367,30 @@ impl PluginRegistry {
             plugins: Vec::new(),
             command_map: HashMap::new(),
         }
+    }
+
+    /// Create a registry with all standard plugins registered.
+    ///
+    /// Both standalone and daemon broker modes should call this so that every
+    /// room has the same set of `/` commands available.
+    pub(crate) fn with_all_plugins(chat_path: &Path, claim_map: ClaimMap) -> anyhow::Result<Self> {
+        let mut registry = Self::new();
+
+        registry.register(Box::new(help::HelpPlugin))?;
+
+        let queue_path = queue::QueuePlugin::queue_path_from_chat(chat_path);
+        registry.register(Box::new(queue::QueuePlugin::new(queue_path, claim_map)?))?;
+
+        registry.register(Box::new(stats::StatsPlugin))?;
+        registry.register(Box::new(status::StatusPlugin))?;
+
+        let taskboard_path = taskboard::TaskboardPlugin::taskboard_path_from_chat(chat_path);
+        registry.register(Box::new(taskboard::TaskboardPlugin::new(
+            taskboard_path,
+            None,
+        )))?;
+
+        Ok(registry)
     }
 
     /// Register a plugin. Returns an error if any command name collides with

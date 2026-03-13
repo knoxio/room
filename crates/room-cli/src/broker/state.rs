@@ -114,32 +114,9 @@ impl RoomState {
         config: Option<RoomConfig>,
     ) -> Result<Arc<Self>, String> {
         let claim_map: ClaimMap = Arc::new(Mutex::new(HashMap::new()));
-        let queue_path = crate::plugin::queue::QueuePlugin::queue_path_from_chat(&chat_path);
-
-        let mut plugins = crate::plugin::PluginRegistry::new();
-        plugins
-            .register(Box::new(crate::plugin::help::HelpPlugin))
-            .map_err(|e| format!("plugin error: {e}"))?;
-        plugins
-            .register(Box::new(
-                crate::plugin::queue::QueuePlugin::new(queue_path, claim_map.clone())
-                    .map_err(|e| format!("queue plugin error: {e}"))?,
-            ))
-            .map_err(|e| format!("plugin error: {e}"))?;
-        plugins
-            .register(Box::new(crate::plugin::stats::StatsPlugin))
-            .map_err(|e| format!("plugin error: {e}"))?;
-        plugins
-            .register(Box::new(crate::plugin::status::StatusPlugin))
-            .map_err(|e| format!("plugin error: {e}"))?;
-        let taskboard_path =
-            crate::plugin::taskboard::TaskboardPlugin::taskboard_path_from_chat(&chat_path);
-        plugins
-            .register(Box::new(crate::plugin::taskboard::TaskboardPlugin::new(
-                taskboard_path,
-                None,
-            )))
-            .map_err(|e| format!("plugin error: {e}"))?;
+        let plugins =
+            crate::plugin::PluginRegistry::with_all_plugins(&chat_path, claim_map.clone())
+                .map_err(|e| format!("plugin error: {e}"))?;
 
         let (shutdown_tx, _) = watch::channel(false);
 

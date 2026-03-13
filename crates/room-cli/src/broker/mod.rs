@@ -20,13 +20,13 @@ use std::{
 use crate::{
     history,
     message::{make_join, make_leave, make_system, parse_client_line, Message},
-    plugin::{self, PluginRegistry},
+    plugin::PluginRegistry,
 };
 use auth::{handle_oneshot_join, validate_token};
 use commands::{route_command, CommandResult};
 use fanout::{broadcast_and_persist, dm_and_persist};
 use room_protocol::SubscriptionTier;
-use state::RoomState;
+use state::{ClaimMap, RoomState};
 use tokio::{
     io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::{
@@ -122,10 +122,8 @@ impl Broker {
 
         let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
 
-        let mut registry = PluginRegistry::new();
-        registry.register(Box::new(plugin::help::HelpPlugin))?;
-        registry.register(Box::new(plugin::stats::StatsPlugin))?;
-        registry.register(Box::new(plugin::status::StatusPlugin))?;
+        let claim_map: ClaimMap = Arc::new(Mutex::new(HashMap::new()));
+        let registry = PluginRegistry::with_all_plugins(&self.chat_path, claim_map.clone())?;
 
         // Load persisted state from a previous broker session (if any).
         let persisted_tokens = auth::load_token_map(&self.token_map_path);
@@ -148,7 +146,7 @@ impl Broker {
             status_map: Arc::new(Mutex::new(HashMap::new())),
             host_user: Arc::new(Mutex::new(None)),
             token_map: Arc::new(Mutex::new(persisted_tokens)),
-            claim_map: Arc::new(Mutex::new(HashMap::new())),
+            claim_map,
             subscription_map: Arc::new(Mutex::new(persisted_subs)),
             chat_path: Arc::new(self.chat_path.clone()),
             token_map_path: Arc::new(self.token_map_path.clone()),
