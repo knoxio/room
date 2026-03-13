@@ -62,10 +62,12 @@ pub(super) fn assign_color(username: &str, color_map: &mut ColorMap) -> Color {
 const DM_ARROW: &str = "\u{2192}";
 
 /// Split a message content string into styled spans, rendering `@username`
-/// mentions and inline markdown (`**bold**`, `*italic*`, `` `code` ``).
+/// mentions and inline markdown (`***bold+italic***`, `**bold**`, `*italic*`,
+/// `` `code` ``).
 ///
-/// Single-pass parser: no nested formatting. Whichever delimiter is matched
-/// first consumes its span — inner delimiters are rendered as literal text.
+/// Single-pass parser. `***` is matched before `**` to support bold+italic.
+/// Bold content (`**...**`) is recursively parsed for `@mentions` and
+/// `*italic*` nesting. Other delimiters are not nested.
 pub(super) fn render_content_with_mentions(
     content: &str,
     color_map: &ColorMap,
@@ -77,15 +79,28 @@ pub(super) fn render_content_with_mentions(
     let mut plain_start = 0;
 
     while i < len {
-        // `**bold**`
+        // `***bold+italic***`
+        if i + 2 < len && bytes[i] == b'*' && bytes[i + 1] == b'*' && bytes[i + 2] == b'*' {
+            if let Some(close) = find_closing_triple_star(bytes, i + 3) {
+                if close > i + 3 {
+                    flush_plain(content, plain_start, i, &mut spans);
+                    spans.push(Span::styled(
+                        content[i + 3..close].to_string(),
+                        Style::default().add_modifier(Modifier::BOLD | Modifier::ITALIC),
+                    ));
+                    i = close + 3;
+                    plain_start = i;
+                    continue;
+                }
+            }
+        }
+
+        // `**bold**` — inner content parsed for @mentions and *italic*
         if i + 1 < len && bytes[i] == b'*' && bytes[i + 1] == b'*' {
             if let Some(close) = find_closing_double_star(bytes, i + 2) {
                 if close > i + 2 {
                     flush_plain(content, plain_start, i, &mut spans);
-                    spans.push(Span::styled(
-                        content[i + 2..close].to_string(),
-                        Style::default().add_modifier(Modifier::BOLD),
-                    ));
+                    spans.extend(render_bold_inner(&content[i + 2..close], color_map));
                     i = close + 2;
                     plain_start = i;
                     continue;
@@ -202,6 +217,113 @@ fn find_closing_backtick(bytes: &[u8], start: usize) -> Option<usize> {
         .map(|p| start + p)
 }
 
+/// Find the byte position of the closing `***` starting from `start`.
+fn find_closing_triple_star(bytes: &[u8], start: usize) -> Option<usize> {
+    let len = bytes.len();
+    let mut j = start;
+    while j + 2 < len {
+        if bytes[j] == b'*' && bytes[j + 1] == b'*' && bytes[j + 2] == b'*' {
+            return Some(j);
+        }
+        j += 1;
+    }
+    None
+}
+
+/// Parse content inside `**...**` for nested `@mentions` and `*italic*`.
+///
+/// Every span produced carries [`Modifier::BOLD`] since it sits inside a bold
+/// delimiter. `@mentions` keep their user color; `*italic*` segments get
+/// `BOLD | ITALIC`.
+fn render_bold_inner(content: &str, color_map: &ColorMap) -> Vec<Span<'static>> {
+    let bold = Style::default().add_modifier(Modifier::BOLD);
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let bytes = content.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+    let mut plain_start = 0;
+
+    while i < len {
+        // `*italic*` inside bold → BOLD|ITALIC
+        if bytes[i] == b'*' && !(i + 1 < len && bytes[i + 1] == b'*') {
+            if let Some(close) = find_closing_single_star(bytes, i + 1) {
+                if close > i + 1 {
+                    if plain_start < i {
+                        spans.push(Span::styled(content[plain_start..i].to_string(), bold));
+                    }
+                    spans.push(Span::styled(
+                        content[i + 1..close].to_string(),
+                        Style::default().add_modifier(Modifier::BOLD | Modifier::ITALIC),
+                    ));
+                    i = close + 1;
+                    plain_start = i;
+                    continue;
+                }
+            }
+        }
+
+        // `@mention` inside bold
+        if bytes[i] == b'@' {
+            let after_at = &content[i + 1..];
+            let username_end = after_at
+                .find(|c: char| !c.is_alphanumeric() && c != '_' && c != '-')
+                .unwrap_or(after_at.len());
+            if username_end > 0 {
+                if plain_start < i {
+                    spans.push(Span::styled(content[plain_start..i].to_string(), bold));
+                }
+                let username = &after_at[..username_end];
+                spans.push(Span::styled(
+                    format!("@{username}"),
+                    Style::default()
+                        .fg(user_color(username, color_map))
+                        .add_modifier(Modifier::BOLD),
+                ));
+                i += 1 + username_end;
+                plain_start = i;
+                continue;
+            }
+        }
+
+        i += 1;
+    }
+
+    if plain_start < len {
+        spans.push(Span::styled(content[plain_start..len].to_string(), bold));
+    }
+    if spans.is_empty() {
+        spans.push(Span::styled(String::new(), bold));
+    }
+    spans
+}
+
+/// Render a single chunk with code-block fence awareness.
+///
+/// Tracks whether we are inside a triple-backtick code block via
+/// `in_code_block`. Fence lines are rendered dimmed; lines inside a code
+/// block are rendered in code color (yellow) without markdown parsing.
+fn render_chunk_content(
+    chunk: &str,
+    in_code_block: &mut bool,
+    color_map: &ColorMap,
+) -> Vec<Span<'static>> {
+    let is_fence = chunk.starts_with("```");
+    if is_fence {
+        *in_code_block = !*in_code_block;
+        return vec![Span::styled(
+            chunk.to_string(),
+            Style::default().fg(Color::DarkGray),
+        )];
+    }
+    if *in_code_block {
+        return vec![Span::styled(
+            chunk.to_string(),
+            Style::default().fg(Color::Yellow),
+        )];
+    }
+    render_content_with_mentions(chunk, color_map)
+}
+
 /// Word-wrap `text` so that no line exceeds `width` characters.
 ///
 /// Explicit `\n` characters in `text` are preserved as hard line breaks.
@@ -292,7 +414,9 @@ pub(super) fn format_message(
             let chunks = wrap_words(content, content_width);
             let indent = " ".repeat(prefix_width);
             let mut lines: Vec<Line<'static>> = Vec::new();
+            let mut in_code_block = false;
             for (i, chunk) in chunks.into_iter().enumerate() {
+                let content_spans = render_chunk_content(&chunk, &mut in_code_block, color_map);
                 if i == 0 {
                     let mut line_spans = vec![
                         Span::styled(format!("[{ts_str}] "), Style::default().fg(Color::DarkGray)),
@@ -303,11 +427,11 @@ pub(super) fn format_message(
                                 .add_modifier(Modifier::BOLD),
                         ),
                     ];
-                    line_spans.extend(render_content_with_mentions(&chunk, color_map));
+                    line_spans.extend(content_spans);
                     lines.push(Line::from(line_spans));
                 } else {
                     let mut line_spans = vec![Span::raw(indent.clone())];
-                    line_spans.extend(render_content_with_mentions(&chunk, color_map));
+                    line_spans.extend(content_spans);
                     lines.push(Line::from(line_spans));
                 }
             }
@@ -328,7 +452,9 @@ pub(super) fn format_message(
             let chunks = wrap_words(content, content_width);
             let indent = " ".repeat(prefix_width);
             let mut lines: Vec<Line<'static>> = Vec::new();
+            let mut in_code_block = false;
             for (i, chunk) in chunks.into_iter().enumerate() {
+                let content_spans = render_chunk_content(&chunk, &mut in_code_block, color_map);
                 if i == 0 {
                     let mut line_spans = vec![
                         Span::styled(format!("[{ts_str}] "), Style::default().fg(Color::DarkGray)),
@@ -343,11 +469,11 @@ pub(super) fn format_message(
                             Style::default().fg(Color::DarkGray),
                         ),
                     ];
-                    line_spans.extend(render_content_with_mentions(&chunk, color_map));
+                    line_spans.extend(content_spans);
                     lines.push(Line::from(line_spans));
                 } else {
                     let mut line_spans = vec![Span::raw(indent.clone())];
-                    line_spans.extend(render_content_with_mentions(&chunk, color_map));
+                    line_spans.extend(content_spans);
                     lines.push(Line::from(line_spans));
                 }
             }
@@ -768,6 +894,216 @@ mod tests {
         assert_eq!(spans[3].content, " and ");
         assert_eq!(spans[4].content, "italic");
         assert!(spans[4].style.add_modifier.contains(Modifier::ITALIC));
+    }
+
+    // ── bold+italic (***) ──────────────────────────────────────────────────
+
+    #[test]
+    fn render_bold_italic_text() {
+        let cm = ColorMap::new();
+        let spans = render_content_with_mentions("hello ***world***!", &cm);
+        assert_eq!(spans.len(), 3);
+        assert_eq!(spans[0].content, "hello ");
+        assert_eq!(spans[1].content, "world");
+        assert!(spans[1].style.add_modifier.contains(Modifier::BOLD));
+        assert!(spans[1].style.add_modifier.contains(Modifier::ITALIC));
+        assert_eq!(spans[2].content, "!");
+    }
+
+    #[test]
+    fn render_bold_italic_only() {
+        let cm = ColorMap::new();
+        let spans = render_content_with_mentions("***emphasis***", &cm);
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].content, "emphasis");
+        assert!(spans[0].style.add_modifier.contains(Modifier::BOLD));
+        assert!(spans[0].style.add_modifier.contains(Modifier::ITALIC));
+    }
+
+    #[test]
+    fn render_unclosed_triple_star_falls_through_to_bold() {
+        let cm = ColorMap::new();
+        // No closing ***, so falls through to ** handler
+        let spans = render_content_with_mentions("***text**end", &cm);
+        // ** matches at position 0 (first two stars), finds closing ** at "text**"
+        // Content between: "*text"
+        assert_eq!(spans[0].content, "*text");
+        assert!(spans[0].style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn render_triple_star_empty_content_is_literal() {
+        let cm = ColorMap::new();
+        let spans = render_content_with_mentions("******", &cm);
+        // *** followed by *** — but content is empty (close == i+3, not > i+3)
+        // Falls through: ** matches, ** finds closing, content is "**" → bold
+        let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text, "******");
+    }
+
+    // ── nested @mention inside bold ─────────────────────────────────────────
+
+    #[test]
+    fn render_bold_with_nested_mention() {
+        let cm = ColorMap::new();
+        let spans = render_content_with_mentions("**hello @alice!**", &cm);
+        assert_eq!(spans.len(), 3);
+        assert_eq!(spans[0].content, "hello ");
+        assert!(spans[0].style.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(spans[1].content, "@alice");
+        assert!(spans[1].style.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(spans[2].content, "!");
+        assert!(spans[2].style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn render_bold_with_mention_only() {
+        let cm = ColorMap::new();
+        let spans = render_content_with_mentions("**@bob**", &cm);
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].content, "@bob");
+        assert!(spans[0].style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn render_bold_with_multiple_mentions() {
+        let cm = ColorMap::new();
+        let spans = render_content_with_mentions("**@alice and @bob**", &cm);
+        assert_eq!(spans.len(), 3);
+        assert_eq!(spans[0].content, "@alice");
+        assert_eq!(spans[1].content, " and ");
+        assert!(spans[1].style.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(spans[2].content, "@bob");
+    }
+
+    // ── nested italic inside bold ───────────────────────────────────────────
+
+    #[test]
+    fn render_bold_with_nested_italic() {
+        let cm = ColorMap::new();
+        let spans = render_content_with_mentions("**text *emphasis* more**", &cm);
+        assert_eq!(spans.len(), 3);
+        assert_eq!(spans[0].content, "text ");
+        assert!(spans[0].style.add_modifier.contains(Modifier::BOLD));
+        assert!(!spans[0].style.add_modifier.contains(Modifier::ITALIC));
+        assert_eq!(spans[1].content, "emphasis");
+        assert!(spans[1].style.add_modifier.contains(Modifier::BOLD));
+        assert!(spans[1].style.add_modifier.contains(Modifier::ITALIC));
+        assert_eq!(spans[2].content, " more");
+        assert!(spans[2].style.add_modifier.contains(Modifier::BOLD));
+        assert!(!spans[2].style.add_modifier.contains(Modifier::ITALIC));
+    }
+
+    #[test]
+    fn render_bold_with_italic_and_mention() {
+        let cm = ColorMap::new();
+        let spans = render_content_with_mentions("**@alice said *important* stuff**", &cm);
+        assert_eq!(spans.len(), 4);
+        assert_eq!(spans[0].content, "@alice");
+        assert!(spans[0].style.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(spans[1].content, " said ");
+        assert!(spans[1].style.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(spans[2].content, "important");
+        assert!(spans[2].style.add_modifier.contains(Modifier::BOLD));
+        assert!(spans[2].style.add_modifier.contains(Modifier::ITALIC));
+        assert_eq!(spans[3].content, " stuff");
+        assert!(spans[3].style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    // ── code block fencing ──────────────────────────────────────────────────
+
+    #[test]
+    fn render_chunk_content_fence_toggles_code_block() {
+        let cm = ColorMap::new();
+        let mut in_code = false;
+
+        // Opening fence
+        let spans = render_chunk_content("```", &mut in_code, &cm);
+        assert!(in_code);
+        assert_eq!(spans[0].style.fg, Some(Color::DarkGray));
+
+        // Content inside code block
+        let spans = render_chunk_content("let x = 42;", &mut in_code, &cm);
+        assert_eq!(spans[0].content, "let x = 42;");
+        assert_eq!(spans[0].style.fg, Some(Color::Yellow));
+
+        // Closing fence
+        let spans = render_chunk_content("```", &mut in_code, &cm);
+        assert!(!in_code);
+        assert_eq!(spans[0].style.fg, Some(Color::DarkGray));
+
+        // After code block — normal markdown
+        let spans = render_chunk_content("**bold**", &mut in_code, &cm);
+        assert_eq!(spans[0].content, "bold");
+        assert!(spans[0].style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn render_chunk_content_code_block_suppresses_markdown() {
+        let cm = ColorMap::new();
+        let mut in_code = true; // already inside a code block
+
+        // Bold syntax inside code block is NOT parsed
+        let spans = render_chunk_content("**not bold**", &mut in_code, &cm);
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].content, "**not bold**");
+        assert_eq!(spans[0].style.fg, Some(Color::Yellow));
+    }
+
+    #[test]
+    fn render_chunk_content_fence_with_language_tag() {
+        let cm = ColorMap::new();
+        let mut in_code = false;
+
+        let spans = render_chunk_content("```rust", &mut in_code, &cm);
+        assert!(in_code, "fence with language tag should toggle code block");
+        assert_eq!(spans[0].content, "```rust");
+        assert_eq!(spans[0].style.fg, Some(Color::DarkGray));
+    }
+
+    #[test]
+    fn render_chunk_content_normal_backticks_not_fence() {
+        let cm = ColorMap::new();
+        let mut in_code = false;
+
+        // Single backtick — not a fence
+        let spans = render_chunk_content("`code`", &mut in_code, &cm);
+        assert!(!in_code);
+        assert_eq!(spans[0].content, "code");
+        assert_eq!(spans[0].style.fg, Some(Color::Yellow));
+    }
+
+    // ── backtick edge cases ─────────────────────────────────────────────────
+
+    #[test]
+    fn render_backtick_at_end_of_line() {
+        let cm = ColorMap::new();
+        let spans = render_content_with_mentions("use `fmt`", &cm);
+        assert_eq!(spans.len(), 2);
+        assert_eq!(spans[0].content, "use ");
+        assert_eq!(spans[1].content, "fmt");
+        assert_eq!(spans[1].style.fg, Some(Color::Yellow));
+    }
+
+    #[test]
+    fn render_backtick_adjacent_to_bold() {
+        let cm = ColorMap::new();
+        let spans = render_content_with_mentions("`code`**bold**", &cm);
+        assert_eq!(spans.len(), 2);
+        assert_eq!(spans[0].content, "code");
+        assert_eq!(spans[0].style.fg, Some(Color::Yellow));
+        assert_eq!(spans[1].content, "bold");
+        assert!(spans[1].style.add_modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn render_backtick_preserves_inner_stars() {
+        let cm = ColorMap::new();
+        // Stars inside backticks are literal
+        let spans = render_content_with_mentions("`**not bold**`", &cm);
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].content, "**not bold**");
+        assert_eq!(spans[0].style.fg, Some(Color::Yellow));
     }
 
     // ── assign_color ─────────────────────────────────────────────────────────
