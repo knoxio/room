@@ -618,3 +618,232 @@ pub(super) async fn daemon_api_create_room(
             .into_response(),
     }
 }
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::{HeaderMap, HeaderValue, StatusCode};
+    use std::{collections::HashMap, sync::Arc};
+    use tempfile::TempDir;
+    use tokio::sync::Mutex;
+
+    use crate::broker::service::DispatchResult;
+    use crate::message::{make_dm, make_message};
+
+    fn make_state(dir: &TempDir) -> Arc<RoomState> {
+        let chat = dir.path().join("chat.ndjson");
+        let token_map_path = dir.path().join("room.tokens");
+        let sub_map_path = dir.path().join("room.subscriptions");
+        RoomState::new(
+            "test-room".to_owned(),
+            chat,
+            token_map_path,
+            sub_map_path,
+            Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(Mutex::new(HashMap::new())),
+            None,
+        )
+        .unwrap()
+    }
+
+    fn empty_params() -> QueryParams {
+        QueryParams {
+            user: None,
+            n: None,
+            since: None,
+            before: None,
+            content: None,
+            regex: None,
+            mention: None,
+            public: None,
+            asc: None,
+            after_ts: None,
+            before_ts: None,
+        }
+    }
+
+    // ── extract_bearer_token ─────────────────────────────────────────────────
+
+    #[test]
+    fn extract_bearer_token_valid_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", HeaderValue::from_static("Bearer tok-abc"));
+        assert_eq!(extract_bearer_token(&headers), Some("tok-abc"));
+    }
+
+    #[test]
+    fn extract_bearer_token_missing_header() {
+        let headers = HeaderMap::new();
+        assert_eq!(extract_bearer_token(&headers), None);
+    }
+
+    #[test]
+    fn extract_bearer_token_wrong_scheme() {
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", HeaderValue::from_static("Basic abc123"));
+        assert_eq!(extract_bearer_token(&headers), None);
+    }
+
+    #[test]
+    fn extract_bearer_token_empty_value_after_bearer() {
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", HeaderValue::from_static("Bearer "));
+        assert_eq!(
+            extract_bearer_token(&headers),
+            Some(""),
+            "strip_prefix('Bearer ') yields empty string — callers must handle"
+        );
+    }
+
+    // ── build_query_filter ───────────────────────────────────────────────────
+
+    #[test]
+    fn build_query_filter_maps_all_params() {
+        let params = QueryParams {
+            user: Some("alice".to_owned()),
+            n: Some(10),
+            since: Some(5),
+            before: Some(20),
+            content: Some("hello".to_owned()),
+            regex: Some(r"\d+".to_owned()),
+            mention: Some("bob".to_owned()),
+            public: Some(true),
+            asc: Some(true),
+            after_ts: None,
+            before_ts: None,
+        };
+        let filter = build_query_filter(&params, "myroom").unwrap();
+        assert_eq!(filter.users, vec!["alice"]);
+        assert_eq!(filter.limit, Some(10));
+        assert_eq!(filter.after_seq, Some(("myroom".to_owned(), 5)));
+        assert_eq!(filter.before_seq, Some(("myroom".to_owned(), 20)));
+        assert_eq!(filter.content_search.as_deref(), Some("hello"));
+        assert!(filter.content_regex.is_some());
+        assert_eq!(filter.mention_user.as_deref(), Some("bob"));
+        assert!(filter.public_only);
+        assert!(filter.ascending);
+    }
+
+    #[test]
+    fn build_query_filter_invalid_regex_returns_err() {
+        let params = QueryParams {
+            regex: Some("[invalid".to_owned()),
+            ..empty_params()
+        };
+        let result = build_query_filter(&params, "r");
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().contains("invalid regex"),
+            "error should mention invalid regex"
+        );
+    }
+
+    #[test]
+    fn build_query_filter_defaults_for_empty_params() {
+        let filter = build_query_filter(&empty_params(), "r").unwrap();
+        assert!(filter.users.is_empty());
+        assert!(filter.limit.is_none());
+        assert!(filter.after_seq.is_none());
+        assert!(filter.before_seq.is_none());
+        assert!(filter.content_search.is_none());
+        assert!(filter.content_regex.is_none());
+        assert!(filter.mention_user.is_none());
+        assert!(!filter.public_only);
+        assert!(!filter.ascending);
+    }
+
+    // ── apply_query_filter ───────────────────────────────────────────────────
+
+    #[test]
+    fn apply_query_filter_empty_history_returns_empty() {
+        let filter = QueryFilter::default();
+        let result = apply_query_filter(vec![], &filter, "r", "alice", None);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn apply_query_filter_respects_limit() {
+        let msgs: Vec<Message> = (0..5)
+            .map(|i| make_message("r", "alice", &format!("msg-{i}")))
+            .collect();
+        let filter = QueryFilter {
+            limit: Some(2),
+            ..QueryFilter::default()
+        };
+        let result = apply_query_filter(msgs, &filter, "r", "alice", None);
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn apply_query_filter_dm_hidden_from_non_participant() {
+        let public_msg = make_message("r", "alice", "hello everyone");
+        let dm = make_dm("r", "alice", "bob", "secret");
+        let history = vec![public_msg, dm];
+        let filter = QueryFilter::default();
+        let result = apply_query_filter(history, &filter, "r", "eve", None);
+        assert_eq!(result.len(), 1, "eve should only see the public message");
+        assert_eq!(result[0]["content"], "hello everyone");
+    }
+
+    // ── dispatch_to_response ─────────────────────────────────────────────────
+
+    #[test]
+    fn dispatch_to_response_handled_returns_200() {
+        let resp = dispatch_to_response(Ok(DispatchResult::Handled));
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn dispatch_to_response_send_denied_returns_403() {
+        let resp = dispatch_to_response(Ok(DispatchResult::SendDenied("not allowed".to_owned())));
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn dispatch_to_response_error_returns_500() {
+        let resp = dispatch_to_response(Err(anyhow::anyhow!("boom")));
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    // ── require_auth ─────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn require_auth_missing_header_returns_unauthorized() {
+        let dir = TempDir::new().unwrap();
+        let state = make_state(&dir);
+        let headers = HeaderMap::new();
+        let result = require_auth(&headers, &state, None).await;
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn require_auth_invalid_token_returns_unauthorized() {
+        let dir = TempDir::new().unwrap();
+        let state = make_state(&dir);
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "authorization",
+            HeaderValue::from_static("Bearer bad-token"),
+        );
+        let result = require_auth(&headers, &state, None).await;
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn require_auth_valid_token_returns_username() {
+        let dir = TempDir::new().unwrap();
+        let state = make_state(&dir);
+        let token = state.issue_token("alice").await.unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "authorization",
+            HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        );
+        let result = require_auth(&headers, &state, None).await;
+        assert_eq!(result.unwrap(), "alice");
+    }
+}

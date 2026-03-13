@@ -17,6 +17,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - CI changelog enforcement — PRs must include a changelog entry under `[Unreleased]`. (#499)
 - **docs:** Added daemon mode section (daemon, create, destroy) to quick-start.md. (#599)
 - **test:** Added 6 unit tests for `broker/fanout.rs` (`broadcast_and_persist`, `dm_and_persist`). (#571)
+- **test:** Added 16 unit tests for `broker/ws/rest.rs` error paths (`extract_bearer_token`, `build_query_filter`, `apply_query_filter`, `dispatch_to_response`, `require_auth`). (#575)
 
 ### Changed
 

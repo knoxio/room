@@ -10,6 +10,12 @@ For changes prior to the workspace restructure (v0.1.2 through v1.0.2), see the
 
 ## [Unreleased]
 
+### Added
+
+- 16 unit tests for `broker/ws/rest.rs` error paths: `extract_bearer_token` (4 tests),
+  `build_query_filter` (3 tests), `apply_query_filter` (3 tests),
+  `dispatch_to_response` (3 tests), `require_auth` (3 tests). (#575)
+
 ### Changed
 
 - Deduplicated `MentionPicker` and `ChoicePicker` into shared `PickerState` struct with
