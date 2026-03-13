@@ -805,6 +805,22 @@ This prevents CLAUDE.md from drifting out of date between sprints. If an agent n
 a stale section mid-sprint, flag it in the room — do not silently update it yourself
 unless you own that section.
 
+## Content sources
+
+Each type of content has exactly one canonical source. Do not maintain the same
+information in two places.
+
+| Source | Content |
+|---|---|
+| **Notion** | Vision, product strategy, team roster, sprint reviews/retros, roadmap, process docs |
+| **docs/** (repo) | Technical reference: wire format, CLI commands, broker internals, plugin API, deployment, testing |
+| **CLAUDE.md** (repo) | Agent coordination protocol, codebase overview, key invariants, pre-push checklist |
+| **GitHub Issues** | All work items: bugs, features, investigations, tasks |
+
+When Notion pages contain technical details that overlap with repo docs, the repo is
+canonical. Notion pages with technical overlap are marked "Historical" or include a
+redirect notice pointing to the repo source.
+
 ## Release process
 
 Only the human (joao) or the BA agent authorises a release. **Releases are ba's
