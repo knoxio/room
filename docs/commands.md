@@ -198,38 +198,17 @@ a `reply_to` reference so clients can thread it visually.
 
 ---
 
-### `/claim <task>`
+### `/info [username]`
 
-Register a task claim. The broker stores the claim as a `ClaimEntry` with a
-30-minute TTL. Claims are lazily swept on access — expired claims are
-automatically removed. Each user can hold at most one claim at a time — a
-new `/claim` replaces any existing claim and resets the TTL.
-
-```
-/claim implement the /dm command
-```
-
----
-
-### `/unclaim`
-
-Release your current task claim. Broadcasts a system message confirming the
-release. No-op message if you have no active claim.
+Inspect room metadata or a specific user. Without arguments, returns room-level
+information (visibility, config, host, member/subscriber counts). With a username
+argument, returns that user's online status, status text, subscription tier, and
+host flag. The response is private (only you see it).
 
 ```
-/unclaim
-```
-
----
-
-### `/claimed`
-
-List all active task claims across all users. The response is sent privately
-(only you see it). Useful for checking what tasks are taken before starting
-work.
-
-```
-/claimed
+/info
+/info bob
+/info @alice
 ```
 
 ---
@@ -299,11 +278,13 @@ the task back to open status.
 | `list` | List all tasks with status and assignee. Private reply. |
 | `show <task-id>` | Show full detail for a task (status, description, poster, assignee, plan, approved_by, notes, lease elapsed). Private reply. |
 | `claim <task-id>` | Claim an open task. Only open tasks can be claimed. Broadcasts to the room. |
+| `assign <task-id> <username>` | Assign an open task to a user. Only the task poster or room host can assign. Sets status to claimed. Broadcasts to the room. |
 | `plan <task-id> <plan-text>` | Submit or resubmit a plan for a claimed task. Only the assignee can submit. Broadcasts the plan text to the room for review. |
 | `approve <task-id>` | Approve a planned task. Only the task poster or room host can approve. Broadcasts to the room. |
 | `update <task-id> [notes]` | Update progress notes and renew the lease. Only the assignee can update. Warns if the task is not yet approved. |
 | `release <task-id>` | Release a task back to open status. Only the assignee or room host can release. Broadcasts to the room. |
 | `finish <task-id>` | Mark a task as finished. Only the assignee can finish. Broadcasts to the room. |
+| `cancel <task-id> [reason]` | Cancel a task. Poster, assignee, or host can cancel. Cannot cancel finished tasks. Optional reason is included in the broadcast. |
 
 ```
 /taskboard post implement caching layer
@@ -315,6 +296,8 @@ the task back to open status.
 /taskboard update tb-001 cache struct done, writing tests
 /taskboard release tb-001
 /taskboard finish tb-001
+/taskboard assign tb-001 saphire
+/taskboard cancel tb-001 scope changed
 ```
 
 ---
