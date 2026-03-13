@@ -1,3 +1,6 @@
+use std::panic::AssertUnwindSafe;
+
+use futures_util::FutureExt;
 use room_protocol::{EventFilter, SubscriptionTier};
 
 use room_protocol::{make_system, Message};
@@ -676,7 +679,24 @@ async fn dispatch_plugin(
         team_access,
     };
 
-    let result = plugin.handle(ctx).await?;
+    let result = match AssertUnwindSafe(plugin.handle(ctx)).catch_unwind().await {
+        Ok(r) => r?,
+        Err(panic_info) => {
+            let msg = panic_info
+                .downcast_ref::<String>()
+                .map(|s| s.as_str())
+                .or_else(|| panic_info.downcast_ref::<&str>().copied())
+                .unwrap_or("unknown panic");
+            eprintln!("[broker] plugin '{}' panicked: {msg}", plugin.name());
+            let sys = make_system(
+                &state.room_id,
+                &format!("plugin:{}", plugin.name()),
+                format!("plugin '{}' panicked: {msg}", plugin.name()),
+            );
+            let json = serde_json::to_string(&sys)?;
+            return Ok(CommandResult::Reply(json));
+        }
+    };
 
     Ok(match result {
         PluginResult::Reply(text) => {
@@ -2762,5 +2782,152 @@ mod tests {
             !matches!(result, CommandResult::Passthrough(_)),
             "cross-room dispatch should not fall through to Passthrough"
         );
+    }
+
+    // ── Plugin panic safety (#603) ──────────────────────────────────────
+
+    #[tokio::test]
+    async fn dispatch_plugin_catches_panic() {
+        use crate::plugin::{BoxFuture, CommandContext, CommandInfo, Plugin, PluginResult};
+
+        struct PanicPlugin;
+
+        impl Plugin for PanicPlugin {
+            fn name(&self) -> &str {
+                "panic-test"
+            }
+
+            fn commands(&self) -> Vec<CommandInfo> {
+                vec![CommandInfo {
+                    name: "boom".to_owned(),
+                    description: "panics on purpose".to_owned(),
+                    usage: "/boom".to_owned(),
+                    params: vec![],
+                }]
+            }
+
+            fn handle(&self, _ctx: CommandContext) -> BoxFuture<'_, anyhow::Result<PluginResult>> {
+                Box::pin(async { panic!("intentional test panic") })
+            }
+        }
+
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+        let msg = make_command("test-room", "alice", "boom", vec![]);
+
+        let result = super::dispatch_plugin(&PanicPlugin, &msg, "alice", &state).await;
+
+        // Must not propagate the panic — should return Ok with an error reply
+        let result = result.expect("dispatch_plugin should not propagate panic");
+        match result {
+            CommandResult::Reply(json) => {
+                assert!(
+                    json.contains("panicked"),
+                    "reply should mention panic: {json}"
+                );
+                assert!(
+                    json.contains("intentional test panic"),
+                    "reply should include panic message: {json}"
+                );
+            }
+            other => panic!(
+                "expected CommandResult::Reply, got {:?}",
+                std::mem::discriminant(&other)
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_plugin_catches_panic_with_string_message() {
+        use crate::plugin::{BoxFuture, CommandContext, CommandInfo, Plugin, PluginResult};
+
+        struct StringPanicPlugin;
+
+        impl Plugin for StringPanicPlugin {
+            fn name(&self) -> &str {
+                "string-panic"
+            }
+
+            fn commands(&self) -> Vec<CommandInfo> {
+                vec![CommandInfo {
+                    name: "kaboom".to_owned(),
+                    description: "panics with String".to_owned(),
+                    usage: "/kaboom".to_owned(),
+                    params: vec![],
+                }]
+            }
+
+            fn handle(&self, _ctx: CommandContext) -> BoxFuture<'_, anyhow::Result<PluginResult>> {
+                Box::pin(async { panic!("{}", String::from("owned string panic")) })
+            }
+        }
+
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+        let msg = make_command("test-room", "alice", "kaboom", vec![]);
+
+        let result = super::dispatch_plugin(&StringPanicPlugin, &msg, "alice", &state)
+            .await
+            .expect("should not propagate panic");
+
+        match result {
+            CommandResult::Reply(json) => {
+                assert!(
+                    json.contains("owned string panic"),
+                    "reply should include panic message: {json}"
+                );
+            }
+            other => panic!(
+                "expected CommandResult::Reply, got {:?}",
+                std::mem::discriminant(&other)
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_plugin_normal_execution_unaffected() {
+        use crate::plugin::{BoxFuture, CommandContext, CommandInfo, Plugin, PluginResult};
+
+        struct OkPlugin;
+
+        impl Plugin for OkPlugin {
+            fn name(&self) -> &str {
+                "ok-test"
+            }
+
+            fn commands(&self) -> Vec<CommandInfo> {
+                vec![CommandInfo {
+                    name: "greet".to_owned(),
+                    description: "says hello".to_owned(),
+                    usage: "/greet".to_owned(),
+                    params: vec![],
+                }]
+            }
+
+            fn handle(&self, _ctx: CommandContext) -> BoxFuture<'_, anyhow::Result<PluginResult>> {
+                Box::pin(async { Ok(PluginResult::Reply("hello".to_owned())) })
+            }
+        }
+
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+        let msg = make_command("test-room", "alice", "greet", vec![]);
+
+        let result = super::dispatch_plugin(&OkPlugin, &msg, "alice", &state)
+            .await
+            .expect("normal plugin should succeed");
+
+        match result {
+            CommandResult::Reply(json) => {
+                assert!(
+                    json.contains("hello"),
+                    "reply should contain plugin response: {json}"
+                );
+            }
+            other => panic!(
+                "expected CommandResult::Reply, got {:?}",
+                std::mem::discriminant(&other)
+            ),
+        }
     }
 }
