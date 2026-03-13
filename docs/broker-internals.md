@@ -235,7 +235,7 @@ Connections to the daemon socket begin with a prefix that determines routing:
 | Prefix | Effect |
 |---|---|
 | `ROOM:<room_id>:<rest>` | Route `<rest>` to the named room (same per-room handshake: SEND, TOKEN, JOIN, SESSION, or username) |
-| `CREATE:<room_id>` | Create a new room. Config JSON follows on the next line |
+| `CREATE:<room_id>` | Create a new room. Config JSON (must include `token` field) follows on the next line |
 | `DESTROY:<room_id>` | Destroy a room. Token required on the next line |
 | `JOIN:<username>` | Global user registration — issues a daemon-level token (not per-room) |
 
@@ -243,8 +243,8 @@ Connections to the daemon socket begin with a prefix that determines routing:
 loads persisted subscriptions, and writes a `.meta` file for auto-discovery. DM rooms
 auto-subscribe both participants at `Full`.
 
-**Room destruction** removes the room from the map, signals shutdown to connected clients,
-and deletes the `.meta` file.
+**Room destruction** removes the room from the map and signals shutdown to connected clients.
+The `.meta` file is not deleted immediately — it is cleaned up on daemon shutdown.
 
 ### Room auto-discovery
 
@@ -254,7 +254,7 @@ Each room writes a `.meta` file on creation:
 {"chat_path": "/full/path/to/<room_id>.chat"}
 ```
 
-Location: `$TMPDIR/room-<room_id>.meta` (platform runtime dir). The `discover_daemon_rooms()`
+Location: platform runtime dir (macOS `$TMPDIR`, Linux `$XDG_RUNTIME_DIR/room/`). The `discover_daemon_rooms()`
 function scans for `room-*.meta` files and extracts room IDs. `discover_joined_rooms(username)`
 further filters to rooms where the user has a `Full` or `MentionsOnly` subscription.
 
@@ -289,8 +289,8 @@ bidirectional — send plain text or JSON envelopes as text frames.
 | `POST` | `/api/<room_id>/join` | None | `{"username":"x"}` → token |
 | `POST` | `/api/<room_id>/send` | Bearer token | `{"content":"msg","to":"user"}` → broadcast JSON |
 | `GET` | `/api/<room_id>/poll` | Bearer token | `?since=<msg-id>` → `{"messages":[...]}` |
-| `GET` | `/api/<room_id>/query` | Bearer token | Filter params: user, n, since, before, content, regex, mention, public, asc |
-| `GET` | `/api/health` | None | `{"status":"ok","room":"<id>","users":<n>}` |
+| `GET` | `/api/<room_id>/query` | Bearer token | Filter params: user, n, since, before, content, regex, mention, public, asc, after_ts, before_ts |
+| `GET` | `/api/health` | None | Single-room: `{"status":"ok","room":"<id>","users":<n>}`. Daemon: `{"status":"ok","rooms":[{"room":"<id>","users":<n>},…]}` |
 | `GET` | `/api/rooms` | None | Daemon only: `{"rooms":["room1","room2"]}` |
 | `POST` | `/api/rooms` | Bearer token | Daemon only: create room with config |
 
@@ -317,9 +317,11 @@ Each user has a per-room subscription tier that controls message filtering durin
 
 ### Storage
 
-Subscriptions are stored in `~/.room/state/<room_id>.subscriptions` (NDJSON, one entry
-per line). Loaded on room creation and merged with initial subscriptions (e.g. DM rooms
-auto-subscribe both participants at `Full`). Missing subscriptions default to `Full`.
+Subscriptions are stored in `~/.room/state/<room_id>.subscriptions` as a single
+pretty-printed JSON object (`{username: tier}`). Loaded on room creation and merged
+with initial subscriptions (e.g. DM rooms auto-subscribe both participants at `Full`).
+Missing subscriptions default to `Full` for polling, but `discover_joined_rooms()`
+excludes rooms with no subscription entry.
 
 ### Commands
 
