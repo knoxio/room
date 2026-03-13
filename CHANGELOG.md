@@ -27,6 +27,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **tests:** Added 8 unit tests for `broker/ws/mod.rs` — `DaemonWsState::get_room` lookup,
   WS close frame during handshake, JOIN/TOKEN/SESSION handshake error paths, private room
   join denial, and oneshot-send empty body edge case. (#574)
+- **test:** Added 6 edge-case unit tests for `broker/mod.rs` `read_line_limited` (exact-limit
+  no-newline, over-limit no-newline, buffer append, null bytes, CRLF, boundary newline). (#573)
 
 ### Changed
 

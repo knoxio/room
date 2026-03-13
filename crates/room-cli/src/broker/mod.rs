@@ -580,4 +580,87 @@ mod tests {
             "unexpected error: {err_msg}"
         );
     }
+
+    #[tokio::test]
+    async fn read_line_limited_exact_limit_no_newline_accepted() {
+        // Exactly MAX_LINE_BYTES of data with no trailing newline → EOF returns Ok.
+        let data = vec![b'X'; MAX_LINE_BYTES];
+        let cursor = std::io::Cursor::new(data);
+        let mut reader = tokio::io::BufReader::new(cursor);
+        let mut buf = String::new();
+        let n = read_line_limited(&mut reader, &mut buf).await.unwrap();
+        assert_eq!(n, MAX_LINE_BYTES);
+        assert_eq!(buf.len(), MAX_LINE_BYTES);
+    }
+
+    #[tokio::test]
+    async fn read_line_limited_just_over_limit_no_newline_rejected() {
+        // MAX_LINE_BYTES + 1 bytes without newline → error before EOF.
+        let data = vec![b'Y'; MAX_LINE_BYTES + 1];
+        let cursor = std::io::Cursor::new(data);
+        let mut reader = tokio::io::BufReader::new(cursor);
+        let mut buf = String::new();
+        let result = read_line_limited(&mut reader, &mut buf).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("exceeds maximum"));
+    }
+
+    #[tokio::test]
+    async fn read_line_limited_appends_to_existing_buffer() {
+        // Buffer already has content — read_line_limited appends, does not overwrite.
+        let data = b"world\n";
+        let cursor = std::io::Cursor::new(data.to_vec());
+        let mut reader = tokio::io::BufReader::new(cursor);
+        let mut buf = String::from("hello ");
+        let n = read_line_limited(&mut reader, &mut buf).await.unwrap();
+        assert_eq!(n, 6);
+        assert_eq!(buf, "hello world\n");
+    }
+
+    #[tokio::test]
+    async fn read_line_limited_embedded_null_bytes() {
+        // Null bytes are valid UTF-8 — should be accepted.
+        let data: Vec<u8> = vec![b'a', 0x00, b'b', b'\n'];
+        let cursor = std::io::Cursor::new(data);
+        let mut reader = tokio::io::BufReader::new(cursor);
+        let mut buf = String::new();
+        let n = read_line_limited(&mut reader, &mut buf).await.unwrap();
+        assert_eq!(n, 4);
+        assert_eq!(buf, "a\0b\n");
+    }
+
+    #[tokio::test]
+    async fn read_line_limited_crlf_line_ending() {
+        // CRLF: the \r is part of the line content, \n terminates.
+        let data = b"line\r\n";
+        let cursor = std::io::Cursor::new(data.to_vec());
+        let mut reader = tokio::io::BufReader::new(cursor);
+        let mut buf = String::new();
+        let n = read_line_limited(&mut reader, &mut buf).await.unwrap();
+        assert_eq!(n, 6);
+        assert_eq!(buf, "line\r\n");
+    }
+
+    #[tokio::test]
+    async fn read_line_limited_long_line_with_newline_at_boundary() {
+        // Line of MAX_LINE_BYTES - 1 chars + newline = exactly at limit.
+        let mut data = vec![b'Z'; MAX_LINE_BYTES - 1];
+        data.push(b'\n');
+        // Add trailing data to verify only one line is consumed.
+        data.extend_from_slice(b"next\n");
+        let cursor = std::io::Cursor::new(data);
+        let mut reader = tokio::io::BufReader::new(cursor);
+
+        let mut buf = String::new();
+        let n = read_line_limited(&mut reader, &mut buf).await.unwrap();
+        assert_eq!(n, MAX_LINE_BYTES);
+        assert!(buf.ends_with('\n'));
+        assert_eq!(buf.len(), MAX_LINE_BYTES);
+
+        // Second line should be readable independently.
+        buf.clear();
+        let n2 = read_line_limited(&mut reader, &mut buf).await.unwrap();
+        assert_eq!(n2, 5);
+        assert_eq!(buf, "next\n");
+    }
 }
