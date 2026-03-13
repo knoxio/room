@@ -959,3 +959,41 @@ async fn create_room_dynamically_and_use() {
         "dynamic-room observer must NOT see static-room messages"
     );
 }
+
+#[tokio::test]
+async fn rest_api_users_returns_registered_users() {
+    let (td, port) = TestDaemon::start_with_ws_configs(vec![("users-room", None)]).await;
+    let base = format!("http://127.0.0.1:{port}");
+    let client = reqwest::Client::new();
+
+    // Register three users via daemon global join (uses UserRegistry).
+    daemon_global_join(&td.socket_path, "alice").await;
+    daemon_global_join(&td.socket_path, "bob").await;
+    daemon_global_join(&td.socket_path, "charlie").await;
+
+    // GET /api/users — should return all registered users sorted.
+    let resp = client
+        .get(format!("{base}/api/users"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let users: Vec<String> = body["users"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_owned())
+        .collect();
+
+    assert!(users.contains(&"alice".to_owned()), "should contain alice");
+    assert!(users.contains(&"bob".to_owned()), "should contain bob");
+    assert!(
+        users.contains(&"charlie".to_owned()),
+        "should contain charlie"
+    );
+    // Verify sorted order.
+    let mut sorted = users.clone();
+    sorted.sort();
+    assert_eq!(users, sorted, "users should be returned in sorted order");
+}

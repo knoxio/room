@@ -191,6 +191,9 @@ pub(super) struct MentionPicker {
     picker: PickerState,
     /// Byte index of the `@` character in the input buffer that opened this picker.
     pub(super) at_byte: usize,
+    /// Index in `filtered` where cross-room (not-in-current-room) entries begin.
+    /// Entries before this index are in-room users; entries at or after are cross-room.
+    pub(super) cross_room_start: usize,
 }
 
 impl std::ops::Deref for MentionPicker {
@@ -211,18 +214,50 @@ impl MentionPicker {
         Self {
             picker: PickerState::new(),
             at_byte: 0,
+            cross_room_start: 0,
         }
     }
 
-    pub(super) fn activate(&mut self, at_byte: usize, online_users: &[String], query: &str) {
+    pub(super) fn activate(
+        &mut self,
+        at_byte: usize,
+        online_users: &[String],
+        daemon_users: &[String],
+        query: &str,
+    ) {
         self.picker.active = true;
         self.picker.selected = 0;
         self.at_byte = at_byte;
-        self.update_filter(online_users, query);
+        self.update_filter(online_users, daemon_users, query);
     }
 
-    pub(super) fn update_filter(&mut self, online_users: &[String], query: &str) {
-        self.picker.filter_prefix(online_users, query);
+    /// Two-tier prefix filter: in-room matches first, then cross-room matches (deduped).
+    pub(super) fn update_filter(
+        &mut self,
+        online_users: &[String],
+        daemon_users: &[String],
+        query: &str,
+    ) {
+        let q = query.to_ascii_lowercase();
+        let in_room: Vec<String> = online_users
+            .iter()
+            .filter(|c| c.to_ascii_lowercase().starts_with(q.as_str()))
+            .cloned()
+            .collect();
+        self.cross_room_start = in_room.len();
+        let mut combined = in_room;
+        for u in daemon_users {
+            if u.to_ascii_lowercase().starts_with(q.as_str()) && !combined.iter().any(|e| e == u) {
+                combined.push(u.clone());
+            }
+        }
+        self.picker.filtered = combined;
+        self.picker.clamp_selected();
+    }
+
+    /// Returns `true` if the entry at `index` is a cross-room user (not in current room).
+    pub(super) fn is_cross_room(&self, index: usize) -> bool {
+        index >= self.cross_room_start
     }
 
     pub(super) fn selected_user(&self) -> Option<&str> {
@@ -612,7 +647,7 @@ mod tests {
             online_users.push(user);
         }
         let mut picker = MentionPicker::new();
-        picker.activate(0, &online_users, "");
+        picker.activate(0, &online_users, &[], "");
         assert!(picker.active);
         assert_eq!(picker.filtered, vec!["r2d2".to_owned()]);
     }
@@ -838,5 +873,43 @@ mod tests {
         p.activate("test", vec![], 0, "");
         assert!(p.filtered.is_empty());
         assert_eq!(p.selected_value(), None);
+    }
+
+    // ── MentionPicker two-tier tests ──────────────────────────────────────────
+
+    #[test]
+    fn mention_two_tier_in_room_first() {
+        let mut m = MentionPicker::new();
+        let online = vec!["alice".into(), "bob".into()];
+        let daemon = vec!["charlie".into(), "dave".into()];
+        m.activate(0, &online, &daemon, "");
+        assert_eq!(m.filtered, ["alice", "bob", "charlie", "dave"]);
+        assert_eq!(m.cross_room_start, 2);
+        assert!(!m.is_cross_room(0));
+        assert!(!m.is_cross_room(1));
+        assert!(m.is_cross_room(2));
+        assert!(m.is_cross_room(3));
+    }
+
+    #[test]
+    fn mention_two_tier_deduplicates() {
+        let mut m = MentionPicker::new();
+        let online = vec!["alice".into(), "bob".into()];
+        let daemon = vec!["alice".into(), "bob".into(), "charlie".into()];
+        m.activate(0, &online, &daemon, "");
+        assert_eq!(m.filtered, ["alice", "bob", "charlie"]);
+        assert_eq!(m.cross_room_start, 2);
+    }
+
+    #[test]
+    fn mention_two_tier_filters_by_prefix() {
+        let mut m = MentionPicker::new();
+        let online = vec!["alice".into(), "bob".into()];
+        let daemon = vec!["alyx".into(), "charlie".into()];
+        m.activate(0, &online, &daemon, "al");
+        assert_eq!(m.filtered, ["alice", "alyx"]);
+        assert_eq!(m.cross_room_start, 1);
+        assert!(!m.is_cross_room(0)); // alice is in-room
+        assert!(m.is_cross_room(1)); // alyx is cross-room
     }
 }

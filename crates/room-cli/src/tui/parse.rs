@@ -154,6 +154,13 @@ pub(super) fn parse_subscription_broadcast(content: &str) -> Option<(String, Sub
     Some((name.to_owned(), tier))
 }
 
+/// Parse a `users_all: ["alice","bob"]` broker system message and return the
+/// username list. Returns `None` if the content does not match.
+pub(super) fn parse_users_all_broadcast(content: &str) -> Option<Vec<String>> {
+    let json_str = content.strip_prefix("users_all: ")?;
+    serde_json::from_str(json_str).ok()
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -531,5 +538,32 @@ mod tests {
     #[test]
     fn normalize_paste_multiple_crlf() {
         assert_eq!(normalize_paste("a\r\n\r\nb"), "a\n\nb");
+    }
+
+    // ── parse_users_all_broadcast tests ───────────────────────────────────────
+
+    #[test]
+    fn parse_users_all_valid() {
+        let result = parse_users_all_broadcast(r#"users_all: ["alice","bob","charlie"]"#);
+        assert_eq!(
+            result.unwrap(),
+            vec!["alice".to_owned(), "bob".to_owned(), "charlie".to_owned()]
+        );
+    }
+
+    #[test]
+    fn parse_users_all_empty_list() {
+        let result = parse_users_all_broadcast("users_all: []");
+        assert_eq!(result.unwrap(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn parse_users_all_wrong_prefix() {
+        assert!(parse_users_all_broadcast("online — alice, bob").is_none());
+    }
+
+    #[test]
+    fn parse_users_all_malformed_json() {
+        assert!(parse_users_all_broadcast("users_all: not-json").is_none());
     }
 }

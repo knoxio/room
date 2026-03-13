@@ -68,6 +68,7 @@ pub(super) fn handle_key(
     key: KeyEvent,
     state: &mut InputState,
     online_users: &[String],
+    daemon_users: &[String],
     visible_count: usize,
     input_width: usize,
 ) -> Option<Action> {
@@ -76,11 +77,11 @@ pub(super) fn handle_key(
         KeyCode::Tab if state.choice.active => handle_tab_choice(state),
         KeyCode::Tab if state.mention.active => handle_tab_mention(state),
         KeyCode::Tab if state.palette.active => {
-            complete_palette_selection(state, online_users);
+            complete_palette_selection(state, online_users, daemon_users);
         }
-        KeyCode::Enter => return handle_enter(key, state, online_users),
-        KeyCode::Up => handle_up(state, online_users, input_width),
-        KeyCode::Down => handle_down(state, online_users, input_width),
+        KeyCode::Enter => return handle_enter(key, state, online_users, daemon_users),
+        KeyCode::Up => handle_up(state, online_users, daemon_users, input_width),
+        KeyCode::Down => handle_down(state, online_users, daemon_users, input_width),
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             return Some(Action::Quit);
         }
@@ -95,34 +96,34 @@ pub(super) fn handle_key(
         }
         KeyCode::Char('b') if key.modifiers.contains(KeyModifiers::ALT) => {
             state.cursor_pos = prev_word_start(&state.input, state.cursor_pos);
-            sync_mention_after_cursor_move(state, online_users);
+            sync_mention_after_cursor_move(state, online_users, daemon_users);
         }
         KeyCode::Char('f') if key.modifiers.contains(KeyModifiers::ALT) => {
             state.cursor_pos = next_word_end(&state.input, state.cursor_pos);
-            sync_mention_after_cursor_move(state, online_users);
+            sync_mention_after_cursor_move(state, online_users, daemon_users);
         }
         KeyCode::Backspace if key.modifiers.contains(KeyModifiers::ALT) => {
-            handle_word_delete(state, online_users);
+            handle_word_delete(state, online_users, daemon_users);
         }
-        KeyCode::Char(c) => handle_char(c, state, online_users),
-        KeyCode::Backspace => handle_backspace(state, online_users),
+        KeyCode::Char(c) => handle_char(c, state, online_users, daemon_users),
+        KeyCode::Backspace => handle_backspace(state, online_users, daemon_users),
         KeyCode::Left if key.modifiers.contains(KeyModifiers::ALT) => {
             state.cursor_pos = prev_word_start(&state.input, state.cursor_pos);
-            sync_mention_after_cursor_move(state, online_users);
+            sync_mention_after_cursor_move(state, online_users, daemon_users);
         }
         KeyCode::Right if key.modifiers.contains(KeyModifiers::ALT) => {
             state.cursor_pos = next_word_end(&state.input, state.cursor_pos);
-            sync_mention_after_cursor_move(state, online_users);
+            sync_mention_after_cursor_move(state, online_users, daemon_users);
         }
-        KeyCode::Left => handle_left(state, online_users),
-        KeyCode::Right => handle_right(state, online_users),
+        KeyCode::Left => handle_left(state, online_users, daemon_users),
+        KeyCode::Right => handle_right(state, online_users, daemon_users),
         KeyCode::Home => {
             state.cursor_pos = 0;
-            sync_mention_after_cursor_move(state, online_users);
+            sync_mention_after_cursor_move(state, online_users, daemon_users);
         }
         KeyCode::End => {
             state.cursor_pos = state.input.len();
-            sync_mention_after_cursor_move(state, online_users);
+            sync_mention_after_cursor_move(state, online_users, daemon_users);
         }
         KeyCode::PageUp => {
             state.scroll_offset = state.scroll_offset.saturating_add(visible_count);
@@ -179,7 +180,12 @@ fn handle_tab_mention(state: &mut InputState) {
 
 /// Handle the Enter key: mention/palette completion, newline insertion, DM
 /// intercept, or message submission.
-fn handle_enter(key: KeyEvent, state: &mut InputState, online_users: &[String]) -> Option<Action> {
+fn handle_enter(
+    key: KeyEvent,
+    state: &mut InputState,
+    online_users: &[String],
+    daemon_users: &[String],
+) -> Option<Action> {
     if state.choice.active {
         if let Some(value) = state.choice.selected_value() {
             let value = value.to_owned();
@@ -202,7 +208,7 @@ fn handle_enter(key: KeyEvent, state: &mut InputState, online_users: &[String]) 
         }
         state.mention.deactivate();
     } else if state.palette.active {
-        complete_palette_selection(state, online_users);
+        complete_palette_selection(state, online_users, daemon_users);
     } else if key.modifiers.contains(KeyModifiers::SHIFT) {
         state.input.insert(state.cursor_pos, '\n');
         state.cursor_pos += 1;
@@ -228,7 +234,12 @@ fn handle_enter(key: KeyEvent, state: &mut InputState, online_users: &[String]) 
 
 /// Navigate mention/palette picker upward, move cursor up in multi-line input,
 /// or scroll the chat history.
-fn handle_up(state: &mut InputState, online_users: &[String], input_width: usize) {
+fn handle_up(
+    state: &mut InputState,
+    online_users: &[String],
+    daemon_users: &[String],
+    input_width: usize,
+) {
     if state.choice.active {
         state.choice.move_up();
     } else if state.mention.active {
@@ -240,7 +251,7 @@ fn handle_up(state: &mut InputState, online_users: &[String], input_width: usize
         if cur_row > 0 {
             state.cursor_pos =
                 byte_offset_at_display_pos(&state.input, cur_row - 1, cur_col, input_width);
-            sync_mention_after_cursor_move(state, online_users);
+            sync_mention_after_cursor_move(state, online_users, daemon_users);
         } else {
             state.scroll_offset = state.scroll_offset.saturating_add(1);
         }
@@ -249,7 +260,12 @@ fn handle_up(state: &mut InputState, online_users: &[String], input_width: usize
 
 /// Navigate mention/palette picker downward, move cursor down in multi-line
 /// input, or scroll the chat history.
-fn handle_down(state: &mut InputState, online_users: &[String], input_width: usize) {
+fn handle_down(
+    state: &mut InputState,
+    online_users: &[String],
+    daemon_users: &[String],
+    input_width: usize,
+) {
     if state.choice.active {
         state.choice.move_down();
     } else if state.mention.active {
@@ -262,11 +278,11 @@ fn handle_down(state: &mut InputState, online_users: &[String], input_width: usi
         if cur_row < last_row {
             state.cursor_pos =
                 byte_offset_at_display_pos(&state.input, cur_row + 1, cur_col, input_width);
-            sync_mention_after_cursor_move(state, online_users);
+            sync_mention_after_cursor_move(state, online_users, daemon_users);
         } else if state.cursor_pos < state.input.len() {
             // On the last row but not at end of line — move to end first.
             state.cursor_pos = state.input.len();
-            sync_mention_after_cursor_move(state, online_users);
+            sync_mention_after_cursor_move(state, online_users, daemon_users);
         } else {
             state.scroll_offset = state.scroll_offset.saturating_sub(1);
         }
@@ -274,18 +290,18 @@ fn handle_down(state: &mut InputState, online_users: &[String], input_width: usi
 }
 
 /// Delete the previous word (Alt+Backspace).
-fn handle_word_delete(state: &mut InputState, online_users: &[String]) {
+fn handle_word_delete(state: &mut InputState, online_users: &[String], daemon_users: &[String]) {
     let word_start = prev_word_start(&state.input, state.cursor_pos);
     if word_start < state.cursor_pos {
         state.input.drain(word_start..state.cursor_pos);
         state.cursor_pos = word_start;
-        sync_mention_after_delete(state, online_users);
+        sync_mention_after_delete(state, online_users, daemon_users);
         sync_palette_after_delete(state);
     }
 }
 
 /// Insert a character and update mention picker / command palette state.
-fn handle_char(c: char, state: &mut InputState, online_users: &[String]) {
+fn handle_char(c: char, state: &mut InputState, online_users: &[String], daemon_users: &[String]) {
     state.input.insert(state.cursor_pos, c);
     state.cursor_pos += c.len_utf8();
     // Update choice picker filter when active.
@@ -300,7 +316,9 @@ fn handle_char(c: char, state: &mut InputState, online_users: &[String]) {
     // Update mention picker state.
     if let Some((at_byte, query)) = find_at_context(&state.input, state.cursor_pos) {
         if state.mention.active || c == '@' {
-            state.mention.activate(at_byte, online_users, query);
+            state
+                .mention
+                .activate(at_byte, online_users, daemon_users, query);
             if state.mention.filtered.is_empty() {
                 state.mention.deactivate();
             }
@@ -324,7 +342,7 @@ fn handle_char(c: char, state: &mut InputState, online_users: &[String]) {
 }
 
 /// Delete the character before the cursor.
-fn handle_backspace(state: &mut InputState, online_users: &[String]) {
+fn handle_backspace(state: &mut InputState, online_users: &[String], daemon_users: &[String]) {
     if state.cursor_pos > 0 {
         let prev = state.input[..state.cursor_pos]
             .char_indices()
@@ -346,13 +364,13 @@ fn handle_backspace(state: &mut InputState, online_users: &[String]) {
             }
             return;
         }
-        sync_mention_after_delete(state, online_users);
+        sync_mention_after_delete(state, online_users, daemon_users);
         sync_palette_after_delete(state);
     }
 }
 
 /// Move cursor one character to the left.
-fn handle_left(state: &mut InputState, online_users: &[String]) {
+fn handle_left(state: &mut InputState, online_users: &[String], daemon_users: &[String]) {
     if state.cursor_pos > 0 {
         state.cursor_pos = state.input[..state.cursor_pos]
             .char_indices()
@@ -360,16 +378,16 @@ fn handle_left(state: &mut InputState, online_users: &[String]) {
             .map(|(i, _)| i)
             .unwrap_or(0);
     }
-    sync_mention_after_cursor_move(state, online_users);
+    sync_mention_after_cursor_move(state, online_users, daemon_users);
 }
 
 /// Move cursor one character to the right.
-fn handle_right(state: &mut InputState, online_users: &[String]) {
+fn handle_right(state: &mut InputState, online_users: &[String], daemon_users: &[String]) {
     if state.cursor_pos < state.input.len() {
         let ch = state.input[state.cursor_pos..].chars().next().unwrap();
         state.cursor_pos += ch.len_utf8();
     }
-    sync_mention_after_cursor_move(state, online_users);
+    sync_mention_after_cursor_move(state, online_users, daemon_users);
 }
 
 /// Re-evaluate the mention picker after the cursor moved.
@@ -377,13 +395,19 @@ fn handle_right(state: &mut InputState, online_users: &[String]) {
 /// If the picker is active, checks the `@` context at the new cursor position.
 /// Updates the filter if the context is still valid, or deactivates the picker
 /// if the cursor has moved away from the `@` trigger.
-fn sync_mention_after_cursor_move(state: &mut InputState, online_users: &[String]) {
+fn sync_mention_after_cursor_move(
+    state: &mut InputState,
+    online_users: &[String],
+    daemon_users: &[String],
+) {
     if !state.mention.active {
         return;
     }
     if let Some((at_byte, query)) = find_at_context(&state.input, state.cursor_pos) {
         state.mention.at_byte = at_byte;
-        state.mention.update_filter(online_users, query);
+        state
+            .mention
+            .update_filter(online_users, daemon_users, query);
         if state.mention.filtered.is_empty() {
             state.mention.deactivate();
         }
@@ -399,16 +423,24 @@ fn sync_mention_after_cursor_move(state: &mut InputState, online_users: &[String
 /// a valid `@` context with at least one match — this handles the case where the
 /// picker was auto-dismissed because all matches disappeared, and a subsequent
 /// deletion restores a matching prefix.
-fn sync_mention_after_delete(state: &mut InputState, online_users: &[String]) {
+fn sync_mention_after_delete(
+    state: &mut InputState,
+    online_users: &[String],
+    daemon_users: &[String],
+) {
     if let Some((at_byte, query)) = find_at_context(&state.input, state.cursor_pos) {
         if state.mention.active {
             state.mention.at_byte = at_byte;
-            state.mention.update_filter(online_users, query);
+            state
+                .mention
+                .update_filter(online_users, daemon_users, query);
             if state.mention.filtered.is_empty() {
                 state.mention.deactivate();
             }
         } else {
-            state.mention.activate(at_byte, online_users, query);
+            state
+                .mention
+                .activate(at_byte, online_users, daemon_users, query);
             if state.mention.filtered.is_empty() {
                 state.mention.deactivate();
             }
@@ -424,7 +456,11 @@ fn sync_mention_after_delete(state: &mut InputState, online_users: &[String]) {
 /// `/<command> ` and activates the mention picker so the user can tab-complete
 /// a username without typing `@`. Otherwise fills in the full usage string as
 /// before.
-fn complete_palette_selection(state: &mut InputState, online_users: &[String]) {
+fn complete_palette_selection(
+    state: &mut InputState,
+    online_users: &[String],
+    daemon_users: &[String],
+) {
     let selected_idx = state.palette.filtered.get(state.palette.selected).copied();
     if let Some(idx) = selected_idx {
         let cmd_name = state.palette.commands[idx].cmd.clone();
@@ -439,7 +475,9 @@ fn complete_palette_selection(state: &mut InputState, online_users: &[String]) {
             state.cursor_pos = at_byte;
             state.input_row_scroll = 0;
             state.palette.deactivate();
-            state.mention.activate(at_byte, online_users, "");
+            state
+                .mention
+                .activate(at_byte, online_users, daemon_users, "");
             if state.mention.filtered.is_empty() {
                 state.mention.deactivate();
             }
@@ -514,8 +552,8 @@ mod tests {
     #[test]
     fn typing_chars_appends_to_input() {
         let mut state = InputState::new();
-        handle_key(make_key(KeyCode::Char('h')), &mut state, &[], 10, 80);
-        handle_key(make_key(KeyCode::Char('i')), &mut state, &[], 10, 80);
+        handle_key(make_key(KeyCode::Char('h')), &mut state, &[], &[], 10, 80);
+        handle_key(make_key(KeyCode::Char('i')), &mut state, &[], &[], 10, 80);
         assert_eq!(state.input, "hi");
         assert_eq!(state.cursor_pos, 2);
     }
@@ -523,7 +561,7 @@ mod tests {
     #[test]
     fn enter_on_empty_input_does_nothing() {
         let mut state = InputState::new();
-        let action = handle_key(make_key(KeyCode::Enter), &mut state, &[], 10, 80);
+        let action = handle_key(make_key(KeyCode::Enter), &mut state, &[], &[], 10, 80);
         assert!(action.is_none());
         assert!(state.input.is_empty());
     }
@@ -533,7 +571,7 @@ mod tests {
         let mut state = InputState::new();
         state.input = "hello".to_owned();
         state.cursor_pos = 5;
-        let action = handle_key(make_key(KeyCode::Enter), &mut state, &[], 10, 80);
+        let action = handle_key(make_key(KeyCode::Enter), &mut state, &[], &[], 10, 80);
         assert!(matches!(action, Some(Action::Send(_))));
         assert!(state.input.is_empty());
         assert_eq!(state.cursor_pos, 0);
@@ -546,6 +584,7 @@ mod tests {
             make_key_mod(KeyCode::Char('c'), KeyModifiers::CONTROL),
             &mut state,
             &[],
+            &[],
             10,
             80,
         );
@@ -557,7 +596,7 @@ mod tests {
         let mut state = InputState::new();
         state.input = "hi".to_owned();
         state.cursor_pos = 2;
-        handle_key(make_key(KeyCode::Backspace), &mut state, &[], 10, 80);
+        handle_key(make_key(KeyCode::Backspace), &mut state, &[], &[], 10, 80);
         assert_eq!(state.input, "h");
         assert_eq!(state.cursor_pos, 1);
     }
@@ -567,7 +606,7 @@ mod tests {
         let mut state = InputState::new();
         state.input = "abc".to_owned();
         state.cursor_pos = 3;
-        handle_key(make_key(KeyCode::Left), &mut state, &[], 10, 80);
+        handle_key(make_key(KeyCode::Left), &mut state, &[], &[], 10, 80);
         assert_eq!(state.cursor_pos, 2);
     }
 
@@ -576,7 +615,7 @@ mod tests {
         let mut state = InputState::new();
         state.input = "abc".to_owned();
         state.cursor_pos = 1;
-        handle_key(make_key(KeyCode::Right), &mut state, &[], 10, 80);
+        handle_key(make_key(KeyCode::Right), &mut state, &[], &[], 10, 80);
         assert_eq!(state.cursor_pos, 2);
     }
 
@@ -585,7 +624,7 @@ mod tests {
         let mut state = InputState::new();
         state.input = "hello".to_owned();
         state.cursor_pos = 5;
-        handle_key(make_key(KeyCode::Home), &mut state, &[], 10, 80);
+        handle_key(make_key(KeyCode::Home), &mut state, &[], &[], 10, 80);
         assert_eq!(state.cursor_pos, 0);
     }
 
@@ -594,7 +633,7 @@ mod tests {
         let mut state = InputState::new();
         state.input = "hello".to_owned();
         state.cursor_pos = 0;
-        handle_key(make_key(KeyCode::End), &mut state, &[], 10, 80);
+        handle_key(make_key(KeyCode::End), &mut state, &[], &[], 10, 80);
         assert_eq!(state.cursor_pos, 5);
     }
 
@@ -603,7 +642,7 @@ mod tests {
     fn up_arrow_on_single_line_scrolls_history() {
         let mut state = InputState::new();
         state.scroll_offset = 0;
-        handle_key(make_key(KeyCode::Up), &mut state, &[], 10, 80);
+        handle_key(make_key(KeyCode::Up), &mut state, &[], &[], 10, 80);
         assert_eq!(state.scroll_offset, 1);
     }
 
@@ -612,7 +651,7 @@ mod tests {
     fn down_arrow_on_single_line_clamps_scroll_at_zero() {
         let mut state = InputState::new();
         state.scroll_offset = 0;
-        handle_key(make_key(KeyCode::Down), &mut state, &[], 10, 80);
+        handle_key(make_key(KeyCode::Down), &mut state, &[], &[], 10, 80);
         assert_eq!(state.scroll_offset, 0);
     }
 
@@ -624,7 +663,7 @@ mod tests {
         // cursor at 'o' (index 8) on row 1, col 2
         state.cursor_pos = 8;
         state.scroll_offset = 5;
-        handle_key(make_key(KeyCode::Up), &mut state, &[], 10, 80);
+        handle_key(make_key(KeyCode::Up), &mut state, &[], &[], 10, 80);
         // Should move to row 0 col 2 = byte 2 ('l' in "hello")
         assert_eq!(state.cursor_pos, 2);
         // scroll_offset must not change
@@ -639,7 +678,7 @@ mod tests {
         // cursor at 'l' (index 2) on row 0, col 2
         state.cursor_pos = 2;
         state.scroll_offset = 3;
-        handle_key(make_key(KeyCode::Down), &mut state, &[], 10, 80);
+        handle_key(make_key(KeyCode::Down), &mut state, &[], &[], 10, 80);
         // Should move to row 1 col 2 = byte 8 ('r' in "world")
         assert_eq!(state.cursor_pos, 8);
         assert_eq!(state.scroll_offset, 3);
@@ -652,7 +691,7 @@ mod tests {
         state.input = "hello\nworld".to_owned();
         state.cursor_pos = 2; // row 0
         state.scroll_offset = 0;
-        handle_key(make_key(KeyCode::Up), &mut state, &[], 10, 80);
+        handle_key(make_key(KeyCode::Up), &mut state, &[], &[], 10, 80);
         assert_eq!(state.scroll_offset, 1);
         assert_eq!(state.cursor_pos, 2); // unchanged
     }
@@ -664,7 +703,7 @@ mod tests {
         state.input = "hello\nworld".to_owned();
         state.cursor_pos = 8; // row 1 (last), mid-line
         state.scroll_offset = 4;
-        handle_key(make_key(KeyCode::Down), &mut state, &[], 10, 80);
+        handle_key(make_key(KeyCode::Down), &mut state, &[], &[], 10, 80);
         assert_eq!(state.cursor_pos, 11); // moved to end of input
         assert_eq!(state.scroll_offset, 4); // unchanged — no scroll yet
     }
@@ -676,7 +715,7 @@ mod tests {
         state.input = "hello\nworld".to_owned();
         state.cursor_pos = 11; // end of input
         state.scroll_offset = 4;
-        handle_key(make_key(KeyCode::Down), &mut state, &[], 10, 80);
+        handle_key(make_key(KeyCode::Down), &mut state, &[], &[], 10, 80);
         assert_eq!(state.scroll_offset, 3); // decremented
         assert_eq!(state.cursor_pos, 11); // unchanged
     }
@@ -688,7 +727,7 @@ mod tests {
         state.input = "hello world".to_owned();
         state.cursor_pos = 5; // mid-line
         state.scroll_offset = 3;
-        handle_key(make_key(KeyCode::Down), &mut state, &[], 10, 80);
+        handle_key(make_key(KeyCode::Down), &mut state, &[], &[], 10, 80);
         assert_eq!(state.cursor_pos, 11); // moved to end
         assert_eq!(state.scroll_offset, 3); // unchanged
     }
@@ -701,7 +740,7 @@ mod tests {
         state.input = "hi\nworld".to_owned();
         // cursor at 'l' (index 6) on row 1, col 3
         state.cursor_pos = 6;
-        handle_key(make_key(KeyCode::Up), &mut state, &[], 10, 80);
+        handle_key(make_key(KeyCode::Up), &mut state, &[], &[], 10, 80);
         // row 0 only has col 0-2; col 3 clamps to end = byte 2 (position of '\n')
         assert_eq!(state.cursor_pos, 2);
     }
@@ -709,7 +748,7 @@ mod tests {
     #[test]
     fn page_up_scrolls_by_visible_count() {
         let mut state = InputState::new();
-        handle_key(make_key(KeyCode::PageUp), &mut state, &[], 10, 80);
+        handle_key(make_key(KeyCode::PageUp), &mut state, &[], &[], 10, 80);
         assert_eq!(state.scroll_offset, 10);
     }
 
@@ -722,6 +761,7 @@ mod tests {
             make_key_mod(KeyCode::Enter, KeyModifiers::SHIFT),
             &mut state,
             &[],
+            &[],
             10,
             80,
         );
@@ -732,7 +772,7 @@ mod tests {
     #[test]
     fn slash_activates_palette() {
         let mut state = InputState::new();
-        handle_key(make_key(KeyCode::Char('/')), &mut state, &[], 10, 80);
+        handle_key(make_key(KeyCode::Char('/')), &mut state, &[], &[], 10, 80);
         assert!(state.palette.active);
     }
 
@@ -740,7 +780,7 @@ mod tests {
     fn esc_deactivates_palette() {
         let mut state = InputState::new();
         state.palette.activate();
-        handle_key(make_key(KeyCode::Esc), &mut state, &[], 10, 80);
+        handle_key(make_key(KeyCode::Esc), &mut state, &[], &[], 10, 80);
         assert!(!state.palette.active);
     }
 
@@ -748,7 +788,14 @@ mod tests {
     fn at_char_activates_mention_picker_when_users_present() {
         let mut state = InputState::new();
         let users = vec!["alice".to_owned(), "bob".to_owned()];
-        handle_key(make_key(KeyCode::Char('@')), &mut state, &users, 10, 80);
+        handle_key(
+            make_key(KeyCode::Char('@')),
+            &mut state,
+            &users,
+            &[],
+            10,
+            80,
+        );
         assert!(state.mention.active);
     }
 
@@ -757,7 +804,7 @@ mod tests {
         let mut state = InputState::new();
         state.input = "hello world".to_owned();
         state.cursor_pos = 11;
-        let action = handle_key(make_key(KeyCode::Enter), &mut state, &[], 10, 80);
+        let action = handle_key(make_key(KeyCode::Enter), &mut state, &[], &[], 10, 80);
         if let Some(Action::Send(payload)) = action {
             let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
             assert_eq!(v["type"], "message");
@@ -778,6 +825,7 @@ mod tests {
             make_key_mod(KeyCode::Left, KeyModifiers::ALT),
             &mut state,
             &[],
+            &[],
             10,
             80,
         );
@@ -792,6 +840,7 @@ mod tests {
         handle_key(
             make_key_mod(KeyCode::Right, KeyModifiers::ALT),
             &mut state,
+            &[],
             &[],
             10,
             80,
@@ -808,6 +857,7 @@ mod tests {
             make_key_mod(KeyCode::Char('b'), KeyModifiers::ALT),
             &mut state,
             &[],
+            &[],
             10,
             80,
         );
@@ -823,6 +873,7 @@ mod tests {
             make_key_mod(KeyCode::Char('f'), KeyModifiers::ALT),
             &mut state,
             &[],
+            &[],
             10,
             80,
         );
@@ -836,7 +887,7 @@ mod tests {
         let mut state = InputState::new();
         state.input = "some text here".to_owned();
         state.cursor_pos = 14;
-        handle_key(make_key(KeyCode::Esc), &mut state, &[], 10, 80);
+        handle_key(make_key(KeyCode::Esc), &mut state, &[], &[], 10, 80);
         assert!(state.input.is_empty());
         assert_eq!(state.cursor_pos, 0);
         assert_eq!(state.input_row_scroll, 0);
@@ -845,7 +896,7 @@ mod tests {
     #[test]
     fn esc_on_empty_input_is_noop() {
         let mut state = InputState::new();
-        handle_key(make_key(KeyCode::Esc), &mut state, &[], 10, 80);
+        handle_key(make_key(KeyCode::Esc), &mut state, &[], &[], 10, 80);
         assert!(state.input.is_empty());
         assert_eq!(state.cursor_pos, 0);
     }
@@ -856,12 +907,12 @@ mod tests {
         state.input = "/he".to_owned();
         state.cursor_pos = 3;
         state.palette.activate();
-        handle_key(make_key(KeyCode::Esc), &mut state, &[], 10, 80);
+        handle_key(make_key(KeyCode::Esc), &mut state, &[], &[], 10, 80);
         // First Esc dismisses palette, input stays
         assert!(!state.palette.active);
         assert_eq!(state.input, "/he");
         // Second Esc clears input
-        handle_key(make_key(KeyCode::Esc), &mut state, &[], 10, 80);
+        handle_key(make_key(KeyCode::Esc), &mut state, &[], &[], 10, 80);
         assert!(state.input.is_empty());
     }
 
@@ -871,13 +922,13 @@ mod tests {
         state.input = "@al".to_owned();
         state.cursor_pos = 3;
         let users = vec!["alice".to_owned()];
-        state.mention.activate(0, &users, "al");
-        handle_key(make_key(KeyCode::Esc), &mut state, &users, 10, 80);
+        state.mention.activate(0, &users, &[], "al");
+        handle_key(make_key(KeyCode::Esc), &mut state, &users, &[], 10, 80);
         // First Esc dismisses mention picker
         assert!(!state.mention.active);
         assert_eq!(state.input, "@al");
         // Second Esc clears input
-        handle_key(make_key(KeyCode::Esc), &mut state, &users, 10, 80);
+        handle_key(make_key(KeyCode::Esc), &mut state, &users, &[], 10, 80);
         assert!(state.input.is_empty());
     }
 
@@ -891,6 +942,7 @@ mod tests {
         handle_key(
             make_key_mod(KeyCode::Backspace, KeyModifiers::ALT),
             &mut state,
+            &[],
             &[],
             10,
             80,
@@ -908,6 +960,7 @@ mod tests {
             make_key_mod(KeyCode::Backspace, KeyModifiers::ALT),
             &mut state,
             &[],
+            &[],
             10,
             80,
         );
@@ -923,6 +976,7 @@ mod tests {
         handle_key(
             make_key_mod(KeyCode::Backspace, KeyModifiers::ALT),
             &mut state,
+            &[],
             &[],
             10,
             80,
@@ -940,6 +994,7 @@ mod tests {
             make_key_mod(KeyCode::Backspace, KeyModifiers::ALT),
             &mut state,
             &[],
+            &[],
             10,
             80,
         );
@@ -956,6 +1011,7 @@ mod tests {
             make_key_mod(KeyCode::Backspace, KeyModifiers::ALT),
             &mut state,
             &[],
+            &[],
             10,
             80,
         );
@@ -971,6 +1027,7 @@ mod tests {
         handle_key(
             make_key_mod(KeyCode::Backspace, KeyModifiers::ALT),
             &mut state,
+            &[],
             &[],
             10,
             80,
@@ -990,6 +1047,7 @@ mod tests {
             make_key_mod(KeyCode::Backspace, KeyModifiers::ALT),
             &mut state,
             &[],
+            &[],
             10,
             80,
         );
@@ -1005,10 +1063,17 @@ mod tests {
         let mut state = InputState::new();
         let users = vec!["alice".to_owned()];
         // Type "@" to activate mention picker.
-        handle_key(make_key(KeyCode::Char('@')), &mut state, &users, 10, 80);
+        handle_key(
+            make_key(KeyCode::Char('@')),
+            &mut state,
+            &users,
+            &[],
+            10,
+            80,
+        );
         assert!(state.mention.active);
         // Move cursor left — now before the '@', picker should deactivate.
-        handle_key(make_key(KeyCode::Left), &mut state, &users, 10, 80);
+        handle_key(make_key(KeyCode::Left), &mut state, &users, &[], 10, 80);
         assert!(!state.mention.active);
     }
 
@@ -1018,11 +1083,11 @@ mod tests {
         let users = vec!["alice".to_owned()];
         // Type "hi @" to activate mention picker.
         for c in "hi @".chars() {
-            handle_key(make_key(KeyCode::Char(c)), &mut state, &users, 10, 80);
+            handle_key(make_key(KeyCode::Char(c)), &mut state, &users, &[], 10, 80);
         }
         assert!(state.mention.active);
         // Home moves cursor to 0 — well before the '@'.
-        handle_key(make_key(KeyCode::Home), &mut state, &users, 10, 80);
+        handle_key(make_key(KeyCode::Home), &mut state, &users, &[], 10, 80);
         assert!(!state.mention.active);
     }
 
@@ -1032,13 +1097,13 @@ mod tests {
         let users = vec!["alice".to_owned(), "bob".to_owned()];
         // Type "@ali" — picker active, filtered to alice.
         for c in "@ali".chars() {
-            handle_key(make_key(KeyCode::Char(c)), &mut state, &users, 10, 80);
+            handle_key(make_key(KeyCode::Char(c)), &mut state, &users, &[], 10, 80);
         }
         assert!(state.mention.active);
         assert_eq!(state.mention.filtered.len(), 1);
         // Move cursor left twice (to "@a|li" — cursor between 'a' and 'l').
-        handle_key(make_key(KeyCode::Left), &mut state, &users, 10, 80);
-        handle_key(make_key(KeyCode::Left), &mut state, &users, 10, 80);
+        handle_key(make_key(KeyCode::Left), &mut state, &users, &[], 10, 80);
+        handle_key(make_key(KeyCode::Left), &mut state, &users, &[], 10, 80);
         // Now filter query is "a" — both alice matches, bob doesn't.
         assert!(state.mention.active);
         assert_eq!(state.mention.filtered.len(), 1);
@@ -1051,12 +1116,12 @@ mod tests {
         let users = vec!["alice".to_owned()];
         // Type "@alice test" — picker deactivates when space is typed after @alice.
         for c in "@alice ".chars() {
-            handle_key(make_key(KeyCode::Char(c)), &mut state, &users, 10, 80);
+            handle_key(make_key(KeyCode::Char(c)), &mut state, &users, &[], 10, 80);
         }
         assert!(!state.mention.active);
         // Re-type "@b" to activate again.
         for c in "@b".chars() {
-            handle_key(make_key(KeyCode::Char(c)), &mut state, &users, 10, 80);
+            handle_key(make_key(KeyCode::Char(c)), &mut state, &users, &[], 10, 80);
         }
         // No user matches "b" so picker should be inactive.
         assert!(!state.mention.active);
@@ -1068,13 +1133,13 @@ mod tests {
         let users = vec!["alice".to_owned()];
         // Type "@al" — picker active.
         for c in "@al".chars() {
-            handle_key(make_key(KeyCode::Char(c)), &mut state, &users, 10, 80);
+            handle_key(make_key(KeyCode::Char(c)), &mut state, &users, &[], 10, 80);
         }
         assert!(state.mention.active);
         // Move left to "@a|l" then right back to "@al|".
-        handle_key(make_key(KeyCode::Left), &mut state, &users, 10, 80);
+        handle_key(make_key(KeyCode::Left), &mut state, &users, &[], 10, 80);
         assert!(state.mention.active);
-        handle_key(make_key(KeyCode::Right), &mut state, &users, 10, 80);
+        handle_key(make_key(KeyCode::Right), &mut state, &users, &[], 10, 80);
         assert!(state.mention.active);
     }
 
@@ -1084,7 +1149,7 @@ mod tests {
         let users = vec!["alice".to_owned()];
         // Type "hi @al" — picker active.
         for c in "hi @al".chars() {
-            handle_key(make_key(KeyCode::Char(c)), &mut state, &users, 10, 80);
+            handle_key(make_key(KeyCode::Char(c)), &mut state, &users, &[], 10, 80);
         }
         assert!(state.mention.active);
         // Alt+Left jumps to word start — past the '@'.
@@ -1092,6 +1157,7 @@ mod tests {
             make_key_mod(KeyCode::Left, KeyModifiers::ALT),
             &mut state,
             &users,
+            &[],
             10,
             80,
         );
@@ -1107,18 +1173,18 @@ mod tests {
         let mut state = InputState::new();
         // Type "/he" — palette activates and filters.
         for c in "/he".chars() {
-            handle_key(make_key(KeyCode::Char(c)), &mut state, &[], 10, 80);
+            handle_key(make_key(KeyCode::Char(c)), &mut state, &[], &[], 10, 80);
         }
         assert!(state.palette.active);
         // Type "zzz" — no matches, palette auto-dismisses.
         for c in "zzz".chars() {
-            handle_key(make_key(KeyCode::Char(c)), &mut state, &[], 10, 80);
+            handle_key(make_key(KeyCode::Char(c)), &mut state, &[], &[], 10, 80);
         }
         assert!(!state.palette.active);
         assert_eq!(state.input, "/hezzz");
         // Backspace 3 times to get back to "/he" — palette should reactivate.
         for _ in 0..3 {
-            handle_key(make_key(KeyCode::Backspace), &mut state, &[], 10, 80);
+            handle_key(make_key(KeyCode::Backspace), &mut state, &[], &[], 10, 80);
         }
         assert_eq!(state.input, "/he");
         assert!(
@@ -1136,11 +1202,11 @@ mod tests {
         let mut state = InputState::new();
         // Type "/zzz" — no matches, palette dismissed.
         for c in "/zzz".chars() {
-            handle_key(make_key(KeyCode::Char(c)), &mut state, &[], 10, 80);
+            handle_key(make_key(KeyCode::Char(c)), &mut state, &[], &[], 10, 80);
         }
         assert!(!state.palette.active);
         // Backspace to "/zz" — still no matches, stays dismissed.
-        handle_key(make_key(KeyCode::Backspace), &mut state, &[], 10, 80);
+        handle_key(make_key(KeyCode::Backspace), &mut state, &[], &[], 10, 80);
         assert!(!state.palette.active);
     }
 
@@ -1148,10 +1214,10 @@ mod tests {
     fn palette_deactivates_when_slash_is_deleted() {
         let mut state = InputState::new();
         // Type "/" — palette activates.
-        handle_key(make_key(KeyCode::Char('/')), &mut state, &[], 10, 80);
+        handle_key(make_key(KeyCode::Char('/')), &mut state, &[], &[], 10, 80);
         assert!(state.palette.active);
         // Backspace removes "/" — palette deactivates.
-        handle_key(make_key(KeyCode::Backspace), &mut state, &[], 10, 80);
+        handle_key(make_key(KeyCode::Backspace), &mut state, &[], &[], 10, 80);
         assert!(state.input.is_empty());
         assert!(!state.palette.active);
     }
@@ -1164,18 +1230,25 @@ mod tests {
         let users = vec!["alice".to_owned()];
         // Type "@ali" — picker activates, "alice" matches.
         for c in "@ali".chars() {
-            handle_key(make_key(KeyCode::Char(c)), &mut state, &users, 10, 80);
+            handle_key(make_key(KeyCode::Char(c)), &mut state, &users, &[], 10, 80);
         }
         assert!(state.mention.active);
         // Type "zzz" — no matches, picker auto-dismisses.
         for c in "zzz".chars() {
-            handle_key(make_key(KeyCode::Char(c)), &mut state, &users, 10, 80);
+            handle_key(make_key(KeyCode::Char(c)), &mut state, &users, &[], 10, 80);
         }
         assert!(!state.mention.active);
         assert_eq!(state.input, "@alizzz");
         // Backspace 3 times to get back to "@ali" — picker should reactivate.
         for _ in 0..3 {
-            handle_key(make_key(KeyCode::Backspace), &mut state, &users, 10, 80);
+            handle_key(
+                make_key(KeyCode::Backspace),
+                &mut state,
+                &users,
+                &[],
+                10,
+                80,
+            );
         }
         assert_eq!(state.input, "@ali");
         assert!(
@@ -1191,11 +1264,18 @@ mod tests {
         let users = vec!["alice".to_owned()];
         // Type "@zzz" — no matches, picker dismissed.
         for c in "@zzz".chars() {
-            handle_key(make_key(KeyCode::Char(c)), &mut state, &users, 10, 80);
+            handle_key(make_key(KeyCode::Char(c)), &mut state, &users, &[], 10, 80);
         }
         assert!(!state.mention.active);
         // Backspace to "@zz" — still no user matches "zz".
-        handle_key(make_key(KeyCode::Backspace), &mut state, &users, 10, 80);
+        handle_key(
+            make_key(KeyCode::Backspace),
+            &mut state,
+            &users,
+            &[],
+            10,
+            80,
+        );
         assert!(!state.mention.active);
     }
 
@@ -1207,11 +1287,11 @@ mod tests {
         let users = vec!["alice".to_owned(), "bob".to_owned()];
         // Type "/dm" to activate and filter palette
         for c in "/dm".chars() {
-            handle_key(make_key(KeyCode::Char(c)), &mut state, &users, 10, 80);
+            handle_key(make_key(KeyCode::Char(c)), &mut state, &users, &[], 10, 80);
         }
         assert!(state.palette.active);
         // Tab to complete — should set input to "/dm " and activate mention picker
-        handle_key(make_key(KeyCode::Tab), &mut state, &users, 10, 80);
+        handle_key(make_key(KeyCode::Tab), &mut state, &users, &[], 10, 80);
         assert_eq!(state.input, "/dm ");
         assert!(!state.palette.active, "palette should deactivate");
         assert!(
@@ -1225,10 +1305,10 @@ mod tests {
         let mut state = InputState::new();
         let users = vec!["alice".to_owned()];
         for c in "/kick".chars() {
-            handle_key(make_key(KeyCode::Char(c)), &mut state, &users, 10, 80);
+            handle_key(make_key(KeyCode::Char(c)), &mut state, &users, &[], 10, 80);
         }
         assert!(state.palette.active);
-        handle_key(make_key(KeyCode::Tab), &mut state, &users, 10, 80);
+        handle_key(make_key(KeyCode::Tab), &mut state, &users, &[], 10, 80);
         assert_eq!(state.input, "/kick ");
         assert!(state.mention.active);
     }
@@ -1238,10 +1318,10 @@ mod tests {
         let mut state = InputState::new();
         let users: Vec<String> = vec![];
         for c in "/stats".chars() {
-            handle_key(make_key(KeyCode::Char(c)), &mut state, &users, 10, 80);
+            handle_key(make_key(KeyCode::Char(c)), &mut state, &users, &[], 10, 80);
         }
         assert!(state.palette.active);
-        handle_key(make_key(KeyCode::Tab), &mut state, &users, 10, 80);
+        handle_key(make_key(KeyCode::Tab), &mut state, &users, &[], 10, 80);
         // stats has Choice param — should set "/stats " and activate choice picker
         assert_eq!(state.input, "/stats ");
         assert!(!state.palette.active);
@@ -1261,9 +1341,9 @@ mod tests {
         let mut state = InputState::new();
         let users: Vec<String> = vec![];
         for c in "/who".chars() {
-            handle_key(make_key(KeyCode::Char(c)), &mut state, &users, 10, 80);
+            handle_key(make_key(KeyCode::Char(c)), &mut state, &users, &[], 10, 80);
         }
-        handle_key(make_key(KeyCode::Tab), &mut state, &users, 10, 80);
+        handle_key(make_key(KeyCode::Tab), &mut state, &users, &[], 10, 80);
         // who has no params — fills in the full usage string
         assert_eq!(state.input, "/who");
         assert!(!state.palette.active);
@@ -1274,10 +1354,10 @@ mod tests {
         let mut state = InputState::new();
         let users = vec!["alice".to_owned()];
         for c in "/dm".chars() {
-            handle_key(make_key(KeyCode::Char(c)), &mut state, &users, 10, 80);
+            handle_key(make_key(KeyCode::Char(c)), &mut state, &users, &[], 10, 80);
         }
         // Enter also completes palette selection
-        handle_key(make_key(KeyCode::Enter), &mut state, &users, 10, 80);
+        handle_key(make_key(KeyCode::Enter), &mut state, &users, &[], 10, 80);
         assert_eq!(state.input, "/dm ");
         assert!(state.mention.active);
     }
@@ -1291,42 +1371,42 @@ mod tests {
     #[test]
     fn ctrl_n_returns_next_tab_action() {
         let mut state = InputState::new();
-        let action = handle_key(make_ctrl_key('n'), &mut state, &[], 10, 80);
+        let action = handle_key(make_ctrl_key('n'), &mut state, &[], &[], 10, 80);
         assert!(matches!(action, Some(Action::NextTab)));
     }
 
     #[test]
     fn ctrl_p_returns_prev_tab_action() {
         let mut state = InputState::new();
-        let action = handle_key(make_ctrl_key('p'), &mut state, &[], 10, 80);
+        let action = handle_key(make_ctrl_key('p'), &mut state, &[], &[], 10, 80);
         assert!(matches!(action, Some(Action::PrevTab)));
     }
 
     #[test]
     fn ctrl_1_returns_switch_tab_0() {
         let mut state = InputState::new();
-        let action = handle_key(make_ctrl_key('1'), &mut state, &[], 10, 80);
+        let action = handle_key(make_ctrl_key('1'), &mut state, &[], &[], 10, 80);
         assert!(matches!(action, Some(Action::SwitchTab(0))));
     }
 
     #[test]
     fn ctrl_9_returns_switch_tab_8() {
         let mut state = InputState::new();
-        let action = handle_key(make_ctrl_key('9'), &mut state, &[], 10, 80);
+        let action = handle_key(make_ctrl_key('9'), &mut state, &[], &[], 10, 80);
         assert!(matches!(action, Some(Action::SwitchTab(8))));
     }
 
     #[test]
     fn ctrl_5_returns_switch_tab_4() {
         let mut state = InputState::new();
-        let action = handle_key(make_ctrl_key('5'), &mut state, &[], 10, 80);
+        let action = handle_key(make_ctrl_key('5'), &mut state, &[], &[], 10, 80);
         assert!(matches!(action, Some(Action::SwitchTab(4))));
     }
 
     #[test]
     fn ctrl_c_still_quits() {
         let mut state = InputState::new();
-        let action = handle_key(make_ctrl_key('c'), &mut state, &[], 10, 80);
+        let action = handle_key(make_ctrl_key('c'), &mut state, &[], &[], 10, 80);
         assert!(matches!(action, Some(Action::Quit)));
     }
 
@@ -1337,9 +1417,9 @@ mod tests {
         let mut state = InputState::new();
         let users: Vec<String> = vec![];
         for c in cmd.chars() {
-            handle_key(make_key(KeyCode::Char(c)), &mut state, &users, 10, 80);
+            handle_key(make_key(KeyCode::Char(c)), &mut state, &users, &[], 10, 80);
         }
-        handle_key(make_key(KeyCode::Tab), &mut state, &users, 10, 80);
+        handle_key(make_key(KeyCode::Tab), &mut state, &users, &[], 10, 80);
         state
     }
 
@@ -1357,7 +1437,7 @@ mod tests {
         let mut state = activate_choice_picker("/subscribe");
         assert!(state.choice.active);
         // Default selection is first item
-        handle_key(make_key(KeyCode::Tab), &mut state, &[], 10, 80);
+        handle_key(make_key(KeyCode::Tab), &mut state, &[], &[], 10, 80);
         assert!(!state.choice.active);
         // Input should contain the selected value
         assert!(
@@ -1374,7 +1454,7 @@ mod tests {
     fn choice_picker_enter_completes_selection() {
         let mut state = activate_choice_picker("/subscribe");
         assert!(state.choice.active);
-        handle_key(make_key(KeyCode::Enter), &mut state, &[], 10, 80);
+        handle_key(make_key(KeyCode::Enter), &mut state, &[], &[], 10, 80);
         assert!(!state.choice.active);
         assert!(state.input.starts_with("/subscribe "));
     }
@@ -1384,9 +1464,9 @@ mod tests {
         let mut state = activate_choice_picker("/subscribe");
         assert!(state.choice.active);
         assert_eq!(state.choice.selected, 0);
-        handle_key(make_key(KeyCode::Down), &mut state, &[], 10, 80);
+        handle_key(make_key(KeyCode::Down), &mut state, &[], &[], 10, 80);
         assert_eq!(state.choice.selected, 1);
-        handle_key(make_key(KeyCode::Up), &mut state, &[], 10, 80);
+        handle_key(make_key(KeyCode::Up), &mut state, &[], &[], 10, 80);
         assert_eq!(state.choice.selected, 0);
     }
 
@@ -1394,7 +1474,7 @@ mod tests {
     fn choice_picker_esc_dismisses() {
         let mut state = activate_choice_picker("/subscribe");
         assert!(state.choice.active);
-        handle_key(make_key(KeyCode::Esc), &mut state, &[], 10, 80);
+        handle_key(make_key(KeyCode::Esc), &mut state, &[], &[], 10, 80);
         assert!(!state.choice.active);
     }
 
@@ -1404,7 +1484,7 @@ mod tests {
         assert!(state.choice.active);
         let initial_count = state.choice.filtered.len();
         // Type 'f' to filter to "full"
-        handle_key(make_key(KeyCode::Char('f')), &mut state, &[], 10, 80);
+        handle_key(make_key(KeyCode::Char('f')), &mut state, &[], &[], 10, 80);
         assert!(state.choice.active);
         assert!(state.choice.filtered.len() < initial_count);
         assert!(state.choice.filtered.contains(&"full".to_owned()));
@@ -1415,7 +1495,7 @@ mod tests {
         let mut state = activate_choice_picker("/subscribe");
         assert!(state.choice.active);
         for c in "zzz".chars() {
-            handle_key(make_key(KeyCode::Char(c)), &mut state, &[], 10, 80);
+            handle_key(make_key(KeyCode::Char(c)), &mut state, &[], &[], 10, 80);
         }
         assert!(
             !state.choice.active,
@@ -1428,10 +1508,10 @@ mod tests {
         let mut state = activate_choice_picker("/subscribe");
         assert!(state.choice.active);
         // Type 'f' to filter
-        handle_key(make_key(KeyCode::Char('f')), &mut state, &[], 10, 80);
+        handle_key(make_key(KeyCode::Char('f')), &mut state, &[], &[], 10, 80);
         let filtered_count = state.choice.filtered.len();
         // Backspace restores full list
-        handle_key(make_key(KeyCode::Backspace), &mut state, &[], 10, 80);
+        handle_key(make_key(KeyCode::Backspace), &mut state, &[], &[], 10, 80);
         assert!(state.choice.active);
         assert!(state.choice.filtered.len() >= filtered_count);
     }
@@ -1441,7 +1521,7 @@ mod tests {
         let mut state = activate_choice_picker("/subscribe");
         assert!(state.choice.active);
         // Backspace into the command prefix should deactivate
-        handle_key(make_key(KeyCode::Backspace), &mut state, &[], 10, 80);
+        handle_key(make_key(KeyCode::Backspace), &mut state, &[], &[], 10, 80);
         assert!(
             !state.choice.active,
             "choice picker should deactivate when cursor moves before value_start"
@@ -1462,9 +1542,9 @@ mod tests {
         let mut state = InputState::new();
         let users = vec!["alice".to_owned()];
         for c in "/dm".chars() {
-            handle_key(make_key(KeyCode::Char(c)), &mut state, &users, 10, 80);
+            handle_key(make_key(KeyCode::Char(c)), &mut state, &users, &[], 10, 80);
         }
-        handle_key(make_key(KeyCode::Tab), &mut state, &users, 10, 80);
+        handle_key(make_key(KeyCode::Tab), &mut state, &users, &[], 10, 80);
         // dm has Username param, not Choice — mention picker activates, not choice
         assert!(
             !state.choice.active,
@@ -1487,6 +1567,7 @@ mod tests {
             make_key_mod(KeyCode::Char('d'), KeyModifiers::CONTROL),
             &mut state,
             &[],
+            &[],
             10,
             80,
         );
@@ -1502,6 +1583,7 @@ mod tests {
             make_key_mod(KeyCode::Char('n'), KeyModifiers::CONTROL),
             &mut state,
             &[],
+            &[],
             10,
             80,
         );
@@ -1514,6 +1596,7 @@ mod tests {
         let action = handle_key(
             make_key_mod(KeyCode::Char('p'), KeyModifiers::CONTROL),
             &mut state,
+            &[],
             &[],
             10,
             80,
@@ -1528,6 +1611,7 @@ mod tests {
             make_key_mod(KeyCode::Char('1'), KeyModifiers::CONTROL),
             &mut state,
             &[],
+            &[],
             10,
             80,
         );
@@ -1541,6 +1625,7 @@ mod tests {
             make_key_mod(KeyCode::Char('9'), KeyModifiers::CONTROL),
             &mut state,
             &[],
+            &[],
             10,
             80,
         );
@@ -1553,7 +1638,7 @@ mod tests {
     fn page_up_increases_scroll_offset() {
         let mut state = InputState::new();
         state.scroll_offset = 0;
-        handle_key(make_key(KeyCode::PageUp), &mut state, &[], 10, 80);
+        handle_key(make_key(KeyCode::PageUp), &mut state, &[], &[], 10, 80);
         assert_eq!(state.scroll_offset, 10, "PageUp should add visible_count");
     }
 
@@ -1561,7 +1646,7 @@ mod tests {
     fn page_down_decreases_scroll_offset() {
         let mut state = InputState::new();
         state.scroll_offset = 15;
-        handle_key(make_key(KeyCode::PageDown), &mut state, &[], 10, 80);
+        handle_key(make_key(KeyCode::PageDown), &mut state, &[], &[], 10, 80);
         assert_eq!(
             state.scroll_offset, 5,
             "PageDown should subtract visible_count"
@@ -1572,7 +1657,7 @@ mod tests {
     fn page_down_saturates_at_zero() {
         let mut state = InputState::new();
         state.scroll_offset = 3;
-        handle_key(make_key(KeyCode::PageDown), &mut state, &[], 10, 80);
+        handle_key(make_key(KeyCode::PageDown), &mut state, &[], &[], 10, 80);
         assert_eq!(state.scroll_offset, 0, "PageDown should not go below 0");
     }
 }

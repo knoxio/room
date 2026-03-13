@@ -54,6 +54,12 @@ pub fn builtin_command_infos() -> Vec<CommandInfo> {
             params: vec![],
         },
         CommandInfo {
+            name: "who_all".to_owned(),
+            description: "List all daemon users (cross-room)".to_owned(),
+            usage: "/who_all".to_owned(),
+            params: vec![],
+        },
+        CommandInfo {
             name: "kick".to_owned(),
             description: "Kick a user from the room".to_owned(),
             usage: "/kick <user>".to_owned(),
@@ -220,6 +226,7 @@ mod tests {
             "dm",
             "reply",
             "who",
+            "who_all",
             "help",
             "info",
             "kick",

@@ -321,15 +321,24 @@ pub(super) fn draw_frame(f: &mut Frame, ctx: &DrawContext<'_>) {
             .iter()
             .enumerate()
             .map(|(row, user)| {
-                let style = if row == ctx.input_state.mention.selected {
+                let is_cross = ctx.input_state.mention.is_cross_room(row);
+                let is_selected = row == ctx.input_state.mention.selected;
+                let style = if is_selected {
                     Style::default()
                         .fg(Color::Black)
                         .bg(user_color(user, ctx.color_map))
                         .add_modifier(Modifier::BOLD)
+                } else if is_cross {
+                    Style::default().fg(Color::DarkGray)
                 } else {
                     Style::default().fg(user_color(user, ctx.color_map))
                 };
-                ListItem::new(Line::from(Span::styled(format!("@{user}"), style)))
+                let label = if is_cross && !is_selected {
+                    format!("@{user} \u{2022}")
+                } else {
+                    format!("@{user}")
+                };
+                ListItem::new(Line::from(Span::styled(label, style)))
             })
             .collect();
 

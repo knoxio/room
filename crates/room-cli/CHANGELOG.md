@@ -12,6 +12,9 @@ For changes prior to the workspace restructure (v0.1.2 through v1.0.2), see the
 
 ### Added
 
+- Cross-room `@mention` autocomplete: TUI MentionPicker now shows all daemon-registered
+  users (dimmed with bullet suffix) below in-room users. New `/who_all` broker command
+  and `GET /api/users` REST endpoint provide the cross-room user list. (#515)
 - 16 unit tests for `broker/ws/rest.rs` error paths: `extract_bearer_token` (4 tests),
   `build_query_filter` (3 tests), `apply_query_filter` (3 tests),
   `dispatch_to_response` (3 tests), `require_auth` (3 tests). (#575)

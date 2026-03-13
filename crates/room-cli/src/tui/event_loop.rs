@@ -25,6 +25,7 @@ use super::input::{
     build_payload, cursor_display_pos, handle_key, normalize_paste, wrap_input_display, Action,
     InputState,
 };
+use super::parse::parse_users_all_broadcast;
 use super::render::{format_message, ColorMap, TabInfo};
 use super::{DrainResult, RoomTab, MAX_INPUT_LINES};
 use crate::message::Message;
@@ -112,6 +113,7 @@ pub async fn run(
     let mut active_tab: usize = 0;
     let mut color_map = ColorMap::new();
     let mut input_state = InputState::new();
+    let mut daemon_users: Vec<String> = Vec::new();
     let mut result: anyhow::Result<()> = Ok(());
     let mut frame_count: usize = 0;
 
@@ -133,6 +135,13 @@ pub async fn run(
         .write_all(format!("{who_payload}\n").as_bytes())
         .await?;
 
+    // Seed daemon_users for cross-room @mention autocomplete.
+    let who_all_payload = build_payload("/who_all");
+    tabs[active_tab]
+        .write_half
+        .write_all(format!("{who_all_payload}\n").as_bytes())
+        .await?;
+
     'main: loop {
         // Sync scroll_offset: handle_key modifies input_state.scroll_offset,
         // but rendering reads from tabs[active_tab].scroll_offset.
@@ -147,6 +156,18 @@ pub async fn run(
             ) && is_active
             {
                 break 'main;
+            }
+        }
+
+        // Check for users_all: response from /who_all to populate cross-room users.
+        for msg in tabs[active_tab].messages.iter().rev().take(5) {
+            if let Message::System { user, content, .. } = msg {
+                if user == "broker" {
+                    if let Some(users) = parse_users_all_broadcast(content) {
+                        daemon_users = users;
+                        break;
+                    }
+                }
             }
         }
 
@@ -273,6 +294,7 @@ pub async fn run(
                         key,
                         &mut input_state,
                         online_users,
+                        &daemon_users,
                         msg_area_height,
                         input_content_width,
                     ) {

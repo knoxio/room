@@ -66,6 +66,7 @@ pub(crate) async fn route_command(
 
         match cmd.as_str() {
             "who" => return handle_who(state).await,
+            "who_all" => return handle_who_all(state).await,
             "set_status" => return handle_set_status(params, username, state).await,
             "subscribe" | "set_subscription" => {
                 return handle_subscribe(params, username, state).await
@@ -126,6 +127,36 @@ async fn handle_who(state: &RoomState) -> anyhow::Result<CommandResult> {
     } else {
         format!("online — {}", entries.join(", "))
     };
+    let sys = make_system(&state.room_id, "broker", content);
+    let json = serde_json::to_string(&sys)?;
+    Ok(CommandResult::Reply(json))
+}
+
+/// Handle `/who_all` — list all daemon-registered users (cross-room).
+///
+/// In daemon mode, queries the [`UserRegistry`] for every registered username.
+/// In standalone mode, falls back to the same output as `/who`.
+async fn handle_who_all(state: &RoomState) -> anyhow::Result<CommandResult> {
+    let usernames: Vec<String> = if let Some(registry) = state.auth.registry.get() {
+        let guard = registry.lock().await;
+        let mut names: Vec<String> = guard
+            .list_users()
+            .iter()
+            .map(|u| u.username.clone())
+            .collect();
+        names.sort();
+        names
+    } else {
+        // Standalone mode — fall back to current room users.
+        state
+            .status_entries()
+            .await
+            .into_iter()
+            .map(|(u, _)| u)
+            .collect()
+    };
+    let json_array = serde_json::to_string(&usernames)?;
+    let content = format!("users_all: {json_array}");
     let sys = make_system(&state.room_id, "broker", content);
     let json = serde_json::to_string(&sys)?;
     Ok(CommandResult::Reply(json))
@@ -2126,5 +2157,57 @@ mod tests {
         // Should be from "broker", not "plugin:help"
         assert!(json.contains("\"user\":\"broker\""));
         assert!(!json.contains("plugin:help"));
+    }
+
+    // ── who_all ───────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn who_all_standalone_falls_back_to_room_users() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+        // Add a user to the status map so /who_all has something to return.
+        state
+            .status_map
+            .lock()
+            .await
+            .insert("alice".to_owned(), "coding".to_owned());
+        let msg = make_command("test-room", "alice", "who_all", vec![]);
+        let result = route_command(msg, "alice", &state).await.unwrap();
+        let CommandResult::Reply(json) = result else {
+            panic!("expected Reply");
+        };
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let content = v["content"].as_str().unwrap();
+        assert!(content.starts_with("users_all: "));
+        let users_json = content.strip_prefix("users_all: ").unwrap();
+        let users: Vec<String> = serde_json::from_str(users_json).unwrap();
+        assert!(users.contains(&"alice".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn who_all_with_registry_returns_all_registered_users() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+
+        // Create a UserRegistry with multiple users.
+        let reg_tmp = NamedTempFile::new().unwrap();
+        let mut registry =
+            crate::registry::UserRegistry::new(reg_tmp.path().to_path_buf()).unwrap();
+        registry.register_user("alice").unwrap();
+        registry.register_user("bob").unwrap();
+        registry.register_user("charlie").unwrap();
+        let arc_reg = Arc::new(tokio::sync::Mutex::new(registry));
+        state.set_registry(arc_reg);
+
+        let msg = make_command("test-room", "alice", "who_all", vec![]);
+        let result = route_command(msg, "alice", &state).await.unwrap();
+        let CommandResult::Reply(json) = result else {
+            panic!("expected Reply");
+        };
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let content = v["content"].as_str().unwrap();
+        let users_json = content.strip_prefix("users_all: ").unwrap();
+        let users: Vec<String> = serde_json::from_str(users_json).unwrap();
+        assert_eq!(users, ["alice", "bob", "charlie"]);
     }
 }

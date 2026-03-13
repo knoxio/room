@@ -518,6 +518,19 @@ pub(super) async fn daemon_api_rooms(State(state): State<DaemonWsState>) -> impl
     }))
 }
 
+pub(super) async fn daemon_api_users(State(state): State<DaemonWsState>) -> impl IntoResponse {
+    let guard = state.user_registry.lock().await;
+    let mut names: Vec<String> = guard
+        .list_users()
+        .iter()
+        .map(|u| u.username.clone())
+        .collect();
+    names.sort();
+    Json(serde_json::json!({
+        "users": names,
+    }))
+}
+
 pub(super) async fn daemon_api_create_room(
     State(state): State<DaemonWsState>,
     headers: HeaderMap,

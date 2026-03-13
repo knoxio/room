@@ -389,6 +389,7 @@ pub(crate) fn create_daemon_router(state: DaemonWsState) -> Router {
         .route("/api/{room_id}/query", get(rest::daemon_api_query))
         .route("/api/health", get(rest::daemon_api_health))
         .route("/api/rooms", get(rest::daemon_api_rooms))
+        .route("/api/users", get(rest::daemon_api_users))
         .route("/api/rooms", post(rest::daemon_api_create_room))
         .with_state(state)
 }
