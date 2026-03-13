@@ -14,6 +14,11 @@ For changes prior to the workspace restructure (v0.1.2 through v1.0.2), see the
 
 - Integration tests: REST/WS global daemon token fallback and kicked user WS reconnection rejection. (#490, #492)
 
+### Fixed
+
+- TUI: ellipsize long status text in member panel with `…` instead of
+  silently clipping at the border. (#497)
+
 ## [3.0.1] - 2026-03-12
 
 ### Added
