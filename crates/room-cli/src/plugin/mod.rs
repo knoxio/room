@@ -432,4 +432,125 @@ mod tests {
         // It won't show up in resolve() since it has no commands
         assert_eq!(reg.all_commands().len(), 0);
     }
+
+    // ── Edge-case tests (#577) ───────────────────────────────────────────
+
+    #[test]
+    fn failed_register_does_not_pollute_registry() {
+        let mut reg = PluginRegistry::new();
+        reg.register(Box::new(DummyPlugin {
+            name: "good",
+            cmd: "foo",
+        }))
+        .unwrap();
+
+        // Attempt to register a plugin with a reserved command name — must fail.
+        let result = reg.register(Box::new(DummyPlugin {
+            name: "bad",
+            cmd: "kick",
+        }));
+        assert!(result.is_err());
+
+        // Original registration must be intact.
+        assert!(
+            reg.resolve("foo").is_some(),
+            "pre-existing command must still resolve"
+        );
+        assert_eq!(reg.all_commands().len(), 1, "command count must not change");
+        // The failed plugin must not appear in any form.
+        assert!(
+            reg.resolve("kick").is_none(),
+            "failed command must not be resolvable"
+        );
+    }
+
+    #[test]
+    fn all_builtin_schemas_have_valid_fields() {
+        let cmds = super::schema::builtin_command_infos();
+        assert!(!cmds.is_empty(), "builtins must not be empty");
+        for cmd in &cmds {
+            assert!(!cmd.name.is_empty(), "name must not be empty");
+            assert!(
+                !cmd.description.is_empty(),
+                "description must not be empty for /{}",
+                cmd.name
+            );
+            assert!(
+                !cmd.usage.is_empty(),
+                "usage must not be empty for /{}",
+                cmd.name
+            );
+            for param in &cmd.params {
+                assert!(
+                    !param.name.is_empty(),
+                    "param name must not be empty in /{}",
+                    cmd.name
+                );
+                assert!(
+                    !param.description.is_empty(),
+                    "param description must not be empty in /{} param '{}'",
+                    cmd.name,
+                    param.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn duplicate_plugin_names_with_different_commands_succeed() {
+        let mut reg = PluginRegistry::new();
+        reg.register(Box::new(DummyPlugin {
+            name: "same-name",
+            cmd: "alpha",
+        }))
+        .unwrap();
+        // Same plugin name, different command — only command uniqueness is enforced.
+        reg.register(Box::new(DummyPlugin {
+            name: "same-name",
+            cmd: "beta",
+        }))
+        .unwrap();
+        assert!(reg.resolve("alpha").is_some());
+        assert!(reg.resolve("beta").is_some());
+        assert_eq!(reg.all_commands().len(), 2);
+    }
+
+    #[test]
+    fn completions_for_number_param_returns_empty() {
+        let mut reg = PluginRegistry::new();
+        reg.register(Box::new({
+            struct NumPlugin;
+            impl Plugin for NumPlugin {
+                fn name(&self) -> &str {
+                    "num"
+                }
+                fn commands(&self) -> Vec<CommandInfo> {
+                    vec![CommandInfo {
+                        name: "repeat".to_owned(),
+                        description: "repeat".to_owned(),
+                        usage: "/repeat".to_owned(),
+                        params: vec![ParamSchema {
+                            name: "count".to_owned(),
+                            param_type: ParamType::Number {
+                                min: Some(1),
+                                max: Some(100),
+                            },
+                            required: true,
+                            description: "Number of repetitions".to_owned(),
+                        }],
+                    }]
+                }
+                fn handle(
+                    &self,
+                    _ctx: CommandContext,
+                ) -> BoxFuture<'_, anyhow::Result<PluginResult>> {
+                    Box::pin(async { Ok(PluginResult::Handled) })
+                }
+            }
+            NumPlugin
+        }))
+        .unwrap();
+        // Number params must not produce completions — only Choice does.
+        assert!(reg.completions_for("repeat", 0).is_empty());
+    }
 }

@@ -21,6 +21,8 @@ For changes prior to the workspace restructure (v0.1.2 through v1.0.2), see the
 - 3 daemon multi-room isolation integration tests: global token survives sibling
   room destruction, destroy with active connection closes cleanly without affecting
   other rooms, dynamically created rooms are fully functional and isolated. (#578)
+- 4 plugin registration edge-case tests: failed register atomicity, builtin schema
+  validation, duplicate plugin names, Number param completions. (#577)
 
 ### Changed
 

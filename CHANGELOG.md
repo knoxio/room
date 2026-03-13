@@ -32,6 +32,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   join denial, and oneshot-send empty body edge case. (#574)
 - **test:** Added 6 edge-case unit tests for `broker/mod.rs` `read_line_limited` (exact-limit
   no-newline, over-limit no-newline, buffer append, null bytes, CRLF, boundary newline). (#573)
+- **test:** Added 4 plugin registration edge-case tests (`failed_register_does_not_pollute_registry`, `all_builtin_schemas_have_valid_fields`, `duplicate_plugin_names_with_different_commands_succeed`, `completions_for_number_param_returns_empty`). (#577)
 
 ### Changed
 
