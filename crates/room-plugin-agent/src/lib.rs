@@ -14,6 +14,19 @@ use room_protocol::plugin::{
 /// Grace period in seconds before sending SIGKILL after SIGTERM.
 const STOP_GRACE_PERIOD_SECS: u64 = 5;
 
+/// Built-in personality names for `/spawn` autocomplete.
+///
+/// These must match the compiled-in personalities in `room-ralph/src/personalities.rs`.
+/// The list is duplicated here because `room-plugin-agent` must not depend on
+/// `room-ralph` (the plugin runs inside the broker; ralph is a client).
+const PERSONALITY_NAMES: &[&str] = &[
+    "coder",
+    "reviewer",
+    "researcher",
+    "coordinator",
+    "documenter",
+];
+
 /// A spawned agent process tracked by the plugin.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpawnedAgent {
@@ -73,29 +86,52 @@ impl AgentPlugin {
     /// Returns the command info for the TUI command palette without needing
     /// an instantiated plugin. Used by `all_known_commands()`.
     pub fn default_commands() -> Vec<CommandInfo> {
-        vec![CommandInfo {
-            name: "agent".to_owned(),
-            description: "Spawn, list, or stop ralph agents".to_owned(),
-            usage: "/agent <action> [args...]".to_owned(),
-            params: vec![
-                ParamSchema {
-                    name: "action".to_owned(),
-                    param_type: ParamType::Choice(vec![
-                        "spawn".to_owned(),
-                        "list".to_owned(),
-                        "stop".to_owned(),
-                    ]),
-                    required: true,
-                    description: "Subcommand".to_owned(),
-                },
-                ParamSchema {
-                    name: "args".to_owned(),
-                    param_type: ParamType::Text,
-                    required: false,
-                    description: "Arguments for the subcommand".to_owned(),
-                },
-            ],
-        }]
+        vec![
+            CommandInfo {
+                name: "agent".to_owned(),
+                description: "Spawn, list, or stop ralph agents".to_owned(),
+                usage: "/agent <action> [args...]".to_owned(),
+                params: vec![
+                    ParamSchema {
+                        name: "action".to_owned(),
+                        param_type: ParamType::Choice(vec![
+                            "spawn".to_owned(),
+                            "list".to_owned(),
+                            "stop".to_owned(),
+                        ]),
+                        required: true,
+                        description: "Subcommand".to_owned(),
+                    },
+                    ParamSchema {
+                        name: "args".to_owned(),
+                        param_type: ParamType::Text,
+                        required: false,
+                        description: "Arguments for the subcommand".to_owned(),
+                    },
+                ],
+            },
+            CommandInfo {
+                name: "spawn".to_owned(),
+                description: "Spawn an agent by personality name".to_owned(),
+                usage: "/spawn <personality> [--name <username>]".to_owned(),
+                params: vec![
+                    ParamSchema {
+                        name: "personality".to_owned(),
+                        param_type: ParamType::Choice(
+                            PERSONALITY_NAMES.iter().map(|s| (*s).to_owned()).collect(),
+                        ),
+                        required: true,
+                        description: "Personality preset to use".to_owned(),
+                    },
+                    ParamSchema {
+                        name: "name".to_owned(),
+                        param_type: ParamType::Text,
+                        required: false,
+                        description: "Override auto-generated username".to_owned(),
+                    },
+                ],
+            },
+        ]
     }
 
     fn persist(&self) {
@@ -306,6 +342,127 @@ impl AgentPlugin {
         lines.join("\n")
     }
 
+    /// Handle `/spawn <personality> [--name <username>]`.
+    ///
+    /// Expands to the equivalent `/agent spawn` invocation using the
+    /// personality's defaults. The personality name is passed to `room-ralph`
+    /// via `--personality`, which handles prompt/profile/model resolution.
+    fn handle_spawn_personality(&self, ctx: &CommandContext) -> Result<String, String> {
+        let personality = ctx.params.first().ok_or_else(|| {
+            format!(
+                "usage: /spawn <personality> [--name <username>]\navailable: {}",
+                PERSONALITY_NAMES.join(", ")
+            )
+        })?;
+
+        if !PERSONALITY_NAMES.contains(&personality.as_str()) {
+            return Err(format!(
+                "unknown personality '{}'. available: {}",
+                personality,
+                PERSONALITY_NAMES.join(", ")
+            ));
+        }
+
+        // Parse optional --name flag
+        let mut username: Option<String> = None;
+        let mut i = 1;
+        while i < ctx.params.len() {
+            if ctx.params[i] == "--name" {
+                i += 1;
+                if i < ctx.params.len() {
+                    username = Some(ctx.params[i].clone());
+                }
+            }
+            i += 1;
+        }
+
+        // Auto-generate username if not provided: <personality>-<short-id>
+        let username = username.unwrap_or_else(|| {
+            let short_id = &ctx.message_id[..4.min(ctx.message_id.len())];
+            format!("{personality}-{short_id}")
+        });
+
+        if username.is_empty() || username.starts_with('-') {
+            return Err("invalid username".to_owned());
+        }
+
+        // Check for collision with online users
+        if ctx
+            .metadata
+            .online_users
+            .iter()
+            .any(|u| u.username == username)
+        {
+            return Err(format!("username '{username}' is already online"));
+        }
+
+        // Check for collision with already-spawned agents
+        {
+            let agents = self.agents.lock().unwrap();
+            if agents.contains_key(username.as_str()) {
+                return Err(format!(
+                    "agent '{username}' is already running (pid {})",
+                    agents[username.as_str()].pid
+                ));
+            }
+        }
+
+        // Create log directory
+        let _ = fs::create_dir_all(&self.log_dir);
+
+        let ts = Utc::now().format("%Y%m%d-%H%M%S");
+        let log_path = self.log_dir.join(format!("agent-{username}-{ts}.log"));
+
+        let log_file =
+            fs::File::create(&log_path).map_err(|e| format!("failed to create log file: {e}"))?;
+        let stderr_file = log_file
+            .try_clone()
+            .map_err(|e| format!("failed to clone log file handle: {e}"))?;
+
+        // Build the room-ralph command with --personality
+        let mut cmd = Command::new("room-ralph");
+        cmd.arg(&ctx.room_id)
+            .arg(&username)
+            .arg("--socket")
+            .arg(&self.socket_path)
+            .arg("--personality")
+            .arg(personality);
+
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::from(log_file))
+            .stderr(Stdio::from(stderr_file));
+
+        let child = cmd
+            .spawn()
+            .map_err(|e| format!("failed to spawn room-ralph: {e}"))?;
+
+        let pid = child.id();
+
+        let agent = SpawnedAgent {
+            username: username.clone(),
+            pid,
+            model: format!("{personality}/*"),
+            personality: personality.to_owned(),
+            spawned_at: Utc::now(),
+            log_path,
+            room_id: ctx.room_id.clone(),
+        };
+
+        {
+            let mut agents = self.agents.lock().unwrap();
+            agents.insert(username.clone(), agent);
+        }
+        {
+            let mut children = self.children.lock().unwrap();
+            children.insert(username.clone(), child);
+        }
+        self.persist();
+
+        Ok(format!(
+            "agent {username} spawned (pid {pid}, personality: {personality})"
+        ))
+    }
+
     fn handle_stop(&self, ctx: &CommandContext) -> Result<String, String> {
         if ctx.params.len() < 2 {
             return Err("usage: /agent stop <username>".to_owned());
@@ -384,6 +541,15 @@ impl Plugin for AgentPlugin {
 
     fn handle(&self, ctx: CommandContext) -> BoxFuture<'_, anyhow::Result<PluginResult>> {
         Box::pin(async move {
+            // `/spawn <personality>` is dispatched here with command == "spawn".
+            if ctx.command == "spawn" {
+                return match self.handle_spawn_personality(&ctx) {
+                    Ok(msg) => Ok(PluginResult::Broadcast(msg)),
+                    Err(e) => Ok(PluginResult::Reply(e)),
+                };
+            }
+
+            // `/agent <action> [args...]`
             let action = ctx.params.first().map(|s| s.as_str()).unwrap_or("");
 
             match action {
@@ -811,6 +977,100 @@ mod tests {
         );
         let agents = plugin.agents.lock().unwrap();
         assert!(agents.is_empty(), "dead agents should be pruned on load");
+    }
+
+    // ── /spawn command schema tests ─────────────────────────────────────
+
+    #[test]
+    fn default_commands_includes_spawn() {
+        let cmds = AgentPlugin::default_commands();
+        let names: Vec<&str> = cmds.iter().map(|c| c.name.as_str()).collect();
+        assert!(
+            names.contains(&"spawn"),
+            "default_commands must include spawn"
+        );
+    }
+
+    #[test]
+    fn spawn_command_has_personality_choice_param() {
+        let cmds = AgentPlugin::default_commands();
+        let spawn = cmds.iter().find(|c| c.name == "spawn").unwrap();
+        assert_eq!(spawn.params.len(), 2);
+        match &spawn.params[0].param_type {
+            ParamType::Choice(values) => {
+                assert!(values.contains(&"coder".to_owned()));
+                assert!(values.contains(&"reviewer".to_owned()));
+                assert!(values.contains(&"researcher".to_owned()));
+                assert!(values.contains(&"coordinator".to_owned()));
+                assert!(values.contains(&"documenter".to_owned()));
+                assert_eq!(values.len(), 5);
+            }
+            other => panic!("expected Choice, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn spawn_personality_unknown_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin = test_plugin(dir.path());
+        let mut ctx = make_ctx(&plugin, vec!["hacker"], vec![]);
+        ctx.command = "spawn".to_owned();
+        let result = plugin.handle_spawn_personality(&ctx);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("unknown personality"));
+    }
+
+    #[test]
+    fn spawn_personality_missing_returns_usage() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin = test_plugin(dir.path());
+        let mut ctx = make_ctx(&plugin, vec![] as Vec<&str>, vec![]);
+        ctx.command = "spawn".to_owned();
+        let result = plugin.handle_spawn_personality(&ctx);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("usage"));
+    }
+
+    #[test]
+    fn spawn_personality_collision_with_online_user() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin = test_plugin(dir.path());
+        let mut ctx = make_ctx(&plugin, vec!["coder", "--name", "alice"], vec!["alice"]);
+        ctx.command = "spawn".to_owned();
+        let result = plugin.handle_spawn_personality(&ctx);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("already online"));
+    }
+
+    #[test]
+    fn spawn_personality_collision_with_auto_generated_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin = test_plugin(dir.path());
+
+        // Pre-insert an agent with the auto-generated name
+        {
+            let mut agents = plugin.agents.lock().unwrap();
+            agents.insert(
+                "coder-abcd".to_owned(),
+                SpawnedAgent {
+                    username: "coder-abcd".to_owned(),
+                    pid: std::process::id(),
+                    model: "sonnet".to_owned(),
+                    personality: "coder".to_owned(),
+                    spawned_at: Utc::now(),
+                    log_path: PathBuf::from("/tmp/test.log"),
+                    room_id: "test-room".to_owned(),
+                },
+            );
+        }
+
+        let mut ctx = make_ctx(&plugin, vec!["coder"], vec![]);
+        ctx.command = "spawn".to_owned();
+        ctx.message_id = "abcd-1234".to_owned();
+        // Auto-generated name would be "coder-abcd" which collides
+        let result = plugin.handle_spawn_personality(&ctx);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("already running"));
     }
 
     #[test]

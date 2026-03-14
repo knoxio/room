@@ -231,6 +231,7 @@ pub fn all_known_commands() -> Vec<CommandInfo> {
     cmds.extend(queue::QueuePlugin::default_commands());
     cmds.extend(stats::StatsPlugin.commands());
     cmds.extend(taskboard::TaskboardPlugin::default_commands());
+    cmds.extend(room_plugin_agent::AgentPlugin::default_commands());
     cmds
 }
 
@@ -314,6 +315,8 @@ mod tests {
         assert!(names.contains(&"help"));
         // Plugins
         assert!(names.contains(&"stats"));
+        assert!(names.contains(&"agent"));
+        assert!(names.contains(&"spawn"));
     }
 
     #[test]

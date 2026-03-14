@@ -877,6 +877,74 @@ mod tests {
 
     // ── MentionPicker two-tier tests ──────────────────────────────────────────
 
+    // ── /agent and /spawn palette tests (#696) ─────────────────────────
+
+    #[test]
+    fn palette_contains_agent_command() {
+        let p = make_palette();
+        assert!(
+            p.commands.iter().any(|c| c.cmd == "agent"),
+            "palette must include agent"
+        );
+    }
+
+    #[test]
+    fn palette_contains_spawn_command() {
+        let p = make_palette();
+        assert!(
+            p.commands.iter().any(|c| c.cmd == "spawn"),
+            "palette must include spawn"
+        );
+    }
+
+    #[test]
+    fn palette_filter_agent_prefix() {
+        let mut p = make_palette();
+        p.update_filter("ag");
+        assert!(
+            p.filtered.iter().any(|&i| p.commands[i].cmd == "agent"),
+            "filter 'ag' must match agent"
+        );
+    }
+
+    #[test]
+    fn palette_filter_spawn_prefix() {
+        let mut p = make_palette();
+        p.update_filter("sp");
+        assert!(
+            p.filtered.iter().any(|&i| p.commands[i].cmd == "spawn"),
+            "filter 'sp' must match spawn"
+        );
+    }
+
+    #[test]
+    fn agent_completions_at_returns_actions() {
+        let p = make_palette();
+        let completions = p.completions_at("agent", 0);
+        assert!(completions.contains(&"spawn".to_owned()));
+        assert!(completions.contains(&"list".to_owned()));
+        assert!(completions.contains(&"stop".to_owned()));
+        assert_eq!(completions.len(), 3);
+    }
+
+    #[test]
+    fn spawn_completions_at_returns_personalities() {
+        let p = make_palette();
+        let completions = p.completions_at("spawn", 0);
+        assert!(completions.contains(&"coder".to_owned()));
+        assert!(completions.contains(&"reviewer".to_owned()));
+        assert!(completions.contains(&"researcher".to_owned()));
+        assert!(completions.contains(&"coordinator".to_owned()));
+        assert!(completions.contains(&"documenter".to_owned()));
+        assert_eq!(completions.len(), 5);
+    }
+
+    #[test]
+    fn spawn_second_param_is_text_no_completions() {
+        let p = make_palette();
+        assert!(p.completions_at("spawn", 1).is_empty());
+    }
+
     #[test]
     fn mention_two_tier_in_room_first() {
         let mut m = MentionPicker::new();
