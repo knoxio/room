@@ -1,3 +1,4 @@
+pub mod agent;
 pub mod list;
 pub mod poll;
 pub mod subscribe;
@@ -5,6 +6,7 @@ pub mod token;
 pub mod transport;
 pub mod who;
 
+pub use agent::{cmd_agent_list, cmd_agent_logs, cmd_agent_spawn, cmd_agent_stop};
 pub use list::{cmd_list, discover_daemon_rooms, discover_joined_rooms};
 pub use poll::{
     cmd_poll, cmd_poll_multi, cmd_pull, cmd_query, cmd_watch, poll_messages, poll_messages_multi,

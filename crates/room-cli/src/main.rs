@@ -14,7 +14,7 @@ use room_cli::{
     query::{has_narrowing_filter, QueryFilter},
 };
 
-use cli::{Args, Cmd};
+use cli::{AgentAction, Args, Cmd};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -331,6 +331,45 @@ async fn main() -> anyhow::Result<()> {
             socket,
         }) => {
             oneshot::cmd_destroy(&room_id, socket.as_deref(), &token).await?;
+        }
+        Some(Cmd::Agent {
+            room_id,
+            token,
+            socket,
+            action,
+        }) => {
+            if socket.is_none() {
+                oneshot::ensure_daemon_running().await?;
+            }
+            match action {
+                AgentAction::Spawn {
+                    username,
+                    model,
+                    issue,
+                    personality,
+                } => {
+                    oneshot::cmd_agent_spawn(
+                        &room_id,
+                        &token,
+                        &username,
+                        model.as_deref(),
+                        issue.as_deref(),
+                        personality.as_deref(),
+                        socket.as_deref(),
+                    )
+                    .await?;
+                }
+                AgentAction::List => {
+                    oneshot::cmd_agent_list(&room_id, &token, socket.as_deref()).await?;
+                }
+                AgentAction::Stop { username } => {
+                    oneshot::cmd_agent_stop(&room_id, &token, &username, socket.as_deref()).await?;
+                }
+                AgentAction::Logs { username, tail } => {
+                    oneshot::cmd_agent_logs(&room_id, &token, &username, tail, socket.as_deref())
+                        .await?;
+                }
+            }
         }
         Some(Cmd::List) => {
             oneshot::cmd_list().await?;

@@ -259,6 +259,22 @@ pub enum Cmd {
         #[arg(long)]
         socket: Option<PathBuf>,
     },
+    /// Manage ralph agents via CLI (spawn, list, stop, logs).
+    ///
+    /// Routes commands through the broker to the AgentPlugin. Requires a running
+    /// daemon with the AgentPlugin registered.
+    Agent {
+        /// Room ID where agents are managed
+        room_id: String,
+        /// Session token from `room join` (required)
+        #[arg(short = 't', long)]
+        token: String,
+        /// Override the broker socket path (default: auto-discover daemon or per-room socket)
+        #[arg(long)]
+        socket: Option<PathBuf>,
+        #[command(subcommand)]
+        action: AgentAction,
+    },
     /// List active rooms with running brokers.
     ///
     /// Scans `/tmp` for `room-*.sock` files and probes each to verify the broker
@@ -309,6 +325,40 @@ pub enum Cmd {
         /// to subsequent commands to target the isolated instance.
         #[arg(long)]
         isolated: bool,
+    },
+}
+
+/// Agent management subcommands.
+#[derive(Subcommand, Debug)]
+pub enum AgentAction {
+    /// Spawn a new ralph agent in the room.
+    Spawn {
+        /// Username for the spawned agent
+        username: String,
+        /// Claude model to use (e.g. sonnet, opus, haiku)
+        #[arg(long)]
+        model: Option<String>,
+        /// GitHub issue number for the agent to work on
+        #[arg(long)]
+        issue: Option<String>,
+        /// Personality name for the agent
+        #[arg(long)]
+        personality: Option<String>,
+    },
+    /// List all agents in the room with their status.
+    List,
+    /// Stop a running agent.
+    Stop {
+        /// Username of the agent to stop
+        username: String,
+    },
+    /// View logs for an agent.
+    Logs {
+        /// Username of the agent
+        username: String,
+        /// Number of lines to show from the end (default: 50)
+        #[arg(long, default_value_t = 50)]
+        tail: usize,
     },
 }
 
