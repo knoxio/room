@@ -924,7 +924,8 @@ mod tests {
         assert!(completions.contains(&"spawn".to_owned()));
         assert!(completions.contains(&"list".to_owned()));
         assert!(completions.contains(&"stop".to_owned()));
-        assert_eq!(completions.len(), 3);
+        assert!(completions.contains(&"logs".to_owned()));
+        assert_eq!(completions.len(), 4);
     }
 
     #[test]

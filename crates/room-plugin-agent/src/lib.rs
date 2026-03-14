@@ -16,6 +16,9 @@ use room_protocol::plugin::{
 /// Grace period in seconds before sending SIGKILL after SIGTERM.
 const STOP_GRACE_PERIOD_SECS: u64 = 5;
 
+/// Default number of log lines to show.
+const DEFAULT_TAIL_LINES: usize = 20;
+
 /// A spawned agent process tracked by the plugin.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpawnedAgent {
@@ -78,7 +81,7 @@ impl AgentPlugin {
         vec![
             CommandInfo {
                 name: "agent".to_owned(),
-                description: "Spawn, list, or stop ralph agents".to_owned(),
+                description: "Spawn, list, stop, or tail logs of ralph agents".to_owned(),
                 usage: "/agent <action> [args...]".to_owned(),
                 params: vec![
                     ParamSchema {
@@ -87,6 +90,7 @@ impl AgentPlugin {
                             "spawn".to_owned(),
                             "list".to_owned(),
                             "stop".to_owned(),
+                            "logs".to_owned(),
                         ]),
                         required: true,
                         description: "Subcommand".to_owned(),
@@ -536,6 +540,62 @@ impl AgentPlugin {
             ))
         }
     }
+
+    fn handle_logs(&self, ctx: &CommandContext) -> Result<String, String> {
+        if ctx.params.len() < 2 {
+            return Err("usage: /agent logs <username> [--tail <N>]".to_owned());
+        }
+
+        let username = &ctx.params[1];
+
+        // Parse optional --tail flag
+        let mut tail_lines = DEFAULT_TAIL_LINES;
+        let mut i = 2;
+        while i < ctx.params.len() {
+            if ctx.params[i] == "--tail" {
+                i += 1;
+                if i < ctx.params.len() {
+                    tail_lines = ctx.params[i]
+                        .parse::<usize>()
+                        .map_err(|_| format!("invalid --tail value: {}", ctx.params[i]))?;
+                    if tail_lines == 0 {
+                        return Err("--tail must be at least 1".to_owned());
+                    }
+                }
+            }
+            i += 1;
+        }
+
+        // Look up the agent
+        let agent = {
+            let agents = self.agents.lock().unwrap();
+            agents.get(username.as_str()).cloned()
+        };
+
+        let Some(agent) = agent else {
+            return Err(format!("no agent named '{username}'"));
+        };
+
+        // Read the log file
+        let content = fs::read_to_string(&agent.log_path)
+            .map_err(|e| format!("cannot read log file {}: {e}", agent.log_path.display()))?;
+
+        if content.is_empty() {
+            return Ok(format!("agent {username}: log file is empty"));
+        }
+
+        // Take last N lines
+        let lines: Vec<&str> = content.lines().collect();
+        let start = lines.len().saturating_sub(tail_lines);
+        let tail: Vec<&str> = lines[start..].to_vec();
+
+        let header = format!(
+            "agent {username} logs (last {} of {} lines):",
+            tail.len(),
+            lines.len()
+        );
+        Ok(format!("{header}\n{}", tail.join("\n")))
+    }
 }
 
 impl Plugin for AgentPlugin {
@@ -574,8 +634,12 @@ impl Plugin for AgentPlugin {
                     Ok(msg) => Ok(PluginResult::Broadcast(msg)),
                     Err(e) => Ok(PluginResult::Reply(e)),
                 },
+                "logs" => match self.handle_logs(&ctx) {
+                    Ok(msg) => Ok(PluginResult::Reply(msg)),
+                    Err(e) => Ok(PluginResult::Reply(e)),
+                },
                 _ => Ok(PluginResult::Reply(
-                    "unknown action. usage: /agent spawn|list|stop".to_owned(),
+                    "unknown action. usage: /agent spawn|list|stop|logs".to_owned(),
                 )),
             }
         })
@@ -1086,6 +1150,232 @@ mod tests {
         let generated = coder.generate_username(&used);
         assert_ne!(generated, first_name);
         assert!(generated.starts_with("coder-"));
+    }
+
+    #[test]
+    fn logs_missing_username() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin = test_plugin(dir.path());
+        let ctx = make_ctx(&plugin, vec!["logs"], vec![]);
+        let result = plugin.handle_logs(&ctx);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("usage"));
+    }
+
+    #[test]
+    fn logs_unknown_agent() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin = test_plugin(dir.path());
+        let ctx = make_ctx(&plugin, vec!["logs", "nobody"], vec![]);
+        let result = plugin.handle_logs(&ctx);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("no agent named"));
+    }
+
+    #[test]
+    fn logs_empty_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin = test_plugin(dir.path());
+        let log_path = dir.path().join("empty.log");
+        fs::write(&log_path, "").unwrap();
+
+        {
+            let mut agents = plugin.agents.lock().unwrap();
+            agents.insert(
+                "bot1".to_owned(),
+                SpawnedAgent {
+                    username: "bot1".to_owned(),
+                    pid: std::process::id(),
+                    model: "sonnet".to_owned(),
+                    personality: String::new(),
+                    spawned_at: Utc::now(),
+                    log_path: log_path.clone(),
+                    room_id: "test-room".to_owned(),
+                },
+            );
+        }
+
+        let ctx = make_ctx(&plugin, vec!["logs", "bot1"], vec![]);
+        let result = plugin.handle_logs(&ctx).unwrap();
+        assert!(result.contains("empty"));
+    }
+
+    #[test]
+    fn logs_default_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin = test_plugin(dir.path());
+        let log_path = dir.path().join("agent.log");
+
+        // Write 30 lines
+        let lines: Vec<String> = (1..=30).map(|i| format!("line {i}")).collect();
+        fs::write(&log_path, lines.join("\n")).unwrap();
+
+        {
+            let mut agents = plugin.agents.lock().unwrap();
+            agents.insert(
+                "bot1".to_owned(),
+                SpawnedAgent {
+                    username: "bot1".to_owned(),
+                    pid: std::process::id(),
+                    model: "sonnet".to_owned(),
+                    personality: String::new(),
+                    spawned_at: Utc::now(),
+                    log_path: log_path.clone(),
+                    room_id: "test-room".to_owned(),
+                },
+            );
+        }
+
+        let ctx = make_ctx(&plugin, vec!["logs", "bot1"], vec![]);
+        let result = plugin.handle_logs(&ctx).unwrap();
+        assert!(result.contains("last 20 of 30 lines"));
+        assert!(result.contains("line 11"));
+        assert!(result.contains("line 30"));
+        assert!(!result.contains("line 10\n"));
+    }
+
+    #[test]
+    fn logs_custom_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin = test_plugin(dir.path());
+        let log_path = dir.path().join("agent.log");
+
+        let lines: Vec<String> = (1..=10).map(|i| format!("line {i}")).collect();
+        fs::write(&log_path, lines.join("\n")).unwrap();
+
+        {
+            let mut agents = plugin.agents.lock().unwrap();
+            agents.insert(
+                "bot1".to_owned(),
+                SpawnedAgent {
+                    username: "bot1".to_owned(),
+                    pid: std::process::id(),
+                    model: "sonnet".to_owned(),
+                    personality: String::new(),
+                    spawned_at: Utc::now(),
+                    log_path: log_path.clone(),
+                    room_id: "test-room".to_owned(),
+                },
+            );
+        }
+
+        let ctx = make_ctx(&plugin, vec!["logs", "bot1", "--tail", "3"], vec![]);
+        let result = plugin.handle_logs(&ctx).unwrap();
+        assert!(result.contains("last 3 of 10 lines"));
+        assert!(result.contains("line 8"));
+        assert!(result.contains("line 10"));
+        assert!(!result.contains("line 7\n"));
+    }
+
+    #[test]
+    fn logs_tail_larger_than_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin = test_plugin(dir.path());
+        let log_path = dir.path().join("agent.log");
+
+        fs::write(&log_path, "only one line").unwrap();
+
+        {
+            let mut agents = plugin.agents.lock().unwrap();
+            agents.insert(
+                "bot1".to_owned(),
+                SpawnedAgent {
+                    username: "bot1".to_owned(),
+                    pid: std::process::id(),
+                    model: "sonnet".to_owned(),
+                    personality: String::new(),
+                    spawned_at: Utc::now(),
+                    log_path: log_path.clone(),
+                    room_id: "test-room".to_owned(),
+                },
+            );
+        }
+
+        let ctx = make_ctx(&plugin, vec!["logs", "bot1", "--tail", "50"], vec![]);
+        let result = plugin.handle_logs(&ctx).unwrap();
+        assert!(result.contains("last 1 of 1 lines"));
+        assert!(result.contains("only one line"));
+    }
+
+    #[test]
+    fn logs_missing_log_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin = test_plugin(dir.path());
+
+        {
+            let mut agents = plugin.agents.lock().unwrap();
+            agents.insert(
+                "bot1".to_owned(),
+                SpawnedAgent {
+                    username: "bot1".to_owned(),
+                    pid: std::process::id(),
+                    model: "sonnet".to_owned(),
+                    personality: String::new(),
+                    spawned_at: Utc::now(),
+                    log_path: PathBuf::from("/nonexistent/path/agent.log"),
+                    room_id: "test-room".to_owned(),
+                },
+            );
+        }
+
+        let ctx = make_ctx(&plugin, vec!["logs", "bot1"], vec![]);
+        let result = plugin.handle_logs(&ctx);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("cannot read log file"));
+    }
+
+    #[test]
+    fn logs_invalid_tail_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin = test_plugin(dir.path());
+
+        {
+            let mut agents = plugin.agents.lock().unwrap();
+            agents.insert(
+                "bot1".to_owned(),
+                SpawnedAgent {
+                    username: "bot1".to_owned(),
+                    pid: std::process::id(),
+                    model: "sonnet".to_owned(),
+                    personality: String::new(),
+                    spawned_at: Utc::now(),
+                    log_path: PathBuf::from("/tmp/test.log"),
+                    room_id: "test-room".to_owned(),
+                },
+            );
+        }
+
+        let ctx = make_ctx(&plugin, vec!["logs", "bot1", "--tail", "abc"], vec![]);
+        let result = plugin.handle_logs(&ctx);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("invalid --tail value"));
+    }
+
+    #[test]
+    fn logs_zero_tail_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin = test_plugin(dir.path());
+
+        {
+            let mut agents = plugin.agents.lock().unwrap();
+            agents.insert(
+                "bot1".to_owned(),
+                SpawnedAgent {
+                    username: "bot1".to_owned(),
+                    pid: std::process::id(),
+                    model: "sonnet".to_owned(),
+                    personality: String::new(),
+                    spawned_at: Utc::now(),
+                    log_path: PathBuf::from("/tmp/test.log"),
+                    room_id: "test-room".to_owned(),
+                },
+            );
+        }
+
+        let ctx = make_ctx(&plugin, vec!["logs", "bot1", "--tail", "0"], vec![]);
+        let result = plugin.handle_logs(&ctx);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("--tail must be at least 1"));
     }
 
     #[test]
