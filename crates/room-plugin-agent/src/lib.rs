@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Utc};
@@ -20,6 +20,8 @@ pub struct SpawnedAgent {
     pub username: String,
     pub pid: u32,
     pub model: String,
+    #[serde(default)]
+    pub personality: String,
     pub spawned_at: DateTime<Utc>,
     pub log_path: PathBuf,
     pub room_id: String,
@@ -32,6 +34,10 @@ pub struct SpawnedAgent {
 pub struct AgentPlugin {
     /// Running agents keyed by username.
     agents: Arc<Mutex<HashMap<String, SpawnedAgent>>>,
+    /// Child process handles for exit code tracking (not serialized).
+    children: Arc<Mutex<HashMap<String, Child>>>,
+    /// Recorded exit codes for agents whose Child handles have been reaped.
+    exit_codes: Arc<Mutex<HashMap<String, Option<i32>>>>,
     /// Path to persist agent state (e.g. `~/.room/state/agents-<room>.json`).
     state_path: PathBuf,
     /// Socket path to pass to spawned ralph processes.
@@ -54,6 +60,8 @@ impl AgentPlugin {
             .collect();
         let plugin = Self {
             agents: Arc::new(Mutex::new(agents)),
+            children: Arc::new(Mutex::new(HashMap::new())),
+            exit_codes: Arc::new(Mutex::new(HashMap::new())),
             state_path,
             socket_path,
             log_dir,
@@ -98,11 +106,10 @@ impl AgentPlugin {
     }
 
     fn handle_spawn(&self, ctx: &CommandContext) -> Result<String, String> {
-        // Parse: /agent spawn <username> [--model <model>] [--issue <N>] [--prompt <text>]
         let params = &ctx.params;
         if params.len() < 2 {
             return Err(
-                "usage: /agent spawn <username> [--model <model>] [--issue <N>] [--prompt <text>]"
+                "usage: /agent spawn <username> [--model <model>] [--personality <name>] [--issue <N>] [--prompt <text>]"
                     .to_owned(),
             );
         }
@@ -137,6 +144,7 @@ impl AgentPlugin {
 
         // Parse optional flags from params[2..]
         let mut model = "sonnet".to_owned();
+        let mut personality = String::new();
         let mut issue: Option<String> = None;
         let mut prompt: Option<String> = None;
 
@@ -147,6 +155,12 @@ impl AgentPlugin {
                     i += 1;
                     if i < params.len() {
                         model = params[i].clone();
+                    }
+                }
+                "--personality" => {
+                    i += 1;
+                    if i < params.len() {
+                        personality = params[i].clone();
                     }
                 }
                 "--issue" => {
@@ -193,6 +207,9 @@ impl AgentPlugin {
         if let Some(ref p) = prompt {
             cmd.arg("--prompt").arg(p);
         }
+        if !personality.is_empty() {
+            cmd.arg("--personality").arg(&personality);
+        }
 
         cmd.stdin(Stdio::null())
             .stdout(Stdio::from(log_file))
@@ -208,6 +225,7 @@ impl AgentPlugin {
             username: username.clone(),
             pid,
             model: model.clone(),
+            personality: personality.clone(),
             spawned_at: Utc::now(),
             log_path: log_path.clone(),
             room_id: ctx.room_id.clone(),
@@ -217,10 +235,19 @@ impl AgentPlugin {
             let mut agents = self.agents.lock().unwrap();
             agents.insert(username.clone(), agent);
         }
+        {
+            let mut children = self.children.lock().unwrap();
+            children.insert(username.clone(), child);
+        }
         self.persist();
 
+        let personality_info = if personality.is_empty() {
+            String::new()
+        } else {
+            format!(", personality: {personality}")
+        };
         Ok(format!(
-            "agent {username} spawned (pid {pid}, model: {model})"
+            "agent {username} spawned (pid {pid}, model: {model}{personality_info})"
         ))
     }
 
@@ -230,8 +257,25 @@ impl AgentPlugin {
             return "no agents spawned".to_owned();
         }
 
-        let mut lines = vec!["username     | pid   | model  | uptime  | status".to_owned()];
+        let mut lines =
+            vec!["username     | pid   | personality | model  | uptime  | status".to_owned()];
 
+        // Try to reap exit codes from child handles.
+        {
+            let mut children = self.children.lock().unwrap();
+            let mut exit_codes = self.exit_codes.lock().unwrap();
+            let usernames: Vec<String> = children.keys().cloned().collect();
+            for name in usernames {
+                if let Some(child) = children.get_mut(&name) {
+                    if let Ok(Some(status)) = child.try_wait() {
+                        exit_codes.insert(name.clone(), status.code());
+                        children.remove(&name);
+                    }
+                }
+            }
+        }
+
+        let exit_codes = self.exit_codes.lock().unwrap();
         let now = Utc::now();
         let mut entries: Vec<_> = agents.values().collect();
         entries.sort_by_key(|a| a.spawned_at);
@@ -239,13 +283,23 @@ impl AgentPlugin {
         for agent in entries {
             let uptime = format_duration(now - agent.spawned_at);
             let status = if is_process_alive(agent.pid) {
-                "running"
+                "running".to_owned()
+            } else if let Some(code) = exit_codes.get(&agent.username) {
+                match code {
+                    Some(c) => format!("exited ({c})"),
+                    None => "exited (signal)".to_owned(),
+                }
             } else {
-                "exited"
+                "exited (unknown)".to_owned()
+            };
+            let personality_display = if agent.personality.is_empty() {
+                "-"
+            } else {
+                &agent.personality
             };
             lines.push(format!(
-                "{:<12} | {:<5} | {:<6} | {:<7} | {}",
-                agent.username, agent.pid, agent.model, uptime, status,
+                "{:<12} | {:<5} | {:<11} | {:<6} | {:<7} | {}",
+                agent.username, agent.pid, personality_display, agent.model, uptime, status,
             ));
         }
 
@@ -278,13 +332,26 @@ impl AgentPlugin {
         // Check if already exited before attempting to stop
         let was_alive = is_process_alive(agent.pid);
         if was_alive {
-            // Send SIGTERM, then SIGKILL after 5s grace period
-            stop_process(agent.pid, STOP_GRACE_PERIOD_SECS);
+            // Try to use stored Child handle for clean shutdown, fall back to PID signal.
+            let mut child = {
+                let mut children = self.children.lock().unwrap();
+                children.remove(username.as_str())
+            };
+            if let Some(ref mut child) = child {
+                let _ = child.kill();
+                let _ = child.wait();
+            } else {
+                stop_process(agent.pid, STOP_GRACE_PERIOD_SECS);
+            }
         }
 
         {
             let mut agents = self.agents.lock().unwrap();
             agents.remove(username.as_str());
+        }
+        {
+            let mut exit_codes = self.exit_codes.lock().unwrap();
+            exit_codes.remove(username.as_str());
         }
         self.persist();
 
@@ -514,6 +581,7 @@ mod tests {
                     username: "bot1".to_owned(),
                     pid: std::process::id(),
                     model: "sonnet".to_owned(),
+                    personality: String::new(),
                     spawned_at: Utc::now(),
                     log_path: PathBuf::from("/tmp/test.log"),
                     room_id: "test-room".to_owned(),
@@ -547,6 +615,7 @@ mod tests {
                     username: "bot1".to_owned(),
                     pid: 99999,
                     model: "opus".to_owned(),
+                    personality: String::new(),
                     spawned_at: Utc::now(),
                     log_path: PathBuf::from("/tmp/test.log"),
                     room_id: "test-room".to_owned(),
@@ -594,6 +663,7 @@ mod tests {
                     username: "bot1".to_owned(),
                     pid: std::process::id(),
                     model: "sonnet".to_owned(),
+                    personality: String::new(),
                     spawned_at: Utc::now(),
                     log_path: PathBuf::from("/tmp/test.log"),
                     room_id: "test-room".to_owned(),
@@ -623,6 +693,7 @@ mod tests {
                     username: "dead-bot".to_owned(),
                     pid: 999_999_999,
                     model: "haiku".to_owned(),
+                    personality: String::new(),
                     spawned_at: Utc::now(),
                     log_path: PathBuf::from("/tmp/test.log"),
                     room_id: "test-room".to_owned(),
@@ -656,6 +727,7 @@ mod tests {
                     username: "bot1".to_owned(),
                     pid: 999_999_999,
                     model: "sonnet".to_owned(),
+                    personality: String::new(),
                     spawned_at: Utc::now(),
                     log_path: PathBuf::from("/tmp/test.log"),
                     room_id: "test-room".to_owned(),
@@ -691,6 +763,7 @@ mod tests {
                     username: "bot1".to_owned(),
                     pid: std::process::id(), // use own PID so it appears alive
                     model: "sonnet".to_owned(),
+                    personality: String::new(),
                     spawned_at: Utc::now(),
                     log_path: PathBuf::from("/tmp/test.log"),
                     room_id: "test-room".to_owned(),
@@ -722,6 +795,7 @@ mod tests {
                 username: "dead-bot".to_owned(),
                 pid: 999_999_999, // very unlikely to be alive
                 model: "haiku".to_owned(),
+                personality: String::new(),
                 spawned_at: Utc::now(),
                 log_path: PathBuf::from("/tmp/test.log"),
                 room_id: "test-room".to_owned(),
@@ -755,5 +829,304 @@ mod tests {
             PluginResult::Broadcast(_) => panic!("expected Reply, got Broadcast"),
             PluginResult::Handled => panic!("expected Reply, got Handled"),
         }
+    }
+
+    // ── /agent list tests (#689) ──────────────────────────────────────────
+
+    #[test]
+    fn list_header_includes_personality_column() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin = test_plugin(dir.path());
+
+        {
+            let mut agents = plugin.agents.lock().unwrap();
+            agents.insert(
+                "bot1".to_owned(),
+                SpawnedAgent {
+                    username: "bot1".to_owned(),
+                    pid: std::process::id(),
+                    model: "sonnet".to_owned(),
+                    personality: "coder".to_owned(),
+                    spawned_at: Utc::now(),
+                    log_path: PathBuf::from("/tmp/test.log"),
+                    room_id: "test-room".to_owned(),
+                },
+            );
+        }
+
+        let output = plugin.handle_list();
+        let header = output.lines().next().unwrap();
+        assert!(
+            header.contains("personality"),
+            "header must include personality column"
+        );
+        assert!(output.contains("coder"), "personality value must appear");
+    }
+
+    #[test]
+    fn list_shows_dash_for_empty_personality() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin = test_plugin(dir.path());
+
+        {
+            let mut agents = plugin.agents.lock().unwrap();
+            agents.insert(
+                "bot1".to_owned(),
+                SpawnedAgent {
+                    username: "bot1".to_owned(),
+                    pid: std::process::id(),
+                    model: "opus".to_owned(),
+                    personality: String::new(),
+                    spawned_at: Utc::now(),
+                    log_path: PathBuf::from("/tmp/test.log"),
+                    room_id: "test-room".to_owned(),
+                },
+            );
+        }
+
+        let output = plugin.handle_list();
+        // The personality column should show "-" for empty personality.
+        let data_line = output.lines().nth(1).unwrap();
+        assert!(
+            data_line.contains("| -"),
+            "empty personality should show '-'"
+        );
+    }
+
+    #[test]
+    fn list_shows_running_for_alive_process() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin = test_plugin(dir.path());
+
+        {
+            let mut agents = plugin.agents.lock().unwrap();
+            agents.insert(
+                "bot1".to_owned(),
+                SpawnedAgent {
+                    username: "bot1".to_owned(),
+                    pid: std::process::id(), // our own PID — always alive
+                    model: "sonnet".to_owned(),
+                    personality: String::new(),
+                    spawned_at: Utc::now(),
+                    log_path: PathBuf::from("/tmp/test.log"),
+                    room_id: "test-room".to_owned(),
+                },
+            );
+        }
+
+        let output = plugin.handle_list();
+        assert!(
+            output.contains("running"),
+            "alive process should show 'running'"
+        );
+    }
+
+    #[test]
+    fn list_shows_exited_unknown_for_dead_process_without_child() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin = test_plugin(dir.path());
+
+        {
+            let mut agents = plugin.agents.lock().unwrap();
+            agents.insert(
+                "bot1".to_owned(),
+                SpawnedAgent {
+                    username: "bot1".to_owned(),
+                    pid: 999_999_999, // not alive
+                    model: "haiku".to_owned(),
+                    personality: "scout".to_owned(),
+                    spawned_at: Utc::now(),
+                    log_path: PathBuf::from("/tmp/test.log"),
+                    room_id: "test-room".to_owned(),
+                },
+            );
+        }
+
+        let output = plugin.handle_list();
+        assert!(
+            output.contains("exited (unknown)"),
+            "dead process without child handle should show 'exited (unknown)'"
+        );
+    }
+
+    #[test]
+    fn list_shows_exit_code_when_recorded() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin = test_plugin(dir.path());
+
+        {
+            let mut agents = plugin.agents.lock().unwrap();
+            agents.insert(
+                "bot1".to_owned(),
+                SpawnedAgent {
+                    username: "bot1".to_owned(),
+                    pid: 999_999_999,
+                    model: "sonnet".to_owned(),
+                    personality: "coder".to_owned(),
+                    spawned_at: Utc::now(),
+                    log_path: PathBuf::from("/tmp/test.log"),
+                    room_id: "test-room".to_owned(),
+                },
+            );
+        }
+        {
+            let mut exit_codes = plugin.exit_codes.lock().unwrap();
+            exit_codes.insert("bot1".to_owned(), Some(0));
+        }
+
+        let output = plugin.handle_list();
+        assert!(
+            output.contains("exited (0)"),
+            "recorded exit code should appear in output"
+        );
+    }
+
+    #[test]
+    fn list_shows_signal_when_no_exit_code() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin = test_plugin(dir.path());
+
+        {
+            let mut agents = plugin.agents.lock().unwrap();
+            agents.insert(
+                "bot1".to_owned(),
+                SpawnedAgent {
+                    username: "bot1".to_owned(),
+                    pid: 999_999_999,
+                    model: "sonnet".to_owned(),
+                    personality: String::new(),
+                    spawned_at: Utc::now(),
+                    log_path: PathBuf::from("/tmp/test.log"),
+                    room_id: "test-room".to_owned(),
+                },
+            );
+        }
+        {
+            // None exit code = killed by signal
+            let mut exit_codes = plugin.exit_codes.lock().unwrap();
+            exit_codes.insert("bot1".to_owned(), None);
+        }
+
+        let output = plugin.handle_list();
+        assert!(
+            output.contains("exited (signal)"),
+            "signal death should show 'exited (signal)'"
+        );
+    }
+
+    #[test]
+    fn list_sorts_by_spawn_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin = test_plugin(dir.path());
+        let now = Utc::now();
+
+        {
+            let mut agents = plugin.agents.lock().unwrap();
+            agents.insert(
+                "second".to_owned(),
+                SpawnedAgent {
+                    username: "second".to_owned(),
+                    pid: std::process::id(),
+                    model: "opus".to_owned(),
+                    personality: String::new(),
+                    spawned_at: now,
+                    log_path: PathBuf::from("/tmp/test.log"),
+                    room_id: "test-room".to_owned(),
+                },
+            );
+            agents.insert(
+                "first".to_owned(),
+                SpawnedAgent {
+                    username: "first".to_owned(),
+                    pid: std::process::id(),
+                    model: "sonnet".to_owned(),
+                    personality: String::new(),
+                    spawned_at: now - chrono::Duration::minutes(5),
+                    log_path: PathBuf::from("/tmp/test.log"),
+                    room_id: "test-room".to_owned(),
+                },
+            );
+        }
+
+        let output = plugin.handle_list();
+        let lines: Vec<&str> = output.lines().collect();
+        // Skip header (line 0), first data line should be "first", second "second".
+        assert!(
+            lines[1].contains("first"),
+            "older agent should appear first"
+        );
+        assert!(
+            lines[2].contains("second"),
+            "newer agent should appear second"
+        );
+    }
+
+    #[test]
+    fn list_with_personality_and_exit_code_full_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin = test_plugin(dir.path());
+
+        {
+            let mut agents = plugin.agents.lock().unwrap();
+            agents.insert(
+                "reviewer-a1".to_owned(),
+                SpawnedAgent {
+                    username: "reviewer-a1".to_owned(),
+                    pid: 999_999_999,
+                    model: "sonnet".to_owned(),
+                    personality: "reviewer".to_owned(),
+                    spawned_at: Utc::now(),
+                    log_path: PathBuf::from("/tmp/test.log"),
+                    room_id: "test-room".to_owned(),
+                },
+            );
+        }
+        {
+            let mut exit_codes = plugin.exit_codes.lock().unwrap();
+            exit_codes.insert("reviewer-a1".to_owned(), Some(0));
+        }
+
+        let output = plugin.handle_list();
+        assert!(output.contains("reviewer-a1"));
+        assert!(output.contains("reviewer"));
+        assert!(output.contains("sonnet"));
+        assert!(output.contains("exited (0)"));
+    }
+
+    #[test]
+    fn persist_roundtrip_with_personality() {
+        let dir = tempfile::tempdir().unwrap();
+        let state_path = dir.path().join("agents.json");
+
+        let plugin = AgentPlugin::new(
+            state_path.clone(),
+            dir.path().join("room.sock"),
+            dir.path().join("logs"),
+        );
+        {
+            let mut agents = plugin.agents.lock().unwrap();
+            agents.insert(
+                "bot1".to_owned(),
+                SpawnedAgent {
+                    username: "bot1".to_owned(),
+                    pid: std::process::id(),
+                    model: "sonnet".to_owned(),
+                    personality: "coder".to_owned(),
+                    spawned_at: Utc::now(),
+                    log_path: PathBuf::from("/tmp/test.log"),
+                    room_id: "test-room".to_owned(),
+                },
+            );
+        }
+        plugin.persist();
+
+        // Reload — personality should survive roundtrip.
+        let plugin2 = AgentPlugin::new(
+            state_path,
+            dir.path().join("room.sock"),
+            dir.path().join("logs"),
+        );
+        let agents = plugin2.agents.lock().unwrap();
+        assert_eq!(agents["bot1"].personality, "coder");
     }
 }
