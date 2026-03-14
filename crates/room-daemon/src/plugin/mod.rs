@@ -3,8 +3,6 @@ pub mod queue;
 pub mod schema;
 pub mod stats;
 
-/// Re-export the agent plugin from its own crate.
-pub use room_plugin_agent as agent;
 /// Re-export the taskboard plugin from its own crate.
 pub use room_plugin_taskboard as taskboard;
 
@@ -66,14 +64,8 @@ impl PluginRegistry {
     /// Create a registry with all standard plugins registered.
     ///
     /// Both standalone and daemon broker modes should call this so that every
-    /// room has the same set of `/` commands available. When `socket_path` is
-    /// provided, the agent plugin is registered so `/agent spawn` can pass
-    /// the socket to spawned ralph processes. Pass `None` in test contexts
-    /// where spawning is not needed.
-    pub(crate) fn with_all_plugins(
-        chat_path: &Path,
-        socket_path: Option<&Path>,
-    ) -> anyhow::Result<Self> {
+    /// room has the same set of `/` commands available.
+    pub(crate) fn with_all_plugins(chat_path: &Path) -> anyhow::Result<Self> {
         let mut registry = Self::new();
 
         let queue_path = queue::QueuePlugin::queue_path_from_chat(chat_path);
@@ -86,17 +78,6 @@ impl PluginRegistry {
             taskboard_path,
             None,
         )))?;
-
-        // Agent plugin — only registered when a socket path is available.
-        if let Some(sock) = socket_path {
-            let agents_state_path = chat_path.with_extension("agents");
-            let log_dir = crate::paths::room_home().join("logs");
-            registry.register(Box::new(agent::AgentPlugin::new(
-                agents_state_path,
-                sock.to_owned(),
-                log_dir,
-            )))?;
-        }
 
         Ok(registry)
     }
