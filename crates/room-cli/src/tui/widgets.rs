@@ -933,9 +933,9 @@ mod tests {
         let completions = p.completions_at("spawn", 0);
         assert!(completions.contains(&"coder".to_owned()));
         assert!(completions.contains(&"reviewer".to_owned()));
-        assert!(completions.contains(&"researcher".to_owned()));
+        assert!(completions.contains(&"scout".to_owned()));
+        assert!(completions.contains(&"qa".to_owned()));
         assert!(completions.contains(&"coordinator".to_owned()));
-        assert!(completions.contains(&"documenter".to_owned()));
         assert_eq!(completions.len(), 5);
     }
 

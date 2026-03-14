@@ -1,3 +1,5 @@
+pub mod personalities;
+
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
@@ -13,19 +15,6 @@ use room_protocol::plugin::{
 
 /// Grace period in seconds before sending SIGKILL after SIGTERM.
 const STOP_GRACE_PERIOD_SECS: u64 = 5;
-
-/// Built-in personality names for `/spawn` autocomplete.
-///
-/// These must match the compiled-in personalities in `room-ralph/src/personalities.rs`.
-/// The list is duplicated here because `room-plugin-agent` must not depend on
-/// `room-ralph` (the plugin runs inside the broker; ralph is a client).
-const PERSONALITY_NAMES: &[&str] = &[
-    "coder",
-    "reviewer",
-    "researcher",
-    "coordinator",
-    "documenter",
-];
 
 /// A spawned agent process tracked by the plugin.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -117,11 +106,9 @@ impl AgentPlugin {
                 params: vec![
                     ParamSchema {
                         name: "personality".to_owned(),
-                        param_type: ParamType::Choice(
-                            PERSONALITY_NAMES.iter().map(|s| (*s).to_owned()).collect(),
-                        ),
+                        param_type: ParamType::Choice(personalities::all_personality_names()),
                         required: true,
-                        description: "Personality preset to use".to_owned(),
+                        description: "Personality preset name".to_owned(),
                     },
                     ParamSchema {
                         name: "name".to_owned(),
@@ -344,49 +331,56 @@ impl AgentPlugin {
 
     /// Handle `/spawn <personality> [--name <username>]`.
     ///
-    /// Expands to the equivalent `/agent spawn` invocation using the
-    /// personality's defaults. The personality name is passed to `room-ralph`
-    /// via `--personality`, which handles prompt/profile/model resolution.
+    /// Resolves the personality from the registry (user TOML overrides then
+    /// built-in defaults), generates a username from the name pool, and
+    /// spawns room-ralph with the personality's model, tool restrictions,
+    /// and prompt.
     fn handle_spawn_personality(&self, ctx: &CommandContext) -> Result<String, String> {
-        let personality = ctx.params.first().ok_or_else(|| {
-            format!(
-                "usage: /spawn <personality> [--name <username>]\navailable: {}",
-                PERSONALITY_NAMES.join(", ")
-            )
-        })?;
-
-        if !PERSONALITY_NAMES.contains(&personality.as_str()) {
-            return Err(format!(
-                "unknown personality '{}'. available: {}",
-                personality,
-                PERSONALITY_NAMES.join(", ")
-            ));
+        if ctx.params.is_empty() {
+            return Err("usage: /spawn <personality> [--name <username>]".to_owned());
         }
 
-        // Parse optional --name flag
-        let mut username: Option<String> = None;
+        let personality_name = &ctx.params[0];
+
+        let personality =
+            personalities::resolve_personality(personality_name).ok_or_else(|| {
+                let available = personalities::all_personality_names().join(", ");
+                format!("unknown personality '{personality_name}'. available: {available}")
+            })?;
+
+        // Parse --name flag
+        let mut explicit_name: Option<String> = None;
         let mut i = 1;
         while i < ctx.params.len() {
             if ctx.params[i] == "--name" {
                 i += 1;
                 if i < ctx.params.len() {
-                    username = Some(ctx.params[i].clone());
+                    explicit_name = Some(ctx.params[i].clone());
                 }
             }
             i += 1;
         }
 
-        // Auto-generate username if not provided: <personality>-<short-id>
-        let username = username.unwrap_or_else(|| {
-            let short_id = &ctx.message_id[..4.min(ctx.message_id.len())];
-            format!("{personality}-{short_id}")
-        });
+        // Determine username
+        let used_names: Vec<String> = {
+            let agents = self.agents.lock().unwrap();
+            let mut names: Vec<String> = agents.keys().cloned().collect();
+            names.extend(ctx.metadata.online_users.iter().map(|u| u.username.clone()));
+            names
+        };
 
+        let username = if let Some(name) = explicit_name {
+            name
+        } else {
+            personality.generate_username(&used_names)
+        };
+
+        // Validate username
         if username.is_empty() || username.starts_with('-') {
             return Err("invalid username".to_owned());
         }
 
-        // Check for collision with online users
+        // Check collisions
         if ctx
             .metadata
             .online_users
@@ -395,8 +389,6 @@ impl AgentPlugin {
         {
             return Err(format!("username '{username}' is already online"));
         }
-
-        // Check for collision with already-spawned agents
         {
             let agents = self.agents.lock().unwrap();
             if agents.contains_key(username.as_str()) {
@@ -419,14 +411,34 @@ impl AgentPlugin {
             .try_clone()
             .map_err(|e| format!("failed to clone log file handle: {e}"))?;
 
-        // Build the room-ralph command with --personality
+        // Build the room-ralph command from personality config
+        let model = &personality.personality.model;
         let mut cmd = Command::new("room-ralph");
         cmd.arg(&ctx.room_id)
             .arg(&username)
             .arg("--socket")
             .arg(&self.socket_path)
-            .arg("--personality")
-            .arg(personality);
+            .arg("--model")
+            .arg(model);
+
+        // Apply tool restrictions
+        if personality.tools.allow_all {
+            cmd.arg("--allow-all");
+        } else {
+            if !personality.tools.disallow.is_empty() {
+                cmd.arg("--disallow-tools")
+                    .arg(personality.tools.disallow.join(","));
+            }
+            if !personality.tools.allow.is_empty() {
+                cmd.arg("--allow-tools")
+                    .arg(personality.tools.allow.join(","));
+            }
+        }
+
+        // Apply prompt
+        if !personality.prompt.template.is_empty() {
+            cmd.arg("--prompt").arg(&personality.prompt.template);
+        }
 
         cmd.stdin(Stdio::null())
             .stdout(Stdio::from(log_file))
@@ -441,8 +453,8 @@ impl AgentPlugin {
         let agent = SpawnedAgent {
             username: username.clone(),
             pid,
-            model: format!("{personality}/*"),
-            personality: personality.to_owned(),
+            model: model.clone(),
+            personality: personality_name.to_owned(),
             spawned_at: Utc::now(),
             log_path,
             room_id: ctx.room_id.clone(),
@@ -459,7 +471,7 @@ impl AgentPlugin {
         self.persist();
 
         Ok(format!(
-            "agent {username} spawned (pid {pid}, personality: {personality})"
+            "agent {username} spawned via /spawn {personality_name} (pid {pid}, model: {model})"
         ))
     }
 
@@ -1000,9 +1012,9 @@ mod tests {
             ParamType::Choice(values) => {
                 assert!(values.contains(&"coder".to_owned()));
                 assert!(values.contains(&"reviewer".to_owned()));
-                assert!(values.contains(&"researcher".to_owned()));
+                assert!(values.contains(&"scout".to_owned()));
+                assert!(values.contains(&"qa".to_owned()));
                 assert!(values.contains(&"coordinator".to_owned()));
-                assert!(values.contains(&"documenter".to_owned()));
                 assert_eq!(values.len(), 5);
             }
             other => panic!("expected Choice, got {:?}", other),
@@ -1043,19 +1055,21 @@ mod tests {
     }
 
     #[test]
-    fn spawn_personality_collision_with_auto_generated_name() {
+    fn spawn_personality_auto_name_skips_used() {
         let dir = tempfile::tempdir().unwrap();
         let plugin = test_plugin(dir.path());
 
-        // Pre-insert an agent with the auto-generated name
+        // Pre-insert agents with the first pool names to force later picks
+        let coder = personalities::resolve_personality("coder").unwrap();
+        let first_name = format!("coder-{}", coder.naming.name_pool[0]);
         {
             let mut agents = plugin.agents.lock().unwrap();
             agents.insert(
-                "coder-abcd".to_owned(),
+                first_name.clone(),
                 SpawnedAgent {
-                    username: "coder-abcd".to_owned(),
+                    username: first_name.clone(),
                     pid: std::process::id(),
-                    model: "sonnet".to_owned(),
+                    model: "opus".to_owned(),
                     personality: "coder".to_owned(),
                     spawned_at: Utc::now(),
                     log_path: PathBuf::from("/tmp/test.log"),
@@ -1064,13 +1078,14 @@ mod tests {
             );
         }
 
-        let mut ctx = make_ctx(&plugin, vec!["coder"], vec![]);
-        ctx.command = "spawn".to_owned();
-        ctx.message_id = "abcd-1234".to_owned();
-        // Auto-generated name would be "coder-abcd" which collides
-        let result = plugin.handle_spawn_personality(&ctx);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("already running"));
+        // The name pool should skip the first name and pick the second
+        let used: Vec<String> = {
+            let agents = plugin.agents.lock().unwrap();
+            agents.keys().cloned().collect()
+        };
+        let generated = coder.generate_username(&used);
+        assert_ne!(generated, first_name);
+        assert!(generated.starts_with("coder-"));
     }
 
     #[test]
