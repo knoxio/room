@@ -221,7 +221,7 @@ mod tests {
         }
 
         fn handle(&self, _ctx: CommandContext) -> BoxFuture<'_, anyhow::Result<PluginResult>> {
-            Box::pin(async { Ok(PluginResult::Reply("dummy".to_owned())) })
+            Box::pin(async { Ok(PluginResult::Reply("dummy".to_owned(), None)) })
         }
     }
 

@@ -375,6 +375,9 @@ pub enum Message {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         seq: Option<u64>,
         content: String,
+        /// Optional machine-readable data for programmatic consumers.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        data: Option<serde_json::Value>,
     },
     /// A private direct message. Delivered only to sender, recipient, and the
     /// broker host. Always written to the chat history file.
@@ -608,6 +611,24 @@ pub fn make_system(room: &str, user: &str, content: impl Into<String>) -> Messag
         ts: Utc::now(),
         content: content.into(),
         seq: None,
+        data: None,
+    }
+}
+
+pub fn make_system_with_data(
+    room: &str,
+    user: &str,
+    content: impl Into<String>,
+    data: serde_json::Value,
+) -> Message {
+    Message::System {
+        id: new_id(),
+        room: room.to_owned(),
+        user: user.to_owned(),
+        ts: Utc::now(),
+        content: content.into(),
+        seq: None,
+        data: Some(data),
     }
 }
 
@@ -848,10 +869,70 @@ mod tests {
             ts: fixed_ts(),
             content: "5 users online".into(),
             seq: None,
+            data: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         let back: Message = serde_json::from_str(&json).unwrap();
         assert_eq!(msg, back);
+    }
+
+    #[test]
+    fn system_with_data_round_trips() {
+        let data = serde_json::json!({
+            "action": "spawn",
+            "username": "bot1",
+            "pid": 12345,
+        });
+        let msg = Message::System {
+            id: fixed_id(),
+            room: "r".into(),
+            user: "plugin:agent".into(),
+            ts: fixed_ts(),
+            content: "agent bot1 spawned".into(),
+            seq: None,
+            data: Some(data),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let back: Message = serde_json::from_str(&json).unwrap();
+        assert_eq!(msg, back);
+        // Verify data field is present in JSON
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["data"]["action"], "spawn");
+        assert_eq!(v["data"]["pid"], 12345);
+    }
+
+    #[test]
+    fn system_without_data_omits_field() {
+        let msg = Message::System {
+            id: fixed_id(),
+            room: "r".into(),
+            user: "broker".into(),
+            ts: fixed_ts(),
+            content: "hello".into(),
+            seq: None,
+            data: None,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        // data field should not appear when None
+        assert!(!json.contains("\"data\""));
+        // Should still deserialize fine
+        let back: Message = serde_json::from_str(&json).unwrap();
+        assert_eq!(msg, back);
+    }
+
+    #[test]
+    fn system_data_backward_compat_no_data_field() {
+        // Old messages without a data field should deserialize with data: None
+        let json = r#"{"type":"system","id":"00000000-0000-0000-0000-000000000001","room":"r","user":"broker","ts":"2025-01-01T00:00:00Z","content":"hello"}"#;
+        let msg: Message = serde_json::from_str(json).unwrap();
+        if let Message::System { data, .. } = &msg {
+            assert!(
+                data.is_none(),
+                "missing data field should deserialize as None"
+            );
+        } else {
+            panic!("expected System");
+        }
     }
 
     // ── JSON shape tests ─────────────────────────────────────────────────────

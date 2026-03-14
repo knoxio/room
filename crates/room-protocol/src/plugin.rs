@@ -183,9 +183,11 @@ pub struct CommandContext {
 /// What the broker should do after a plugin handles a command.
 pub enum PluginResult {
     /// Send a private reply only to the invoker.
-    Reply(String),
+    /// Second element is optional machine-readable data for programmatic consumers.
+    Reply(String, Option<serde_json::Value>),
     /// Broadcast a message to the entire room.
-    Broadcast(String),
+    /// Second element is optional machine-readable data for programmatic consumers.
+    Broadcast(String, Option<serde_json::Value>),
     /// Command handled silently (side effects already done via [`MessageWriter`]).
     Handled,
 }

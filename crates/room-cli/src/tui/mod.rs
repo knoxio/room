@@ -160,6 +160,7 @@ mod tests {
             ts: Utc::now(),
             content: content.into(),
             seq: None,
+            data: None,
         }
     }
 

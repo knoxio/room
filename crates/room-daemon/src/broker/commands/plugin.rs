@@ -2,7 +2,7 @@ use std::panic::AssertUnwindSafe;
 use std::time::Duration;
 
 use futures_util::FutureExt;
-use room_protocol::{make_system, Message};
+use room_protocol::{make_system, make_system_with_data, Message};
 
 use crate::broker::{fanout::broadcast_and_persist, state::RoomState};
 use crate::plugin::{snapshot_metadata, ChatWriter, CommandContext, HistoryReader, PluginResult};
@@ -109,10 +109,10 @@ pub(super) async fn run_plugin_with_catch(
                 .or_else(|| panic_info.downcast_ref::<&str>().copied())
                 .unwrap_or("unknown panic");
             eprintln!("[broker] plugin '{}' panicked: {msg}", plugin.name());
-            Ok(PluginResult::Reply(format!(
-                "plugin '{}' panicked: {msg}",
-                plugin.name()
-            )))
+            Ok(PluginResult::Reply(
+                format!("plugin '{}' panicked: {msg}", plugin.name()),
+                None,
+            ))
         }
         Err(_elapsed) => {
             eprintln!(
@@ -120,11 +120,14 @@ pub(super) async fn run_plugin_with_catch(
                 plugin.name(),
                 PLUGIN_TIMEOUT.as_secs()
             );
-            Ok(PluginResult::Reply(format!(
-                "plugin '{}' timed out after {}s",
-                plugin.name(),
-                PLUGIN_TIMEOUT.as_secs()
-            )))
+            Ok(PluginResult::Reply(
+                format!(
+                    "plugin '{}' timed out after {}s",
+                    plugin.name(),
+                    PLUGIN_TIMEOUT.as_secs()
+                ),
+                None,
+            ))
         }
     }
 }
@@ -141,7 +144,7 @@ pub(super) async fn translate_plugin_result(
     cross_room: Option<(&str, &str)>,
 ) -> anyhow::Result<CommandResult> {
     Ok(match result {
-        PluginResult::Reply(text) => {
+        PluginResult::Reply(text, data) => {
             let reply_text = match cross_room {
                 Some((_, target)) => format!("[→{target}] {text}"),
                 None => text,
@@ -150,12 +153,20 @@ pub(super) async fn translate_plugin_result(
                 Some((source, _)) => source,
                 None => &state.room_id,
             };
-            let sys = make_system(reply_room, &format!("plugin:{plugin_name}"), reply_text);
+            let plugin_user = format!("plugin:{plugin_name}");
+            let sys = match data {
+                Some(d) => make_system_with_data(reply_room, &plugin_user, reply_text, d),
+                None => make_system(reply_room, &plugin_user, reply_text),
+            };
             let json = serde_json::to_string(&sys)?;
             CommandResult::Reply(json)
         }
-        PluginResult::Broadcast(text) => {
-            let sys = make_system(&state.room_id, &format!("plugin:{plugin_name}"), text);
+        PluginResult::Broadcast(text, data) => {
+            let plugin_user = format!("plugin:{plugin_name}");
+            let sys = match data {
+                Some(d) => make_system_with_data(&state.room_id, &plugin_user, text, d),
+                None => make_system(&state.room_id, &plugin_user, text),
+            };
             let seq_msg =
                 broadcast_and_persist(&sys, &state.clients, &state.chat_path, &state.seq_counter)
                     .await?;

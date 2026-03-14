@@ -165,9 +165,9 @@ impl Plugin for TaskboardPlugin {
                 if let Some(et) = event_type {
                     let _ = ctx.writer.emit_event(et, &result, None).await;
                 }
-                Ok(PluginResult::Broadcast(result))
+                Ok(PluginResult::Broadcast(result, None))
             } else {
-                Ok(PluginResult::Reply(result))
+                Ok(PluginResult::Reply(result, None))
             }
         })
     }

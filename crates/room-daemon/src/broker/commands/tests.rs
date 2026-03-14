@@ -1897,7 +1897,7 @@ mod tests {
             }
 
             fn handle(&self, _ctx: CommandContext) -> BoxFuture<'_, anyhow::Result<PluginResult>> {
-                Box::pin(async { Ok(PluginResult::Reply("hello".to_owned())) })
+                Box::pin(async { Ok(PluginResult::Reply("hello".to_owned(), None)) })
             }
         }
 
@@ -1949,7 +1949,7 @@ mod tests {
                 Box::pin(async {
                     // Sleep longer than PLUGIN_TIMEOUT
                     tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-                    Ok(PluginResult::Reply("should not reach".to_owned()))
+                    Ok(PluginResult::Reply("should not reach".to_owned(), None))
                 })
             }
         }

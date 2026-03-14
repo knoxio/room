@@ -132,7 +132,7 @@ impl AgentPlugin {
         }
     }
 
-    fn handle_spawn(&self, ctx: &CommandContext) -> Result<String, String> {
+    fn handle_spawn(&self, ctx: &CommandContext) -> Result<(String, serde_json::Value), String> {
         let params = &ctx.params;
         if params.len() < 2 {
             return Err(
@@ -273,15 +273,24 @@ impl AgentPlugin {
         } else {
             format!(", personality: {personality}")
         };
-        Ok(format!(
-            "agent {username} spawned (pid {pid}, model: {model}{personality_info})"
-        ))
+        let text =
+            format!("agent {username} spawned (pid {pid}, model: {model}{personality_info})");
+        let data = serde_json::json!({
+            "action": "spawn",
+            "username": username,
+            "pid": pid,
+            "model": model,
+            "personality": personality,
+            "log_path": log_path.to_string_lossy(),
+        });
+        Ok((text, data))
     }
 
-    fn handle_list(&self) -> String {
+    fn handle_list(&self) -> (String, serde_json::Value) {
         let agents = self.agents.lock().unwrap();
         if agents.is_empty() {
-            return "no agents spawned".to_owned();
+            let data = serde_json::json!({ "action": "list", "agents": [] });
+            return ("no agents spawned".to_owned(), data);
         }
 
         let mut lines =
@@ -306,6 +315,7 @@ impl AgentPlugin {
         let now = Utc::now();
         let mut entries: Vec<_> = agents.values().collect();
         entries.sort_by_key(|a| a.spawned_at);
+        let mut agent_data: Vec<serde_json::Value> = Vec::new();
 
         for agent in entries {
             let uptime = format_duration(now - agent.spawned_at);
@@ -328,9 +338,18 @@ impl AgentPlugin {
                 "{:<12} | {:<5} | {:<11} | {:<6} | {:<7} | {}",
                 agent.username, agent.pid, personality_display, agent.model, uptime, status,
             ));
+            agent_data.push(serde_json::json!({
+                "username": agent.username,
+                "pid": agent.pid,
+                "model": agent.model,
+                "personality": agent.personality,
+                "uptime_secs": (now - agent.spawned_at).num_seconds(),
+                "status": status,
+            }));
         }
 
-        lines.join("\n")
+        let data = serde_json::json!({ "action": "list", "agents": agent_data });
+        (lines.join("\n"), data)
     }
 
     /// Handle `/spawn <personality> [--name <username>]`.
@@ -479,7 +498,7 @@ impl AgentPlugin {
         ))
     }
 
-    fn handle_stop(&self, ctx: &CommandContext) -> Result<String, String> {
+    fn handle_stop(&self, ctx: &CommandContext) -> Result<(String, serde_json::Value), String> {
         if ctx.params.len() < 2 {
             return Err("usage: /agent stop <username>".to_owned());
         }
@@ -528,15 +547,28 @@ impl AgentPlugin {
         }
         self.persist();
 
+        let data = serde_json::json!({
+            "action": "stop",
+            "username": username,
+            "pid": agent.pid,
+            "was_alive": was_alive,
+            "stopped_by": ctx.sender,
+        });
         if was_alive {
-            Ok(format!(
-                "agent {} stopped by {} (was pid {})",
-                username, ctx.sender, agent.pid
+            Ok((
+                format!(
+                    "agent {} stopped by {} (was pid {})",
+                    username, ctx.sender, agent.pid
+                ),
+                data,
             ))
         } else {
-            Ok(format!(
-                "agent {} removed (already exited, was pid {})",
-                username, agent.pid
+            Ok((
+                format!(
+                    "agent {} removed (already exited, was pid {})",
+                    username, agent.pid
+                ),
+                data,
             ))
         }
     }
@@ -616,8 +648,8 @@ impl Plugin for AgentPlugin {
             // `/spawn <personality>` is dispatched here with command == "spawn".
             if ctx.command == "spawn" {
                 return match self.handle_spawn_personality(&ctx) {
-                    Ok(msg) => Ok(PluginResult::Broadcast(msg)),
-                    Err(e) => Ok(PluginResult::Reply(e)),
+                    Ok(msg) => Ok(PluginResult::Broadcast(msg, None)),
+                    Err(e) => Ok(PluginResult::Reply(e, None)),
                 };
             }
 
@@ -626,20 +658,24 @@ impl Plugin for AgentPlugin {
 
             match action {
                 "spawn" => match self.handle_spawn(&ctx) {
-                    Ok(msg) => Ok(PluginResult::Broadcast(msg)),
-                    Err(e) => Ok(PluginResult::Reply(e)),
+                    Ok((msg, data)) => Ok(PluginResult::Broadcast(msg, Some(data))),
+                    Err(e) => Ok(PluginResult::Reply(e, None)),
                 },
-                "list" => Ok(PluginResult::Reply(self.handle_list())),
+                "list" => {
+                    let (text, data) = self.handle_list();
+                    Ok(PluginResult::Reply(text, Some(data)))
+                }
                 "stop" => match self.handle_stop(&ctx) {
-                    Ok(msg) => Ok(PluginResult::Broadcast(msg)),
-                    Err(e) => Ok(PluginResult::Reply(e)),
+                    Ok((msg, data)) => Ok(PluginResult::Broadcast(msg, Some(data))),
+                    Err(e) => Ok(PluginResult::Reply(e, None)),
                 },
                 "logs" => match self.handle_logs(&ctx) {
-                    Ok(msg) => Ok(PluginResult::Reply(msg)),
-                    Err(e) => Ok(PluginResult::Reply(e)),
+                    Ok(msg) => Ok(PluginResult::Reply(msg, None)),
+                    Err(e) => Ok(PluginResult::Reply(e, None)),
                 },
                 _ => Ok(PluginResult::Reply(
                     "unknown action. usage: /agent spawn|list|stop|logs".to_owned(),
+                    None,
                 )),
             }
         })
@@ -841,7 +877,7 @@ mod tests {
     fn list_empty() {
         let dir = tempfile::tempdir().unwrap();
         let plugin = test_plugin(dir.path());
-        assert_eq!(plugin.handle_list(), "no agents spawned");
+        assert_eq!(plugin.handle_list().0, "no agents spawned");
     }
 
     #[test]
@@ -865,7 +901,7 @@ mod tests {
             );
         }
 
-        let output = plugin.handle_list();
+        let (output, _data) = plugin.handle_list();
         assert!(output.contains("bot1"));
         assert!(output.contains("opus"));
         assert!(output.contains("99999"));
@@ -946,7 +982,7 @@ mod tests {
         let ctx = make_ctx(&plugin, vec!["stop", "dead-bot"], vec![]);
         let result = plugin.handle_stop(&ctx);
         assert!(result.is_ok());
-        let msg = result.unwrap();
+        let (msg, _data) = result.unwrap();
         assert!(msg.contains("already exited"));
         assert!(msg.contains("removed"));
 
@@ -1390,8 +1426,8 @@ mod tests {
             .unwrap();
         let result = rt.block_on(plugin.handle(ctx)).unwrap();
         match result {
-            PluginResult::Reply(msg) => assert!(msg.contains("unknown action")),
-            PluginResult::Broadcast(_) => panic!("expected Reply, got Broadcast"),
+            PluginResult::Reply(msg, _) => assert!(msg.contains("unknown action")),
+            PluginResult::Broadcast(..) => panic!("expected Reply, got Broadcast"),
             PluginResult::Handled => panic!("expected Reply, got Handled"),
         }
     }
@@ -1419,7 +1455,7 @@ mod tests {
             );
         }
 
-        let output = plugin.handle_list();
+        let (output, _data) = plugin.handle_list();
         let header = output.lines().next().unwrap();
         assert!(
             header.contains("personality"),
@@ -1449,7 +1485,7 @@ mod tests {
             );
         }
 
-        let output = plugin.handle_list();
+        let (output, _data) = plugin.handle_list();
         // The personality column should show "-" for empty personality.
         let data_line = output.lines().nth(1).unwrap();
         assert!(
@@ -1479,7 +1515,7 @@ mod tests {
             );
         }
 
-        let output = plugin.handle_list();
+        let (output, _data) = plugin.handle_list();
         assert!(
             output.contains("running"),
             "alive process should show 'running'"
@@ -1507,7 +1543,7 @@ mod tests {
             );
         }
 
-        let output = plugin.handle_list();
+        let (output, _data) = plugin.handle_list();
         assert!(
             output.contains("exited (unknown)"),
             "dead process without child handle should show 'exited (unknown)'"
@@ -1539,7 +1575,7 @@ mod tests {
             exit_codes.insert("bot1".to_owned(), Some(0));
         }
 
-        let output = plugin.handle_list();
+        let (output, _data) = plugin.handle_list();
         assert!(
             output.contains("exited (0)"),
             "recorded exit code should appear in output"
@@ -1572,7 +1608,7 @@ mod tests {
             exit_codes.insert("bot1".to_owned(), None);
         }
 
-        let output = plugin.handle_list();
+        let (output, _data) = plugin.handle_list();
         assert!(
             output.contains("exited (signal)"),
             "signal death should show 'exited (signal)'"
@@ -1613,7 +1649,7 @@ mod tests {
             );
         }
 
-        let output = plugin.handle_list();
+        let (output, _data) = plugin.handle_list();
         let lines: Vec<&str> = output.lines().collect();
         // Skip header (line 0), first data line should be "first", second "second".
         assert!(
@@ -1651,7 +1687,7 @@ mod tests {
             exit_codes.insert("reviewer-a1".to_owned(), Some(0));
         }
 
-        let output = plugin.handle_list();
+        let (output, _data) = plugin.handle_list();
         assert!(output.contains("reviewer-a1"));
         assert!(output.contains("reviewer"));
         assert!(output.contains("sonnet"));
@@ -1693,5 +1729,78 @@ mod tests {
         );
         let agents = plugin2.agents.lock().unwrap();
         assert_eq!(agents["bot1"].personality, "coder");
+    }
+
+    // ── structured data tests (#697) ─────────────────────────────────────
+
+    #[test]
+    fn list_data_contains_agents_array() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin = test_plugin(dir.path());
+
+        {
+            let mut agents = plugin.agents.lock().unwrap();
+            agents.insert(
+                "bot1".to_owned(),
+                SpawnedAgent {
+                    username: "bot1".to_owned(),
+                    pid: std::process::id(),
+                    model: "opus".to_owned(),
+                    personality: "coder".to_owned(),
+                    spawned_at: Utc::now(),
+                    log_path: PathBuf::from("/tmp/test.log"),
+                    room_id: "test-room".to_owned(),
+                },
+            );
+        }
+
+        let (_text, data) = plugin.handle_list();
+        assert_eq!(data["action"], "list");
+        let agents = data["agents"].as_array().expect("agents should be array");
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0]["username"], "bot1");
+        assert_eq!(agents[0]["model"], "opus");
+        assert_eq!(agents[0]["personality"], "coder");
+        assert_eq!(agents[0]["status"], "running");
+    }
+
+    #[test]
+    fn list_empty_data_has_empty_agents() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin = test_plugin(dir.path());
+
+        let (_text, data) = plugin.handle_list();
+        assert_eq!(data["action"], "list");
+        let agents = data["agents"].as_array().expect("agents should be array");
+        assert!(agents.is_empty());
+    }
+
+    #[test]
+    fn stop_data_includes_action_and_username() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin = test_plugin(dir.path());
+
+        {
+            let mut agents = plugin.agents.lock().unwrap();
+            agents.insert(
+                "bot1".to_owned(),
+                SpawnedAgent {
+                    username: "bot1".to_owned(),
+                    pid: 999_999_999,
+                    model: "sonnet".to_owned(),
+                    personality: String::new(),
+                    spawned_at: Utc::now(),
+                    log_path: PathBuf::from("/tmp/test.log"),
+                    room_id: "test-room".to_owned(),
+                },
+            );
+        }
+
+        let ctx = make_ctx(&plugin, vec!["stop", "bot1"], vec![]);
+        let (text, data) = plugin.handle_stop(&ctx).unwrap();
+        assert!(text.contains("bot1"));
+        assert_eq!(data["action"], "stop");
+        assert_eq!(data["username"], "bot1");
+        assert_eq!(data["was_alive"], false);
     }
 }

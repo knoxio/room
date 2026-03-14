@@ -109,9 +109,10 @@ impl Plugin for QueuePlugin {
                 "list" => self.handle_list(&ctx).await,
                 "remove" => self.handle_remove(&rest).await,
                 "pop" => self.handle_pop(&ctx.sender).await,
-                _ => Ok(PluginResult::Reply(format!(
-                    "queue: unknown action '{action}'. use add, list, remove, or pop"
-                ))),
+                _ => Ok(PluginResult::Reply(
+                    format!("queue: unknown action '{action}'. use add, list, remove, or pop"),
+                    None,
+                )),
             }
         })
     }
@@ -122,6 +123,7 @@ impl QueuePlugin {
         if rest.is_empty() {
             return Ok(PluginResult::Reply(
                 "queue add: missing task description".to_owned(),
+                None,
             ));
         }
 
@@ -142,16 +144,20 @@ impl QueuePlugin {
         append_item(&self.queue_path, &item)?;
         let count = self.queue.lock().await.len();
 
-        Ok(PluginResult::Broadcast(format!(
-            "queue: {sender} added \"{description}\" (#{count} in backlog)"
-        )))
+        Ok(PluginResult::Broadcast(
+            format!("queue: {sender} added \"{description}\" (#{count} in backlog)"),
+            None,
+        ))
     }
 
     async fn handle_list(&self, _ctx: &CommandContext) -> anyhow::Result<PluginResult> {
         let queue = self.queue.lock().await;
 
         if queue.is_empty() {
-            return Ok(PluginResult::Reply("queue: backlog is empty".to_owned()));
+            return Ok(PluginResult::Reply(
+                "queue: backlog is empty".to_owned(),
+                None,
+            ));
         }
 
         let mut lines = Vec::with_capacity(queue.len() + 1);
@@ -166,7 +172,7 @@ impl QueuePlugin {
             ));
         }
 
-        Ok(PluginResult::Reply(lines.join("\n")))
+        Ok(PluginResult::Reply(lines.join("\n"), None))
     }
 
     async fn handle_remove(&self, rest: &[&str]) -> anyhow::Result<PluginResult> {
@@ -176,6 +182,7 @@ impl QueuePlugin {
             _ => {
                 return Ok(PluginResult::Reply(
                     "queue remove: provide a valid 1-based index".to_owned(),
+                    None,
                 ));
             }
         };
@@ -183,20 +190,23 @@ impl QueuePlugin {
         let removed = {
             let mut queue = self.queue.lock().await;
             if index > queue.len() {
-                return Ok(PluginResult::Reply(format!(
-                    "queue remove: index {index} out of range (queue has {} item(s))",
-                    queue.len()
-                )));
+                return Ok(PluginResult::Reply(
+                    format!(
+                        "queue remove: index {index} out of range (queue has {} item(s))",
+                        queue.len()
+                    ),
+                    None,
+                ));
             }
             queue.remove(index - 1)
         };
 
         self.rewrite_queue().await?;
 
-        Ok(PluginResult::Broadcast(format!(
-            "queue: removed \"{}\" (was #{index})",
-            removed.description
-        )))
+        Ok(PluginResult::Broadcast(
+            format!("queue: removed \"{}\" (was #{index})", removed.description),
+            None,
+        ))
     }
 
     async fn handle_pop(&self, sender: &str) -> anyhow::Result<PluginResult> {
@@ -205,6 +215,7 @@ impl QueuePlugin {
             if queue.is_empty() {
                 return Ok(PluginResult::Reply(
                     "queue pop: backlog is empty, nothing to pop".to_owned(),
+                    None,
                 ));
             }
             queue.remove(0)
@@ -212,10 +223,10 @@ impl QueuePlugin {
 
         self.rewrite_queue().await?;
 
-        Ok(PluginResult::Broadcast(format!(
-            "{sender} popped from queue: \"{}\"",
-            popped.description
-        )))
+        Ok(PluginResult::Broadcast(
+            format!("{sender} popped from queue: \"{}\"", popped.description),
+            None,
+        ))
     }
 
     /// Rewrite the entire queue file from the in-memory state.
@@ -474,7 +485,7 @@ mod tests {
 
         let result = plugin.handle(ctx).await.unwrap();
         match &result {
-            PluginResult::Broadcast(msg) => {
+            PluginResult::Broadcast(msg, None) => {
                 assert!(msg.contains("fix the bug"), "broadcast should mention task");
                 assert!(msg.contains("alice"), "broadcast should mention sender");
                 assert!(msg.contains("#1"), "broadcast should show queue position");
@@ -512,7 +523,7 @@ mod tests {
 
         let result = plugin.handle(ctx).await.unwrap();
         match result {
-            PluginResult::Reply(msg) => assert!(msg.contains("missing task description")),
+            PluginResult::Reply(msg, None) => assert!(msg.contains("missing task description")),
             _ => panic!("expected Reply"),
         }
     }
@@ -534,7 +545,7 @@ mod tests {
 
         let result = plugin.handle(ctx).await.unwrap();
         match result {
-            PluginResult::Reply(msg) => assert!(msg.contains("empty")),
+            PluginResult::Reply(msg, None) => assert!(msg.contains("empty")),
             _ => panic!("expected Reply"),
         }
     }
@@ -565,7 +576,7 @@ mod tests {
         );
         let result = plugin.handle(ctx).await.unwrap();
         match result {
-            PluginResult::Reply(msg) => {
+            PluginResult::Reply(msg, None) => {
                 assert!(msg.contains("2 item(s)"));
                 assert!(msg.contains("1. first task"));
                 assert!(msg.contains("2. second task"));
@@ -605,7 +616,7 @@ mod tests {
         );
         let result = plugin.handle(ctx).await.unwrap();
         match &result {
-            PluginResult::Broadcast(msg) => {
+            PluginResult::Broadcast(msg, None) => {
                 assert!(
                     msg.contains("first"),
                     "broadcast should mention removed item"
@@ -644,7 +655,7 @@ mod tests {
         );
         let result = plugin.handle(ctx).await.unwrap();
         match result {
-            PluginResult::Reply(msg) => assert!(msg.contains("out of range")),
+            PluginResult::Reply(msg, None) => assert!(msg.contains("out of range")),
             _ => panic!("expected Reply"),
         }
     }
@@ -666,7 +677,7 @@ mod tests {
         );
         let result = plugin.handle(ctx).await.unwrap();
         match result {
-            PluginResult::Reply(msg) => assert!(msg.contains("valid 1-based index")),
+            PluginResult::Reply(msg, None) => assert!(msg.contains("valid 1-based index")),
             _ => panic!("expected Reply"),
         }
     }
@@ -688,7 +699,7 @@ mod tests {
         );
         let result = plugin.handle(ctx).await.unwrap();
         match result {
-            PluginResult::Reply(msg) => assert!(msg.contains("valid 1-based index")),
+            PluginResult::Reply(msg, None) => assert!(msg.contains("valid 1-based index")),
             _ => panic!("expected Reply"),
         }
     }
@@ -721,7 +732,7 @@ mod tests {
         );
         let result = plugin.handle(ctx).await.unwrap();
         match &result {
-            PluginResult::Broadcast(msg) => {
+            PluginResult::Broadcast(msg, None) => {
                 assert!(msg.contains("alice"), "broadcast should mention popper");
                 assert!(msg.contains("urgent fix"), "broadcast should mention task");
             }
@@ -756,7 +767,7 @@ mod tests {
         );
         let result = plugin.handle(ctx).await.unwrap();
         match result {
-            PluginResult::Reply(msg) => assert!(msg.contains("empty")),
+            PluginResult::Reply(msg, None) => assert!(msg.contains("empty")),
             _ => panic!("expected Reply"),
         }
     }
@@ -799,7 +810,7 @@ mod tests {
         );
         let result = plugin.handle(ctx).await.unwrap();
         match &result {
-            PluginResult::Broadcast(msg) => assert!(msg.contains("first")),
+            PluginResult::Broadcast(msg, None) => assert!(msg.contains("first")),
             _ => panic!("expected Broadcast"),
         }
 
@@ -807,7 +818,7 @@ mod tests {
         let ctx = make_test_ctx("queue", vec!["pop"], "bob", chat_tmp.path(), &clients, &seq);
         let result = plugin.handle(ctx).await.unwrap();
         match &result {
-            PluginResult::Broadcast(msg) => assert!(msg.contains("second")),
+            PluginResult::Broadcast(msg, None) => assert!(msg.contains("second")),
             _ => panic!("expected Broadcast"),
         }
 
@@ -832,7 +843,7 @@ mod tests {
         );
         let result = plugin.handle(ctx).await.unwrap();
         match result {
-            PluginResult::Reply(msg) => assert!(msg.contains("unknown action")),
+            PluginResult::Reply(msg, None) => assert!(msg.contains("unknown action")),
             _ => panic!("expected Reply"),
         }
     }
