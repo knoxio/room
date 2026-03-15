@@ -365,8 +365,9 @@ impl AgentPlugin {
 
         let personality_name = &ctx.params[0];
 
-        let personality =
-            personalities::resolve_personality(personality_name).ok_or_else(|| {
+        let personality = personalities::resolve_personality(personality_name)
+            .map_err(|e| format!("failed to load personality '{personality_name}': {e}"))?
+            .ok_or_else(|| {
                 let available = personalities::all_personality_names().join(", ");
                 format!("unknown personality '{personality_name}'. available: {available}")
             })?;
@@ -1160,7 +1161,9 @@ mod tests {
         let plugin = test_plugin(dir.path());
 
         // Pre-insert agents with the first pool names to force later picks
-        let coder = personalities::resolve_personality("coder").unwrap();
+        let coder = personalities::resolve_personality("coder")
+            .unwrap()
+            .unwrap();
         let first_name = format!("coder-{}", coder.naming.name_pool[0]);
         {
             let mut agents = plugin.agents.lock().unwrap();

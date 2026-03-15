@@ -1,7 +1,56 @@
 use std::collections::HashMap;
+use std::fmt;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
+
+/// Known model names that can be used in personality files.
+const KNOWN_MODELS: &[&str] = &["opus", "sonnet", "haiku"];
+
+/// Errors that can occur when loading or validating a personality TOML file.
+#[derive(Debug)]
+pub enum PersonalityError {
+    /// File could not be read.
+    Io(std::io::Error),
+    /// TOML content could not be parsed into the expected schema.
+    Parse(toml::de::Error),
+    /// Parsed successfully but field values are invalid.
+    Validation(Vec<String>),
+}
+
+impl fmt::Display for PersonalityError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Io(e) => write!(f, "failed to read personality file: {e}"),
+            Self::Parse(e) => write!(f, "failed to parse personality TOML: {e}"),
+            Self::Validation(errors) => {
+                write!(f, "personality validation failed: {}", errors.join("; "))
+            }
+        }
+    }
+}
+
+impl std::error::Error for PersonalityError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(e) => Some(e),
+            Self::Parse(e) => Some(e),
+            Self::Validation(_) => None,
+        }
+    }
+}
+
+impl From<std::io::Error> for PersonalityError {
+    fn from(e: std::io::Error) -> Self {
+        Self::Io(e)
+    }
+}
+
+impl From<toml::de::Error> for PersonalityError {
+    fn from(e: toml::de::Error) -> Self {
+        Self::Parse(e)
+    }
+}
 
 /// A named agent personality preset.
 ///
@@ -55,6 +104,51 @@ pub struct NamingConfig {
 }
 
 impl Personality {
+    /// Validate that all fields have sensible values.
+    ///
+    /// Returns `Ok(())` if valid, or `Err(PersonalityError::Validation)` with
+    /// a list of human-readable error messages.
+    pub fn validate(&self) -> Result<(), PersonalityError> {
+        let mut errors = Vec::new();
+
+        if self.personality.name.is_empty() {
+            errors.push("personality.name must not be empty".to_owned());
+        }
+
+        if self.personality.description.is_empty() {
+            errors.push("personality.description must not be empty".to_owned());
+        }
+
+        if !KNOWN_MODELS.contains(&self.personality.model.as_str()) {
+            errors.push(format!(
+                "personality.model '{}' is not a known model (expected one of: {})",
+                self.personality.model,
+                KNOWN_MODELS.join(", ")
+            ));
+        }
+
+        for (i, name) in self.naming.name_pool.iter().enumerate() {
+            if name.is_empty() {
+                errors.push(format!("naming.name_pool[{i}] must not be empty"));
+            } else if !name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            {
+                errors.push(format!(
+                    "naming.name_pool[{i}] '{}' contains invalid characters \
+                     (only ASCII alphanumeric, '-', '_' allowed)",
+                    name
+                ));
+            }
+        }
+
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(PersonalityError::Validation(errors))
+        }
+    }
+
     /// Generate a username for this personality.
     ///
     /// If a name pool is configured and `used_names` doesn't exhaust it,
@@ -243,23 +337,31 @@ pub fn all_personality_names() -> Vec<String> {
 /// 2. Built-in defaults compiled into the binary
 ///
 /// User-defined TOML files fully replace built-ins with the same name.
-pub fn resolve_personality(name: &str) -> Option<Personality> {
+/// Returns `Err` if the user TOML exists but is malformed or invalid.
+/// Returns `Ok(None)` if neither a user TOML nor a built-in exists.
+pub fn resolve_personality(name: &str) -> Result<Option<Personality>, PersonalityError> {
     // 1. Try user-defined TOML
     if let Some(dir) = personalities_dir() {
         let toml_path = dir.join(format!("{name}.toml"));
-        if let Some(p) = load_personality_toml(&toml_path) {
-            return Some(p);
+        if toml_path.exists() {
+            let p = load_personality_toml(&toml_path)?;
+            return Ok(Some(p));
         }
     }
 
     // 2. Try built-in
-    builtin_personalities().remove(name)
+    Ok(builtin_personalities().remove(name))
 }
 
-/// Load a personality from a TOML file, returning None on any error.
-fn load_personality_toml(path: &Path) -> Option<Personality> {
-    let content = std::fs::read_to_string(path).ok()?;
-    toml::from_str(&content).ok()
+/// Load and validate a personality from a TOML file.
+///
+/// Returns the parsed and validated personality, or a descriptive error
+/// explaining what went wrong (IO failure, parse error, or validation issues).
+fn load_personality_toml(path: &Path) -> Result<Personality, PersonalityError> {
+    let content = std::fs::read_to_string(path)?;
+    let personality: Personality = toml::from_str(&content)?;
+    personality.validate()?;
+    Ok(personality)
 }
 
 /// Returns the personality directory path (`~/.room/personalities/`).
@@ -427,14 +529,16 @@ allow_all = true
 
     #[test]
     fn resolve_personality_returns_builtin() {
-        let p = resolve_personality("coder").unwrap();
+        let p = resolve_personality("coder").unwrap().unwrap();
         assert_eq!(p.personality.name, "coder");
         assert_eq!(p.personality.model, "opus");
     }
 
     #[test]
     fn resolve_personality_returns_none_for_unknown() {
-        assert!(resolve_personality("nonexistent-personality-xyz").is_none());
+        assert!(resolve_personality("nonexistent-personality-xyz")
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -474,5 +578,224 @@ model = "haiku"
         let mut sorted = names.clone();
         sorted.sort();
         assert_eq!(names, sorted);
+    }
+
+    // ── Validation tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn validate_builtin_personalities_all_pass() {
+        for (name, p) in builtin_personalities() {
+            p.validate()
+                .unwrap_or_else(|e| panic!("builtin '{name}' failed validation: {e}"));
+        }
+    }
+
+    #[test]
+    fn validate_empty_name_rejected() {
+        let toml_str = r#"
+[personality]
+name = ""
+description = "Has a description"
+model = "sonnet"
+"#;
+        let p: Personality = toml::from_str(toml_str).unwrap();
+        let err = p.validate().unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("name must not be empty"),
+            "expected name error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_empty_description_rejected() {
+        let toml_str = r#"
+[personality]
+name = "test"
+description = ""
+model = "sonnet"
+"#;
+        let p: Personality = toml::from_str(toml_str).unwrap();
+        let err = p.validate().unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("description must not be empty"),
+            "expected description error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_unknown_model_rejected() {
+        let toml_str = r#"
+[personality]
+name = "test"
+description = "A test personality"
+model = "gpt-4"
+"#;
+        let p: Personality = toml::from_str(toml_str).unwrap();
+        let err = p.validate().unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("not a known model"),
+            "expected model error, got: {msg}"
+        );
+        assert!(msg.contains("gpt-4"), "should mention the bad model name");
+    }
+
+    #[test]
+    fn validate_empty_name_pool_entry_rejected() {
+        let toml_str = r#"
+[personality]
+name = "test"
+description = "A test personality"
+model = "sonnet"
+
+[naming]
+name_pool = ["good", ""]
+"#;
+        let p: Personality = toml::from_str(toml_str).unwrap();
+        let err = p.validate().unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("name_pool[1] must not be empty"),
+            "expected name_pool error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_name_pool_invalid_chars_rejected() {
+        let toml_str = r#"
+[personality]
+name = "test"
+description = "A test personality"
+model = "sonnet"
+
+[naming]
+name_pool = ["good-name", "bad name!", "also_ok"]
+"#;
+        let p: Personality = toml::from_str(toml_str).unwrap();
+        let err = p.validate().unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("name_pool[1]") && msg.contains("invalid characters"),
+            "expected invalid chars error for index 1, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_multiple_errors_collected() {
+        let toml_str = r#"
+[personality]
+name = ""
+description = ""
+model = "unknown"
+
+[naming]
+name_pool = [""]
+"#;
+        let p: Personality = toml::from_str(toml_str).unwrap();
+        let err = p.validate().unwrap_err();
+        match &err {
+            PersonalityError::Validation(errors) => {
+                assert!(
+                    errors.len() >= 4,
+                    "expected at least 4 errors, got: {errors:?}"
+                );
+            }
+            _ => panic!("expected Validation error, got: {err}"),
+        }
+    }
+
+    #[test]
+    fn validate_valid_personality_passes() {
+        let toml_str = r#"
+[personality]
+name = "custom"
+description = "A valid personality"
+model = "opus"
+
+[naming]
+name_pool = ["alpha", "beta-1", "gamma_2"]
+"#;
+        let p: Personality = toml::from_str(toml_str).unwrap();
+        p.validate().unwrap();
+    }
+
+    #[test]
+    fn load_personality_toml_parse_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad.toml");
+        std::fs::write(&path, "this is not valid [[[ toml").unwrap();
+
+        let err = load_personality_toml(&path).unwrap_err();
+        assert!(
+            matches!(err, PersonalityError::Parse(_)),
+            "expected Parse error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn load_personality_toml_missing_required_field() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("missing.toml");
+        // Missing [personality] section entirely
+        std::fs::write(&path, "[tools]\nallow_all = true\n").unwrap();
+
+        let err = load_personality_toml(&path).unwrap_err();
+        assert!(
+            matches!(err, PersonalityError::Parse(_)),
+            "expected Parse error for missing section, got: {err}"
+        );
+    }
+
+    #[test]
+    fn load_personality_toml_io_error() {
+        let err =
+            load_personality_toml(Path::new("/nonexistent/path/personality.toml")).unwrap_err();
+        assert!(
+            matches!(err, PersonalityError::Io(_)),
+            "expected Io error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn load_personality_toml_validation_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("invalid.toml");
+        std::fs::write(
+            &path,
+            r#"
+[personality]
+name = ""
+description = "valid desc"
+model = "sonnet"
+"#,
+        )
+        .unwrap();
+
+        let err = load_personality_toml(&path).unwrap_err();
+        assert!(
+            matches!(err, PersonalityError::Validation(_)),
+            "expected Validation error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn personality_error_display_io() {
+        let err = PersonalityError::Io(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "not found",
+        ));
+        let msg = err.to_string();
+        assert!(msg.contains("failed to read personality file"));
+    }
+
+    #[test]
+    fn personality_error_display_validation() {
+        let err = PersonalityError::Validation(vec!["bad name".to_owned(), "bad model".to_owned()]);
+        let msg = err.to_string();
+        assert!(msg.contains("bad name"));
+        assert!(msg.contains("bad model"));
+        assert!(msg.contains("; "));
     }
 }
