@@ -35,14 +35,6 @@ pub fn room_data_dir() -> PathBuf {
     room_home().join("data")
 }
 
-/// Directory for external plugin shared libraries: `~/.room/plugins/`.
-///
-/// The dynamic plugin loader scans this directory for `.so` (Linux) or
-/// `.dylib` (macOS) files and loads them via the C ABI entry points.
-pub fn room_plugins_dir() -> PathBuf {
-    room_home().join("plugins")
-}
-
 /// Platform-native runtime directory for ephemeral room files (sockets,
 /// PID, meta).
 ///
