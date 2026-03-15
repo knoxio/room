@@ -7,6 +7,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `--heartbeat-interval <N>` flag and `RALPH_HEARTBEAT_INTERVAL` environment variable
+  for periodic `/set_status` heartbeat updates every N iterations (default: 5).
+  Includes iteration count and wall-clock uptime. Set to 0 to disable. (#750)
+
 ## [3.4.0] - 2026-03-15
 
 ## [3.3.0] - 2026-03-15
