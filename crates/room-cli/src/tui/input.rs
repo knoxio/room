@@ -209,6 +209,16 @@ fn handle_enter(
         state.mention.deactivate();
     } else if state.palette.active {
         complete_palette_selection(state, online_users, daemon_users);
+        // If no sub-picker was activated (mention or choice), the command is
+        // fully formed — send it immediately instead of requiring a second Enter.
+        if !state.mention.active && !state.choice.active && !state.input.is_empty() {
+            let payload = build_payload(&state.input);
+            state.input.clear();
+            state.cursor_pos = 0;
+            state.input_row_scroll = 0;
+            state.scroll_offset = 0;
+            return Some(Action::Send(payload));
+        }
     } else if key.modifiers.contains(KeyModifiers::SHIFT) {
         state.input.insert(state.cursor_pos, '\n');
         state.cursor_pos += 1;
@@ -1659,5 +1669,38 @@ mod tests {
         state.scroll_offset = 3;
         handle_key(make_key(KeyCode::PageDown), &mut state, &[], &[], 10, 80);
         assert_eq!(state.scroll_offset, 0, "PageDown should not go below 0");
+    }
+
+    // ── Palette Enter sends immediately for no-param commands (#720) ─────────
+
+    #[test]
+    fn palette_enter_sends_immediately_for_no_param_command() {
+        let mut state = InputState::new();
+        // Type "/who" — palette should be active
+        for c in "/who".chars() {
+            handle_key(make_key(KeyCode::Char(c)), &mut state, &[], &[], 10, 80);
+        }
+        assert!(state.palette.active, "palette should be active after /who");
+        // Press Enter — should complete and send in one keystroke
+        let action = handle_key(make_key(KeyCode::Enter), &mut state, &[], &[], 10, 80);
+        assert!(
+            matches!(action, Some(Action::Send(_))),
+            "Enter on no-param palette command should send immediately"
+        );
+        assert!(state.input.is_empty(), "input should be cleared after send");
+    }
+
+    #[test]
+    fn palette_enter_does_not_send_when_mention_picker_activates() {
+        let mut state = InputState::new();
+        let users = vec!["alice".to_owned()];
+        for c in "/dm".chars() {
+            handle_key(make_key(KeyCode::Char(c)), &mut state, &users, &[], 10, 80);
+        }
+        assert!(state.palette.active, "palette should be active after /dm");
+        // Press Enter — should activate mention picker, not send
+        let action = handle_key(make_key(KeyCode::Enter), &mut state, &users, &[], 10, 80);
+        assert!(action.is_none(), "Enter on /dm should not send immediately");
+        assert!(state.mention.active, "mention picker should be active");
     }
 }
