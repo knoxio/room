@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 
 use crate::claude::{self, ClaudeOutput};
 use crate::monitor;
@@ -20,6 +21,7 @@ pub async fn run_loop(cli: &Cli, token: String, running: &Arc<AtomicBool>) -> Re
     let mut token = token;
     let socket_str = cli.socket.as_ref().map(|p| p.display().to_string());
     let socket_ref = socket_str.as_deref();
+    let start_time = Instant::now();
 
     // Resolve personality once: builtin prompt text or file contents.
     let personality_text = resolve_personality_text(cli);
@@ -33,6 +35,8 @@ pub async fn run_loop(cli: &Cli, token: String, running: &Arc<AtomicBool>) -> Re
         }
 
         tracing::info!("--- iteration {} ---", iteration);
+
+        maybe_send_heartbeat(cli, &token, socket_ref, iteration, start_time);
 
         let messages = poll_with_token_refresh(cli, &mut token, socket_ref);
         let prompt_text =
@@ -296,6 +300,55 @@ fn on_claude_error(
     .ok();
 }
 
+/// Send a heartbeat /set_status if the current iteration is a heartbeat tick.
+///
+/// Heartbeats are sent every `cli.heartbeat_interval` iterations. A value of
+/// 0 disables heartbeats entirely. The status includes the iteration count
+/// and wall-clock uptime since the loop started.
+fn maybe_send_heartbeat(
+    cli: &Cli,
+    token: &str,
+    socket_ref: Option<&str>,
+    iteration: u32,
+    start_time: Instant,
+) {
+    let interval = cli.heartbeat_interval;
+    if interval == 0 || !iteration.is_multiple_of(interval) {
+        return;
+    }
+    let status = format_heartbeat(iteration, start_time.elapsed(), cli.issue.as_deref());
+    room::set_status(&cli.room_id, token, &status, socket_ref).ok();
+    tracing::debug!("heartbeat sent: {}", status);
+}
+
+/// Format the heartbeat status message.
+///
+/// Includes iteration count, uptime in human-readable form, and optionally
+/// the issue number being worked on.
+fn format_heartbeat(iteration: u32, uptime: std::time::Duration, issue: Option<&str>) -> String {
+    let uptime_str = format_duration(uptime);
+    match issue {
+        Some(i) => format!("heartbeat — iteration {iteration}, uptime {uptime_str}, issue #{i}"),
+        None => format!("heartbeat — iteration {iteration}, uptime {uptime_str}"),
+    }
+}
+
+/// Format a Duration as a human-readable string (e.g. "5m 30s", "1h 2m 3s").
+fn format_duration(d: std::time::Duration) -> String {
+    let total_secs = d.as_secs();
+    let hours = total_secs / 3600;
+    let minutes = (total_secs % 3600) / 60;
+    let seconds = total_secs % 60;
+
+    if hours > 0 {
+        format!("{hours}h {minutes}m {seconds}s")
+    } else if minutes > 0 {
+        format!("{minutes}m {seconds}s")
+    } else {
+        format!("{seconds}s")
+    }
+}
+
 /// Broadcast offline status and final message after the loop exits.
 fn shutdown(cli: &Cli, token: &str, socket_ref: Option<&str>, iteration: u32) {
     tracing::info!("room-ralph stopped after {} iterations", iteration);
@@ -373,4 +426,58 @@ async fn cooldown(seconds: u64, running: &Arc<AtomicBool>) {
     }
     tracing::debug!("cooldown {}s", seconds);
     tokio::time::sleep(std::time::Duration::from_secs(seconds)).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn format_duration_seconds_only() {
+        assert_eq!(format_duration(Duration::from_secs(0)), "0s");
+        assert_eq!(format_duration(Duration::from_secs(42)), "42s");
+        assert_eq!(format_duration(Duration::from_secs(59)), "59s");
+    }
+
+    #[test]
+    fn format_duration_minutes_and_seconds() {
+        assert_eq!(format_duration(Duration::from_secs(60)), "1m 0s");
+        assert_eq!(format_duration(Duration::from_secs(90)), "1m 30s");
+        assert_eq!(format_duration(Duration::from_secs(3599)), "59m 59s");
+    }
+
+    #[test]
+    fn format_duration_hours() {
+        assert_eq!(format_duration(Duration::from_secs(3600)), "1h 0m 0s");
+        assert_eq!(format_duration(Duration::from_secs(3661)), "1h 1m 1s");
+        assert_eq!(format_duration(Duration::from_secs(7384)), "2h 3m 4s");
+    }
+
+    #[test]
+    fn format_heartbeat_with_issue() {
+        let uptime = Duration::from_secs(330); // 5m 30s
+        let result = format_heartbeat(10, uptime, Some("42"));
+        assert_eq!(result, "heartbeat — iteration 10, uptime 5m 30s, issue #42");
+    }
+
+    #[test]
+    fn format_heartbeat_without_issue() {
+        let uptime = Duration::from_secs(7384); // 2h 3m 4s
+        let result = format_heartbeat(25, uptime, None);
+        assert_eq!(result, "heartbeat — iteration 25, uptime 2h 3m 4s");
+    }
+
+    #[test]
+    fn format_heartbeat_zero_uptime() {
+        let result = format_heartbeat(1, Duration::ZERO, Some("99"));
+        assert_eq!(result, "heartbeat — iteration 1, uptime 0s, issue #99");
+    }
+
+    #[test]
+    fn format_heartbeat_large_iteration() {
+        let uptime = Duration::from_secs(86400); // 24h
+        let result = format_heartbeat(500, uptime, None);
+        assert_eq!(result, "heartbeat — iteration 500, uptime 24h 0m 0s");
+    }
 }

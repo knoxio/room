@@ -46,6 +46,23 @@ fn launch_tmux(cli: &Cli) -> Result<(), String> {
     }
 
     let exe = std::env::current_exe().map_err(|e| format!("cannot find own path: {e}"))?;
+    let args = build_tmux_args(cli);
+    let cmd_str = format!("{} {}", exe.display(), args.join(" "));
+    std::process::Command::new("tmux")
+        .args(["new-session", "-d", "-s", &session_name, &cmd_str])
+        .status()
+        .map_err(|e| format!("tmux new-session failed: {e}"))?;
+
+    tracing::info!("started tmux session: {}", session_name);
+    tracing::info!("attach with: tmux attach -t {}", session_name);
+    Ok(())
+}
+
+/// Build the CLI argument list for re-launching ralph inside a tmux session.
+///
+/// Reproduces every non-default CLI flag so the detached session runs with
+/// the same configuration as the parent invocation.
+fn build_tmux_args(cli: &Cli) -> Vec<String> {
     let mut args = vec![
         cli.room_id.clone(),
         cli.username.clone(),
@@ -83,16 +100,11 @@ fn launch_tmux(cli: &Cli) -> Result<(), String> {
     if cli.allow_all {
         args.push("--allow-all".into());
     }
-
-    let cmd_str = format!("{} {}", exe.display(), args.join(" "));
-    std::process::Command::new("tmux")
-        .args(["new-session", "-d", "-s", &session_name, &cmd_str])
-        .status()
-        .map_err(|e| format!("tmux new-session failed: {e}"))?;
-
-    tracing::info!("started tmux session: {}", session_name);
-    tracing::info!("attach with: tmux attach -t {}", session_name);
-    Ok(())
+    if cli.heartbeat_interval != 5 {
+        args.push("--heartbeat-interval".into());
+        args.push(cli.heartbeat_interval.to_string());
+    }
+    args
 }
 
 #[tokio::main]

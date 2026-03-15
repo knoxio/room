@@ -10,6 +10,12 @@ For changes prior to the workspace restructure (v0.1.2 through v1.0.2), see the
 
 ## [Unreleased]
 
+### Fixed
+
+- `room send` now interprets escape sequences (`\n`, `\t`, `\r`, `\\`) in message
+  content instead of passing them as literal backslash characters. Also applies to
+  `room dm`. 12 new unit tests. (#742)
+
 ## [3.4.0] - 2026-03-15
 
 ## [3.3.0] - 2026-03-15
