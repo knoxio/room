@@ -71,7 +71,8 @@ jobs:
           if [ "${{ github.event_name }}" = "push" ] || [ -z "${{ steps.changed.outputs.packages }}" ]; then
             cargo nextest run
           else
-            cargo nextest run ${{ steps.changed.outputs.packages }}
+            # Exit code 4 = no tests matched the filter (acceptable for narrow -p scopes)
+            cargo nextest run ${{ steps.changed.outputs.packages }} || [ $? -eq 4 ]
           fi
       - name: Smoke tests (ignored)
         # Runs tests marked #[ignore]: ws_smoke (subprocess + WS/REST).
