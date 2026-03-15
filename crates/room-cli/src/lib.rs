@@ -6,3 +6,4 @@ pub mod client;
 pub mod message;
 pub mod oneshot;
 pub mod tui;
+pub mod upgrade;

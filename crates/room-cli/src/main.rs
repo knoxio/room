@@ -371,6 +371,9 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
+        Some(Cmd::Upgrade { execute }) => {
+            room_cli::upgrade::cmd_upgrade(execute)?;
+        }
         Some(Cmd::List) => {
             oneshot::cmd_list().await?;
         }

@@ -10,6 +10,10 @@ For changes prior to the workspace restructure (v0.1.2 through v1.0.2), see the
 
 ## [Unreleased]
 
+### Added
+
+- `room upgrade` command — checks crates.io for newer room-cli/room-ralph versions, verifies plugin compatibility, displays upgrade plan. Pass `--execute` to run `cargo install` (#747)
+
 ### Fixed
 
 - `room send` now interprets escape sequences (`\n`, `\t`, `\r`, `\\`) in message

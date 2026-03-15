@@ -275,6 +275,16 @@ pub enum Cmd {
         #[command(subcommand)]
         action: AgentAction,
     },
+    /// Check for newer versions and optionally upgrade room-cli and room-ralph.
+    ///
+    /// Queries crates.io for latest stable versions, reads plugin metadata from
+    /// `~/.room/plugins/` to check protocol compatibility, and displays an
+    /// upgrade plan. Pass `--execute` to run `cargo install` automatically.
+    Upgrade {
+        /// Actually execute the upgrade (default: dry-run only).
+        #[arg(long)]
+        execute: bool,
+    },
     /// List active rooms with running brokers.
     ///
     /// Scans `/tmp` for `room-*.sock` files and probes each to verify the broker
