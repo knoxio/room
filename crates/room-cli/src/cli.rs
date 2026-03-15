@@ -275,6 +275,15 @@ pub enum Cmd {
         #[command(subcommand)]
         action: AgentAction,
     },
+    /// Manage plugins — install, list, remove, or update.
+    ///
+    /// Downloads plugin crates from crates.io, compiles them to shared
+    /// libraries, and installs to `~/.room/plugins/`. The daemon loads
+    /// installed plugins on startup.
+    Plugin {
+        #[command(subcommand)]
+        action: PluginAction,
+    },
     /// List active rooms with running brokers.
     ///
     /// Scans `/tmp` for `room-*.sock` files and probes each to verify the broker
@@ -359,6 +368,37 @@ pub enum AgentAction {
         /// Number of lines to show from the end (default: 50)
         #[arg(long, default_value_t = 50)]
         tail: usize,
+    },
+}
+
+/// Plugin management subcommands.
+#[derive(Subcommand, Debug)]
+pub enum PluginAction {
+    /// Install a plugin from crates.io.
+    ///
+    /// Resolves `room-plugin-<name>` on crates.io, compiles to a shared
+    /// library, and installs to `~/.room/plugins/` with a `.meta.json` file.
+    Install {
+        /// Plugin name (e.g. `agent` resolves to crate `room-plugin-agent`)
+        name: String,
+        /// Install a specific version (default: latest)
+        #[arg(long)]
+        version: Option<String>,
+    },
+    /// List installed plugins with versions and compatibility info.
+    List,
+    /// Remove an installed plugin.
+    Remove {
+        /// Plugin name to remove
+        name: String,
+    },
+    /// Update an installed plugin to the latest version.
+    Update {
+        /// Plugin name to update
+        name: String,
+        /// Update to a specific version (default: latest)
+        #[arg(long)]
+        version: Option<String>,
     },
 }
 
