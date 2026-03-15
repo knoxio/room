@@ -83,6 +83,10 @@ fn launch_tmux(cli: &Cli) -> Result<(), String> {
     if cli.allow_all {
         args.push("--allow-all".into());
     }
+    if cli.heartbeat_interval != 5 {
+        args.push("--heartbeat-interval".into());
+        args.push(cli.heartbeat_interval.to_string());
+    }
 
     let cmd_str = format!("{} {}", exe.display(), args.join(" "));
     std::process::Command::new("tmux")

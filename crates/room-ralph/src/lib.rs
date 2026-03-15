@@ -104,6 +104,10 @@ pub struct Cli {
     #[arg(long, env = "RALPH_ALLOW_ALL")]
     pub allow_all: bool,
 
+    /// Send a heartbeat /set_status every N iterations (0 = disabled)
+    #[arg(long, default_value_t = 5, env = "RALPH_HEARTBEAT_INTERVAL")]
+    pub heartbeat_interval: u32,
+
     /// Print the prompt that would be sent, then exit
     #[arg(long)]
     pub dry_run: bool,
@@ -128,6 +132,7 @@ mod tests {
             "RALPH_DISALLOWED_TOOLS",
             "RALPH_PROFILE",
             "RALPH_ALLOW_ALL",
+            "RALPH_HEARTBEAT_INTERVAL",
             "ROOM_SOCKET",
             "ROOM_TOKEN",
         ] {
@@ -405,6 +410,79 @@ mod tests {
             cli.allow_all,
             "allow_all should be true from RALPH_ALLOW_ALL env var"
         );
+        clear_ralph_env();
+    }
+
+    #[test]
+    fn heartbeat_interval_defaults_to_five() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        clear_ralph_env();
+
+        let cli = Cli::try_parse_from(["room-ralph", "myroom", "myuser"]).unwrap();
+        assert_eq!(cli.heartbeat_interval, 5);
+        clear_ralph_env();
+    }
+
+    #[test]
+    fn heartbeat_interval_from_flag() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        clear_ralph_env();
+
+        let cli = Cli::try_parse_from([
+            "room-ralph",
+            "myroom",
+            "myuser",
+            "--heartbeat-interval",
+            "10",
+        ])
+        .unwrap();
+        assert_eq!(cli.heartbeat_interval, 10);
+        clear_ralph_env();
+    }
+
+    #[test]
+    fn heartbeat_interval_zero_disables() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        clear_ralph_env();
+
+        let cli = Cli::try_parse_from([
+            "room-ralph",
+            "myroom",
+            "myuser",
+            "--heartbeat-interval",
+            "0",
+        ])
+        .unwrap();
+        assert_eq!(cli.heartbeat_interval, 0);
+        clear_ralph_env();
+    }
+
+    #[test]
+    fn heartbeat_interval_from_env() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        clear_ralph_env();
+
+        unsafe { std::env::set_var("RALPH_HEARTBEAT_INTERVAL", "3") };
+        let cli = Cli::try_parse_from(["room-ralph", "myroom", "myuser"]).unwrap();
+        assert_eq!(cli.heartbeat_interval, 3);
+        clear_ralph_env();
+    }
+
+    #[test]
+    fn heartbeat_interval_flag_overrides_env() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        clear_ralph_env();
+
+        unsafe { std::env::set_var("RALPH_HEARTBEAT_INTERVAL", "7") };
+        let cli = Cli::try_parse_from([
+            "room-ralph",
+            "myroom",
+            "myuser",
+            "--heartbeat-interval",
+            "2",
+        ])
+        .unwrap();
+        assert_eq!(cli.heartbeat_interval, 2);
         clear_ralph_env();
     }
 
