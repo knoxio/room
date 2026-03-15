@@ -26,6 +26,34 @@ pub use who::cmd_who;
 use room_protocol::dm_room_id;
 use transport::send_message_with_token_target as transport_send_target;
 
+/// Interpret common escape sequences in CLI message content.
+///
+/// When users pass `\n`, `\t`, or `\\` in shell arguments, these arrive as literal
+/// two-character sequences (backslash + letter). This function converts them to the
+/// actual characters so messages render correctly in the TUI.
+fn unescape_content(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut chars = input.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                Some('n') => out.push('\n'),
+                Some('t') => out.push('\t'),
+                Some('\\') => out.push('\\'),
+                Some('r') => out.push('\r'),
+                Some(other) => {
+                    out.push('\\');
+                    out.push(other);
+                }
+                None => out.push('\\'),
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// One-shot send subcommand: connect, send, print echo JSON to stdout, exit.
 ///
 /// Authenticates via `token` (from `room join`). The broker resolves the sender's
@@ -44,11 +72,12 @@ pub async fn cmd_send(
     socket: Option<&std::path::Path>,
 ) -> anyhow::Result<()> {
     let target = resolve_socket_target(room_id, socket);
+    let unescaped = unescape_content(content);
     let wire = match to {
         Some(recipient) => {
-            serde_json::json!({"type": "dm", "to": recipient, "content": content}).to_string()
+            serde_json::json!({"type": "dm", "to": recipient, "content": unescaped}).to_string()
         }
-        None => build_wire_payload(content),
+        None => build_wire_payload(&unescaped),
     };
     let msg = transport_send_target(&target, token, &wire)
         .await
@@ -87,7 +116,8 @@ pub async fn cmd_dm(
     let dm_id = dm_room_id(&caller, recipient).map_err(|e| anyhow::anyhow!("{e}"))?;
 
     // Build the wire payload as a DM message
-    let wire = serde_json::json!({"type": "dm", "to": recipient, "content": content}).to_string();
+    let unescaped = unescape_content(content);
+    let wire = serde_json::json!({"type": "dm", "to": recipient, "content": unescaped}).to_string();
 
     // Resolve socket target for the DM room.
     let target = resolve_socket_target(&dm_id, socket);
@@ -295,5 +325,74 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&wire).unwrap();
         assert_eq!(v["type"], "message");
         assert_eq!(v["content"], "");
+    }
+
+    // ── unescape_content ─────────────────────────────────────────────────────
+
+    #[test]
+    fn unescape_newline() {
+        assert_eq!(unescape_content(r"hello\nworld"), "hello\nworld");
+    }
+
+    #[test]
+    fn unescape_tab() {
+        assert_eq!(unescape_content(r"col1\tcol2"), "col1\tcol2");
+    }
+
+    #[test]
+    fn unescape_carriage_return() {
+        assert_eq!(unescape_content(r"line\r"), "line\r");
+    }
+
+    #[test]
+    fn unescape_backslash() {
+        assert_eq!(unescape_content(r"path\\to\\file"), r"path\to\file");
+    }
+
+    #[test]
+    fn unescape_multiple_sequences() {
+        assert_eq!(
+            unescape_content(r"line1\nline2\nline3"),
+            "line1\nline2\nline3"
+        );
+    }
+
+    #[test]
+    fn unescape_mixed_sequences() {
+        assert_eq!(unescape_content(r"a\tb\nc\\d"), "a\tb\nc\\d");
+    }
+
+    #[test]
+    fn unescape_unknown_sequence_preserved() {
+        assert_eq!(unescape_content(r"hello\xworld"), r"hello\xworld");
+    }
+
+    #[test]
+    fn unescape_trailing_backslash() {
+        assert_eq!(unescape_content(r"trailing\"), "trailing\\");
+    }
+
+    #[test]
+    fn unescape_no_sequences() {
+        assert_eq!(unescape_content("plain text"), "plain text");
+    }
+
+    #[test]
+    fn unescape_empty() {
+        assert_eq!(unescape_content(""), "");
+    }
+
+    #[test]
+    fn unescape_only_backslash_n() {
+        assert_eq!(unescape_content(r"\n"), "\n");
+    }
+
+    /// Regression test for #742: escape sequences in wire payload via cmd_send path.
+    #[test]
+    fn wire_payload_contains_real_newline_after_unescape() {
+        let unescaped = unescape_content(r"line1\nline2");
+        let wire = build_wire_payload(&unescaped);
+        let v: serde_json::Value = serde_json::from_str(&wire).unwrap();
+        assert_eq!(v["content"].as_str().unwrap(), "line1\nline2");
     }
 }
