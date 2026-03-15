@@ -10,6 +10,12 @@ For changes prior to the workspace restructure (v0.1.2 through v1.0.2), see the
 
 ## [Unreleased]
 
+### Added
+
+- **tests:** 27 integration tests covering manual test plan gaps (#675) — slash commands
+  (/help, /info, /stats), queue lifecycle, taskboard cancel/reclaim, team commands, REST
+  regex+combined filters, subscription tiers, unicode/emoji handling, edge cases
+
 ### Fixed
 
 - `room send` now interprets escape sequences (`\n`, `\t`, `\r`, `\\`) in message
