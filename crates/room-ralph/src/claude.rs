@@ -258,6 +258,13 @@ fn build_claude_command(
     for var in STRIPPED_ENV_VARS {
         cmd.env_remove(var);
     }
+    // Pass the pre-provisioned token so claude's CLAUDE.md instructions
+    // can skip `room join` and use the token directly.
+    if let Ok(token) = std::env::var(crate::room::ROOM_TOKEN_ENV) {
+        if !token.is_empty() {
+            cmd.env(crate::room::ROOM_TOKEN_ENV, &token);
+        }
+    }
     cmd.args(["-p", "--model", model, "--output-format", "json"]);
     for dir in add_dirs {
         cmd.args(["--add-dir", &dir.display().to_string()]);

@@ -56,6 +56,7 @@ pub fn build_prompt(config: &PromptConfig<'_>, messages: &[Message]) -> String {
             config.room_id, config.token
         ));
         prompt.push_str("Rules:\n");
+        prompt.push_str("- Do NOT call `room join` — your token is already provisioned above\n");
         prompt.push_str("- Announce your plan before writing code\n");
         prompt.push_str("- One concern per PR\n");
         prompt.push_str("- Run scripts/pre-push.sh before pushing\n");
