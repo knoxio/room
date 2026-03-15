@@ -182,6 +182,7 @@ fn try_invoke_claude(
         &cli.add_dirs,
         &effective_tools,
         &effective_disallowed,
+        Some(token),
     ) {
         Ok(output) => Some(output),
         Err(e) => {

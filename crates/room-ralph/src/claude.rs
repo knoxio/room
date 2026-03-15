@@ -253,17 +253,22 @@ fn build_claude_command(
     add_dirs: &[PathBuf],
     allowed_tools: &[String],
     disallowed_tools: &[String],
+    room_token: Option<&str>,
 ) -> Command {
     let mut cmd = Command::new("claude");
     for var in STRIPPED_ENV_VARS {
         cmd.env_remove(var);
     }
-    // Pass the pre-provisioned token so claude's CLAUDE.md instructions
-    // can skip `room join` and use the token directly.
-    if let Ok(token) = std::env::var(crate::room::ROOM_TOKEN_ENV) {
-        if !token.is_empty() {
-            cmd.env(crate::room::ROOM_TOKEN_ENV, &token);
-        }
+    // Pass the room token so the claude subprocess uses the same identity
+    // as room-ralph instead of creating its own via `room join`.
+    // Prefer the explicit token (from ralph's join_room) over env var.
+    let effective_token = room_token.map(|t| t.to_owned()).or_else(|| {
+        std::env::var(crate::room::ROOM_TOKEN_ENV)
+            .ok()
+            .filter(|t| !t.is_empty())
+    });
+    if let Some(token) = effective_token {
+        cmd.env(crate::room::ROOM_TOKEN_ENV, token);
     }
     cmd.args(["-p", "--model", model, "--output-format", "json"]);
     for dir in add_dirs {
@@ -288,11 +293,13 @@ pub fn spawn_claude(
     add_dirs: &[PathBuf],
     allowed_tools: &[String],
     disallowed_tools: &[String],
+    room_token: Option<&str>,
 ) -> Result<ClaudeOutput, String> {
     let prompt = std::fs::read_to_string(prompt_file)
         .map_err(|e| format!("cannot read prompt file {}: {e}", prompt_file.display()))?;
 
-    let mut cmd = build_claude_command(model, add_dirs, allowed_tools, disallowed_tools);
+    let mut cmd =
+        build_claude_command(model, add_dirs, allowed_tools, disallowed_tools, room_token);
     cmd.stdin(std::process::Stdio::piped());
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
@@ -435,7 +442,7 @@ mod tests {
 
     #[test]
     fn build_command_base_args() {
-        let cmd = build_claude_command("opus", &[], &[], &[]);
+        let cmd = build_claude_command("opus", &[], &[], &[], None);
         let args: Vec<_> = cmd
             .get_args()
             .map(|a| a.to_string_lossy().to_string())
@@ -446,7 +453,7 @@ mod tests {
     #[test]
     fn build_command_with_add_dirs() {
         let dirs = vec![PathBuf::from("/tmp/dir1"), PathBuf::from("/tmp/dir2")];
-        let cmd = build_claude_command("sonnet", &dirs, &[], &[]);
+        let cmd = build_claude_command("sonnet", &dirs, &[], &[], None);
         let args: Vec<_> = cmd
             .get_args()
             .map(|a| a.to_string_lossy().to_string())
@@ -459,7 +466,7 @@ mod tests {
     #[test]
     fn build_command_with_allowed_tools() {
         let tools = vec!["Bash".to_string(), "Read".to_string(), "Write".to_string()];
-        let cmd = build_claude_command("opus", &[], &tools, &[]);
+        let cmd = build_claude_command("opus", &[], &tools, &[], None);
         let args: Vec<_> = cmd
             .get_args()
             .map(|a| a.to_string_lossy().to_string())
@@ -475,7 +482,7 @@ mod tests {
 
     #[test]
     fn build_command_empty_allowed_tools() {
-        let cmd = build_claude_command("opus", &[], &[], &[]);
+        let cmd = build_claude_command("opus", &[], &[], &[], None);
         let args: Vec<_> = cmd
             .get_args()
             .map(|a| a.to_string_lossy().to_string())
@@ -487,7 +494,7 @@ mod tests {
     fn build_command_with_dirs_and_tools() {
         let dirs = vec![PathBuf::from("/tmp/work")];
         let tools = vec!["Bash".to_string()];
-        let cmd = build_claude_command("opus", &dirs, &tools, &[]);
+        let cmd = build_claude_command("opus", &dirs, &tools, &[], None);
         let args: Vec<_> = cmd
             .get_args()
             .map(|a| a.to_string_lossy().to_string())
@@ -610,7 +617,7 @@ mod tests {
 
     #[test]
     fn build_command_strips_claudecode_env_vars() {
-        let cmd = build_claude_command("opus", &[], &[], &[]);
+        let cmd = build_claude_command("opus", &[], &[], &[], None);
         let removals: Vec<_> = cmd
             .get_envs()
             .filter(|(_, val)| val.is_none())
@@ -630,6 +637,40 @@ mod tests {
         assert!(STRIPPED_ENV_VARS.contains(&"CLAUDE_CODE_ENTRY_POINT"));
     }
 
+    #[test]
+    fn build_command_passes_explicit_room_token() {
+        let cmd = build_claude_command("opus", &[], &[], &[], Some("test-token-uuid"));
+        let envs: Vec<_> = cmd
+            .get_envs()
+            .filter(|(_, val)| val.is_some())
+            .map(|(key, val)| {
+                (
+                    key.to_string_lossy().to_string(),
+                    val.unwrap().to_string_lossy().to_string(),
+                )
+            })
+            .collect();
+        assert!(
+            envs.contains(&("ROOM_TOKEN".to_string(), "test-token-uuid".to_string())),
+            "ROOM_TOKEN should be set in child env when explicit token given"
+        );
+    }
+
+    #[test]
+    fn build_command_omits_room_token_when_none_and_no_env() {
+        // Clear env to ensure no ROOM_TOKEN leaks from other tests
+        let _lock = ENV_LOCK.lock().unwrap();
+        unsafe { std::env::remove_var(crate::room::ROOM_TOKEN_ENV) };
+        let cmd = build_claude_command("opus", &[], &[], &[], None);
+        let has_room_token = cmd
+            .get_envs()
+            .any(|(key, val)| key == "ROOM_TOKEN" && val.is_some());
+        assert!(
+            !has_room_token,
+            "ROOM_TOKEN should not be set when no token and no env var"
+        );
+    }
+
     // --- disallowed tools tests ---
 
     #[test]
@@ -639,7 +680,7 @@ mod tests {
             "Edit".to_string(),
             "Bash(python3:*)".to_string(),
         ];
-        let cmd = build_claude_command("opus", &[], &[], &disallowed);
+        let cmd = build_claude_command("opus", &[], &[], &disallowed, None);
         let args: Vec<_> = cmd
             .get_args()
             .map(|a| a.to_string_lossy().to_string())
@@ -654,7 +695,7 @@ mod tests {
 
     #[test]
     fn build_command_empty_disallowed_tools() {
-        let cmd = build_claude_command("opus", &[], &[], &[]);
+        let cmd = build_claude_command("opus", &[], &[], &[], None);
         let args: Vec<_> = cmd
             .get_args()
             .map(|a| a.to_string_lossy().to_string())
@@ -666,7 +707,7 @@ mod tests {
     fn build_command_both_allowed_and_disallowed() {
         let allowed = vec!["Read".to_string(), "Glob".to_string()];
         let disallowed = vec!["Write".to_string(), "Edit".to_string()];
-        let cmd = build_claude_command("opus", &[], &allowed, &disallowed);
+        let cmd = build_claude_command("opus", &[], &allowed, &disallowed, None);
         let args: Vec<_> = cmd
             .get_args()
             .map(|a| a.to_string_lossy().to_string())
