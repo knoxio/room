@@ -121,8 +121,13 @@ async fn smoke_rest_health() {
     assert_eq!(resp.status(), 200);
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["status"], "ok");
-    assert_eq!(body["room"], "smoke_health");
     assert_eq!(body["version"], env!("CARGO_PKG_VERSION"));
+    // Daemon health returns a "rooms" array instead of a single "room" field.
+    let rooms = body["rooms"].as_array().expect("expected rooms array");
+    assert!(
+        rooms.iter().any(|r| r["room"] == "smoke_health"),
+        "smoke_health room not found in health response: {body}"
+    );
 
     child.kill().await.ok();
 }

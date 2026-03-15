@@ -73,13 +73,9 @@ jobs:
             cargo nextest run ${{ steps.changed.outputs.packages }}
           fi
       - name: Smoke tests (ignored)
-        # Runs tests marked #[ignore]: ws_smoke (subprocess + WS/REST) and
-        # ensure_daemon (subprocess auto-start). These spawn real `room` processes
-        # and are fast on Linux CI (~100ms each) but excluded from the normal
-        # test run to keep local dev fast.
-        # Non-blocking: smoke tests are inherently flaky (process startup timing)
-        # and should not gate PRs. See #393 for daemon-mode incompatibility.
-        continue-on-error: true
+        # Runs tests marked #[ignore]: ws_smoke (subprocess + WS/REST).
+        # These spawn real `room` processes and are fast on Linux CI (~100ms each)
+        # but excluded from the normal test run to keep local dev fast.
         run: cargo nextest run -p room-cli --run-ignored ignored-only
 
   changelog:
