@@ -4,6 +4,20 @@ All notable changes to `room-plugin-agent` will be documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+
+- `PersonalityError` enum with `Io`, `Parse`, and `Validation` variants for typed error reporting
+- `Personality::validate()` method — checks name, description, model, and name_pool entries
+- TOML schema validation on personality load — malformed files now produce clear error messages
+- 13 new tests covering all validation and error paths
+
+### Changed
+
+- `load_personality_toml` returns `Result<Personality, PersonalityError>` instead of `Option<Personality>`
+- `resolve_personality` returns `Result<Option<Personality>, PersonalityError>` — propagates errors from malformed user TOML files instead of silently falling through to builtins
+
 ## [3.2.0] - 2026-03-13
 
 ### Added
