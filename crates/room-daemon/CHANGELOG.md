@@ -7,6 +7,11 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `PluginRegistry::notify_message()` — broadcasts message observations to all plugins
+- Broker session calls `notify_message` after every successful broadcast/DM persist
+
 ## [3.4.0] - 2026-03-15
 
 ## [3.3.0] - 2026-03-15

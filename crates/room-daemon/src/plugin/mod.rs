@@ -169,6 +169,15 @@ impl PluginRegistry {
         }
     }
 
+    /// Notify all registered plugins that a message was broadcast.
+    ///
+    /// Calls [`Plugin::on_message`] on every plugin in registration order.
+    pub fn notify_message(&self, msg: &room_protocol::Message) {
+        for plugin in &self.plugins {
+            plugin.on_message(msg);
+        }
+    }
+
     /// Completions for a specific command at a given argument position,
     /// derived from the parameter schema.
     ///
@@ -468,6 +477,51 @@ mod tests {
         // Should not panic with zero plugins
         reg.notify_join("alice");
         reg.notify_leave("alice");
+    }
+
+    #[test]
+    fn registry_notify_message_calls_all_plugins() {
+        use std::sync::{Arc, Mutex};
+
+        struct MessageTracker {
+            messages: Arc<Mutex<Vec<String>>>,
+        }
+
+        impl Plugin for MessageTracker {
+            fn name(&self) -> &str {
+                "msg-tracker"
+            }
+
+            fn handle(&self, _ctx: CommandContext) -> BoxFuture<'_, anyhow::Result<PluginResult>> {
+                Box::pin(async { Ok(PluginResult::Handled) })
+            }
+
+            fn on_message(&self, msg: &room_protocol::Message) {
+                self.messages.lock().unwrap().push(msg.user().to_owned());
+            }
+        }
+
+        let messages = Arc::new(Mutex::new(Vec::<String>::new()));
+        let mut reg = PluginRegistry::new();
+        reg.register(Box::new(MessageTracker {
+            messages: messages.clone(),
+        }))
+        .unwrap();
+
+        let msg = room_protocol::make_message("room", "alice", "hello");
+        reg.notify_message(&msg);
+        reg.notify_message(&room_protocol::make_message("room", "bob", "hi"));
+
+        let recorded = messages.lock().unwrap();
+        assert_eq!(*recorded, vec!["alice", "bob"]);
+    }
+
+    #[test]
+    fn registry_notify_message_empty_registry_is_noop() {
+        let reg = PluginRegistry::new();
+        let msg = room_protocol::make_message("room", "alice", "hello");
+        // Should not panic with zero plugins
+        reg.notify_message(&msg);
     }
 
     #[test]

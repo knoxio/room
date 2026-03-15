@@ -35,6 +35,7 @@ fn test_cli(f: impl FnOnce(&mut Cli)) -> Cli {
         profile: None,
         socket: None,
         allow_all: false,
+        heartbeat_interval: 5,
         dry_run: false,
     };
     f(&mut cli);

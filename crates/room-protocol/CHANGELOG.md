@@ -14,6 +14,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   symbol name constants, `config_from_raw` helper
 - `declare_plugin!` macro for generating cdylib ABI entry points with
   `cfg_attr`-gated `#[no_mangle]` (via `cdylib-exports` feature flag)
+- `Plugin::on_message()` lifecycle hook — called after every broadcast, default no-op
 
 ## [3.4.0] - 2026-03-15
 
