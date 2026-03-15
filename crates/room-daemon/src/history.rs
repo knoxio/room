@@ -43,6 +43,33 @@ pub async fn tail(path: &Path, n: usize) -> anyhow::Result<Vec<Message>> {
     Ok(all[start..].to_vec())
 }
 
+/// Return the highest `seq` value from persisted messages, or 0 if the file
+/// is empty or does not exist.
+///
+/// Used on broker startup to resume sequence numbering from the last persisted
+/// message, preventing seq resets across broker restarts (bug #721).
+pub fn max_seq_from_history(path: &Path) -> u64 {
+    let raw = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(_) => return 0,
+    };
+    let mut max = 0u64;
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Ok(msg) = serde_json::from_str::<Message>(trimmed) {
+            if let Some(seq) = msg.seq() {
+                if seq > max {
+                    max = seq;
+                }
+            }
+        }
+    }
+    max
+}
+
 /// Append a single message as a JSON line to the NDJSON file.
 ///
 /// Uses `spawn_blocking` + `std::fs::OpenOptions` directly to avoid the
@@ -157,6 +184,52 @@ mod tests {
 
         let loaded = load(path).await.unwrap();
         assert_eq!(loaded.len(), 5);
+    }
+
+    #[test]
+    fn max_seq_nonexistent_file_returns_zero() {
+        let path = PathBuf::from("/tmp/__room_test_no_such_file_seq.chat");
+        assert_eq!(max_seq_from_history(&path), 0);
+    }
+
+    #[test]
+    fn max_seq_empty_file_returns_zero() {
+        let tmp = NamedTempFile::new().unwrap();
+        assert_eq!(max_seq_from_history(tmp.path()), 0);
+    }
+
+    #[tokio::test]
+    async fn max_seq_returns_highest_seq() {
+        let tmp = NamedTempFile::new().unwrap();
+        let path = tmp.path();
+
+        // Write messages with seq values via broadcast simulation
+        let mut m1 = make_message("r", "alice", "first");
+        m1.set_seq(5);
+        let mut m2 = make_message("r", "bob", "second");
+        m2.set_seq(10);
+        let mut m3 = make_message("r", "carol", "third");
+        m3.set_seq(7);
+
+        append(path, &m1).await.unwrap();
+        append(path, &m2).await.unwrap();
+        append(path, &m3).await.unwrap();
+
+        assert_eq!(max_seq_from_history(path), 10);
+    }
+
+    #[tokio::test]
+    async fn max_seq_messages_without_seq_returns_zero() {
+        let tmp = NamedTempFile::new().unwrap();
+        let path = tmp.path();
+
+        // Messages without set_seq have seq=None
+        append(path, &make_message("r", "alice", "no seq"))
+            .await
+            .unwrap();
+        append(path, &make_join("r", "bob")).await.unwrap();
+
+        assert_eq!(max_seq_from_history(path), 0);
     }
 
     #[tokio::test]

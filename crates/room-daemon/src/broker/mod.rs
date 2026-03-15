@@ -153,7 +153,9 @@ impl Broker {
             chat_path: Arc::new(self.chat_path.clone()),
             room_id: Arc::new(self.room_id.clone()),
             shutdown: Arc::new(shutdown_tx),
-            seq_counter: Arc::new(AtomicU64::new(0)),
+            seq_counter: Arc::new(AtomicU64::new(crate::history::max_seq_from_history(
+                &self.chat_path,
+            ))),
             plugin_registry: Arc::new(registry),
             config: None,
             cross_room_resolver: std::sync::OnceLock::new(),

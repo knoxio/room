@@ -127,6 +127,7 @@ impl RoomState {
             .map_err(|e| format!("plugin error: {e}"))?;
 
         let (shutdown_tx, _) = watch::channel(false);
+        let initial_seq = crate::history::max_seq_from_history(&chat_path);
 
         Ok(Arc::new(Self {
             clients: Arc::new(Mutex::new(HashMap::new())),
@@ -145,7 +146,7 @@ impl RoomState {
             chat_path: Arc::new(chat_path),
             room_id: Arc::new(room_id),
             shutdown: Arc::new(shutdown_tx),
-            seq_counter: Arc::new(AtomicU64::new(0)),
+            seq_counter: Arc::new(AtomicU64::new(initial_seq)),
             plugin_registry: Arc::new(plugins),
             config,
             cross_room_resolver: OnceLock::new(),
