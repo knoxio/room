@@ -14,6 +14,8 @@ jobs:
       SCCACHE_GHA_ENABLED: "true"
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -21,12 +23,55 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
+      - name: Detect changed crates
+        id: changed
+        if: github.event_name == 'pull_request'
+        run: |
+          CHANGED=$(git diff --name-only origin/${{ github.base_ref }}...HEAD -- crates/)
+          PACKAGES=""
+          # Dependency chain: protocol -> plugin-*, daemon -> cli
+          # If protocol changes, test everything
+          if echo "$CHANGED" | grep -q "^crates/room-protocol/"; then
+            PACKAGES="--workspace"
+          else
+            if echo "$CHANGED" | grep -q "^crates/room-daemon/"; then
+              PACKAGES="$PACKAGES -p room-daemon -p room-cli"
+            fi
+            if echo "$CHANGED" | grep -q "^crates/room-cli/"; then
+              PACKAGES="$PACKAGES -p room-cli"
+            fi
+            if echo "$CHANGED" | grep -q "^crates/room-ralph/"; then
+              PACKAGES="$PACKAGES -p room-ralph"
+            fi
+            if echo "$CHANGED" | grep -q "^crates/room-plugin-agent/"; then
+              PACKAGES="$PACKAGES -p room-plugin-agent -p room-daemon -p room-cli"
+            fi
+            if echo "$CHANGED" | grep -q "^crates/room-plugin-taskboard/"; then
+              PACKAGES="$PACKAGES -p room-plugin-taskboard -p room-daemon -p room-cli"
+            fi
+            # Deduplicate -p flags
+            PACKAGES=$(echo "$PACKAGES" | tr ' ' '\n' | sort -u | tr '\n' ' ')
+          fi
+          # If no crate changes detected (e.g. docs/scripts only), skip tests
+          if [ -z "$PACKAGES" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "packages=$PACKAGES" >> "$GITHUB_OUTPUT"
+          fi
+          echo "Detected test scope: ${PACKAGES:-SKIP}"
       - name: Check formatting
         run: cargo fmt --check
       - name: Clippy
         run: cargo clippy -- -D warnings
       - name: Tests
-        run: cargo nextest run
+        if: steps.changed.outputs.skip != 'true'
+        run: |
+          if [ "${{ github.event_name }}" = "push" ] || [ -z "${{ steps.changed.outputs.packages }}" ]; then
+            cargo nextest run
+          else
+            cargo nextest run ${{ steps.changed.outputs.packages }}
+          fi
       - name: Smoke tests (ignored)
         # Runs tests marked #[ignore]: ws_smoke (subprocess + WS/REST) and
         # ensure_daemon (subprocess auto-start). These spawn real `room` processes
