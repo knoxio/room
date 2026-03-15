@@ -70,7 +70,10 @@ pub fn effective_socket_path(explicit: Option<&std::path::Path>) -> PathBuf {
     room_socket_path()
 }
 
-/// Platform-native socket path for a single-room broker.
+/// Socket path for a standalone single-room broker (test fixtures only).
+///
+/// Production code uses the daemon socket (`effective_socket_path`). This
+/// function exists for `TestBroker` in integration tests.
 pub fn room_single_socket_path(room_id: &str) -> PathBuf {
     runtime_dir().join(format!("room-{room_id}.sock"))
 }

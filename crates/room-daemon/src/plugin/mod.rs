@@ -82,18 +82,8 @@ impl PluginRegistry {
         // Derive agent plugin paths from the chat path.
         let agent_state_path = chat_path.with_extension("agents");
         let agent_log_dir = chat_path.parent().unwrap_or(chat_path).join("agent-logs");
-        let room_id = chat_path
-            .file_stem()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .into_owned();
-        // Use the daemon socket if it exists, otherwise fall back to single-room socket.
-        let daemon_socket = crate::paths::room_socket_path();
-        let agent_socket_path = if daemon_socket.exists() {
-            daemon_socket
-        } else {
-            crate::paths::room_single_socket_path(&room_id)
-        };
+        // All rooms run through the daemon — use the daemon socket.
+        let agent_socket_path = crate::paths::effective_socket_path(None);
         registry.register(Box::new(room_plugin_agent::AgentPlugin::new(
             agent_state_path,
             agent_socket_path,

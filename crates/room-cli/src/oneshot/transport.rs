@@ -11,12 +11,12 @@ use crate::message::Message;
 
 /// Resolved connection target for a broker.
 ///
-/// When `daemon_room` is `Some(room_id)`, the client is connecting to the
-/// multi-room daemon (`roomd`) and must prepend `ROOM:<room_id>:` before every
-/// handshake token so the daemon can route the connection to the correct room.
+/// All connections go through the multi-room daemon (`roomd`). The client
+/// prepends `ROOM:<room_id>:` before every handshake token so the daemon can
+/// route the connection to the correct room.
 ///
-/// When `daemon_room` is `None`, the client is connecting to a single-room
-/// broker socket and sends handshake tokens directly (e.g. `TOKEN:<uuid>`).
+/// `daemon_room` is always `Some(room_id)` in production. `None` is only used
+/// by test fixtures that connect directly to a standalone `Broker` instance.
 #[derive(Debug, Clone)]
 pub struct SocketTarget {
     /// Path to the UDS socket.
@@ -42,43 +42,16 @@ impl SocketTarget {
 
 /// Resolve the effective socket target for a given room.
 ///
-/// Resolution order:
-/// 1. If `explicit` is given, use it. If the path is not the per-room socket
-///    for this room, assume it is a daemon socket and use the `ROOM:` prefix.
-/// 2. Otherwise (auto-discovery): try the platform-native daemon socket first
-///    (`room_socket_path()`); fall back to the per-room socket if the daemon
-///    socket does not exist.
+/// All rooms are managed by the daemon. If `explicit` is given, use it as the
+/// daemon socket path; otherwise use the platform-native daemon socket
+/// (`effective_socket_path()`).
 pub fn resolve_socket_target(room_id: &str, explicit: Option<&Path>) -> SocketTarget {
-    let per_room = crate::paths::room_single_socket_path(room_id);
-    // ROOM_SOCKET env var overrides the default daemon socket path.
-    let daemon = crate::paths::effective_socket_path(None);
-
-    if let Some(path) = explicit {
-        // If the caller gave us the per-room socket path, use per-room mode.
-        // Any other explicit path is treated as a daemon socket.
-        if path == per_room {
-            return SocketTarget {
-                path: path.to_owned(),
-                daemon_room: None,
-            };
-        }
-        return SocketTarget {
-            path: path.to_owned(),
-            daemon_room: Some(room_id.to_owned()),
-        };
-    }
-
-    // Auto-discovery: prefer daemon if it is running.
-    if daemon.exists() {
-        SocketTarget {
-            path: daemon,
-            daemon_room: Some(room_id.to_owned()),
-        }
-    } else {
-        SocketTarget {
-            path: per_room,
-            daemon_room: None,
-        }
+    let path = explicit
+        .map(|p| p.to_owned())
+        .unwrap_or_else(|| crate::paths::effective_socket_path(None));
+    SocketTarget {
+        path,
+        daemon_room: Some(room_id.to_owned()),
     }
 }
 
@@ -596,18 +569,7 @@ mod tests {
     // ── resolve_socket_target ─────────────────────────────────────────────────
 
     #[test]
-    fn resolve_explicit_per_room_socket_is_not_daemon() {
-        let per_room = crate::paths::room_single_socket_path("myroom");
-        let target = resolve_socket_target("myroom", Some(&per_room));
-        assert_eq!(target.path, per_room);
-        assert!(
-            target.daemon_room.is_none(),
-            "per-room socket should not set daemon_room"
-        );
-    }
-
-    #[test]
-    fn resolve_explicit_daemon_socket_is_daemon() {
+    fn resolve_explicit_socket_is_daemon() {
         let daemon_sock = PathBuf::from("/tmp/roomd.sock");
         let target = resolve_socket_target("myroom", Some(&daemon_sock));
         assert_eq!(target.path, daemon_sock);
@@ -623,17 +585,10 @@ mod tests {
     }
 
     #[test]
-    fn resolve_auto_no_daemon_falls_back_to_per_room() {
-        // When no daemon socket exists (we check the real daemon path, which
-        // is unlikely to exist during CI), auto-discovery should fall back.
-        // We can only test this if the daemon socket is NOT running.
-        let daemon_path = crate::paths::room_socket_path();
-        if !daemon_path.exists() {
-            let target = resolve_socket_target("myroom", None);
-            assert_eq!(target.path, crate::paths::room_single_socket_path("myroom"));
-            assert!(target.daemon_room.is_none());
-        }
-        // If daemon IS running, skip (we can't test both branches in one call).
+    fn resolve_auto_uses_daemon_socket() {
+        let target = resolve_socket_target("myroom", None);
+        // Should always use daemon socket path with daemon_room set
+        assert_eq!(target.daemon_room.as_deref(), Some("myroom"));
     }
 
     // ── resolve_daemon_binary ────────────────────────────────────────────────

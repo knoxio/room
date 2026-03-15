@@ -11,7 +11,7 @@ pub enum Cmd {
     /// Returns the existing token if the username is already registered.
     Join {
         username: String,
-        /// Override the broker socket path (default: auto-discover daemon or per-room socket)
+        /// Override the daemon socket path (default: auto-discover)
         #[arg(long)]
         socket: Option<PathBuf>,
     },
@@ -27,7 +27,7 @@ pub enum Cmd {
         /// Recipient username for a direct message
         #[arg(long)]
         to: Option<String>,
-        /// Override the broker socket path (default: auto-discover daemon or per-room socket)
+        /// Override the daemon socket path (default: auto-discover)
         #[arg(long)]
         socket: Option<PathBuf>,
         /// Message content; all remaining tokens are joined with spaces
@@ -186,7 +186,7 @@ pub enum Cmd {
         /// status_changed, review_requested.
         #[arg(long)]
         events: Option<String>,
-        /// Override the broker socket path (default: auto-discover daemon or per-room socket)
+        /// Override the daemon socket path (default: auto-discover)
         #[arg(long)]
         socket: Option<PathBuf>,
     },
@@ -202,7 +202,7 @@ pub enum Cmd {
         /// Print raw JSON instead of human-readable text
         #[arg(long)]
         json: bool,
-        /// Override the broker socket path (default: auto-discover daemon or per-room socket)
+        /// Override the daemon socket path (default: auto-discover)
         #[arg(long)]
         socket: Option<PathBuf>,
     },
@@ -217,7 +217,7 @@ pub enum Cmd {
         /// Session token from `room join` (required)
         #[arg(short = 't', long)]
         token: String,
-        /// Override the broker socket path (default: auto-discover daemon or per-room socket)
+        /// Override the daemon socket path (default: auto-discover)
         #[arg(long)]
         socket: Option<PathBuf>,
         /// Message content; all remaining tokens are joined with spaces
@@ -269,7 +269,7 @@ pub enum Cmd {
         /// Session token from `room join` (required)
         #[arg(short = 't', long)]
         token: String,
-        /// Override the broker socket path (default: auto-discover daemon or per-room socket)
+        /// Override the daemon socket path (default: auto-discover)
         #[arg(long)]
         socket: Option<PathBuf>,
         #[command(subcommand)]
