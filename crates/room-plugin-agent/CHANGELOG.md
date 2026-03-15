@@ -18,12 +18,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `PersonalityError` enum with `Io`, `Parse`, and `Validation` variants for typed error reporting
 - `Personality::validate()` method — checks name, description, model, and name_pool entries
 - TOML schema validation on personality load — malformed files now produce clear error messages
-- 13 new tests covering all validation and error paths
+- `scan_personalities_dir()` — loads all `.toml` files from `~/.room/personalities/`, collecting per-file errors
+- `merge_personality()` — merges user overrides into built-in base with deny-wins semantics for tool restrictions
+- `all_personalities()` — returns merged map of built-ins + user overrides
+- 25 new tests covering validation, scanning, merging, and error paths
 
 ### Changed
 
 - `load_personality_toml` returns `Result<Personality, PersonalityError>` instead of `Option<Personality>`
 - `resolve_personality` returns `Result<Option<Personality>, PersonalityError>` — propagates errors from malformed user TOML files instead of silently falling through to builtins
+- `resolve_personality` now merges user overrides with built-in defaults instead of full replacement
+- `all_personality_names` now delegates to `all_personalities` for consistent behavior
 
 ## [3.2.0] - 2026-03-13
 
