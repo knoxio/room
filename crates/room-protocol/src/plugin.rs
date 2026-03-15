@@ -179,24 +179,26 @@ pub mod abi {
 
         /// Reconstruct the plugin name.
         ///
+        /// Returns `Err` if the bytes are not valid UTF-8.
+        ///
         /// # Safety
         ///
         /// The declaration must still be valid — i.e. the shared library that
-        /// exported it must not have been unloaded.
-        pub unsafe fn name(&self) -> &str {
-            core::str::from_utf8_unchecked(core::slice::from_raw_parts(
-                self.name_ptr,
-                self.name_len,
-            ))
+        /// exported it must not have been unloaded, and the pointer/length pair
+        /// must point to a valid byte slice.
+        pub unsafe fn name(&self) -> Result<&str, core::str::Utf8Error> {
+            core::str::from_utf8(core::slice::from_raw_parts(self.name_ptr, self.name_len))
         }
 
         /// Reconstruct the plugin version string.
         ///
+        /// Returns `Err` if the bytes are not valid UTF-8.
+        ///
         /// # Safety
         ///
         /// Same as [`name`](Self::name).
-        pub unsafe fn version(&self) -> &str {
-            core::str::from_utf8_unchecked(core::slice::from_raw_parts(
+        pub unsafe fn version(&self) -> Result<&str, core::str::Utf8Error> {
+            core::str::from_utf8(core::slice::from_raw_parts(
                 self.version_ptr,
                 self.version_len,
             ))
@@ -204,11 +206,13 @@ pub mod abi {
 
         /// Reconstruct the minimum protocol version string.
         ///
+        /// Returns `Err` if the bytes are not valid UTF-8.
+        ///
         /// # Safety
         ///
         /// Same as [`name`](Self::name).
-        pub unsafe fn min_protocol(&self) -> &str {
-            core::str::from_utf8_unchecked(core::slice::from_raw_parts(
+        pub unsafe fn min_protocol(&self) -> Result<&str, core::str::Utf8Error> {
+            core::str::from_utf8(core::slice::from_raw_parts(
                 self.min_protocol_ptr,
                 self.min_protocol_len,
             ))
@@ -254,16 +258,17 @@ pub mod abi {
     /// Helper to extract a `&str` config from raw FFI pointers.
     ///
     /// Returns an empty string if the pointer is null or the length is zero.
+    /// Panics if the bytes are not valid UTF-8.
     ///
     /// # Safety
     ///
-    /// If `ptr` is non-null, it must be valid for reads of `len` bytes and
-    /// point to valid UTF-8.
+    /// If `ptr` is non-null, it must be valid for reads of `len` bytes.
     pub unsafe fn config_from_raw(ptr: *const u8, len: usize) -> &'static str {
         if ptr.is_null() || len == 0 {
             ""
         } else {
-            core::str::from_utf8_unchecked(core::slice::from_raw_parts(ptr, len))
+            let bytes = core::slice::from_raw_parts(ptr, len);
+            core::str::from_utf8(bytes).expect("plugin config is not valid UTF-8")
         }
     }
 }
@@ -636,9 +641,9 @@ mod tests {
         let decl = abi::PluginDeclaration::new(1, "test-plugin", "1.2.3", "3.0.0");
         assert_eq!(decl.api_version, 1);
         unsafe {
-            assert_eq!(decl.name(), "test-plugin");
-            assert_eq!(decl.version(), "1.2.3");
-            assert_eq!(decl.min_protocol(), "3.0.0");
+            assert_eq!(decl.name().unwrap(), "test-plugin");
+            assert_eq!(decl.version().unwrap(), "1.2.3");
+            assert_eq!(decl.min_protocol().unwrap(), "3.0.0");
         }
     }
 

@@ -7,6 +7,14 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `plugin::abi` module with C ABI types for dynamic plugin loading:
+  `PluginDeclaration` (`#[repr(C)]`), `CreateFn`, `DestroyFn` type aliases,
+  symbol name constants, `config_from_raw` helper
+- `declare_plugin!` macro for generating cdylib ABI entry points with
+  `cfg_attr`-gated `#[no_mangle]` (via `cdylib-exports` feature flag)
+
 ## [3.4.0] - 2026-03-15
 
 ## [3.3.0] - 2026-03-15

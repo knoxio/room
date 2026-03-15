@@ -1848,9 +1848,9 @@ mod tests {
         let decl = &ROOM_PLUGIN_DECLARATION;
         assert_eq!(decl.api_version, room_protocol::plugin::PLUGIN_API_VERSION);
         unsafe {
-            assert_eq!(decl.name(), "agent");
-            assert_eq!(decl.version(), env!("CARGO_PKG_VERSION"));
-            assert_eq!(decl.min_protocol(), "0.0.0");
+            assert_eq!(decl.name().unwrap(), "agent");
+            assert_eq!(decl.version().unwrap(), env!("CARGO_PKG_VERSION"));
+            assert_eq!(decl.min_protocol().unwrap(), "0.0.0");
         }
     }
 
