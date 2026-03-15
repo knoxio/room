@@ -275,6 +275,16 @@ pub enum Cmd {
         #[command(subcommand)]
         action: AgentAction,
     },
+    /// Manage installed plugins (list, remove, update).
+    ///
+    /// Plugins are installed to `~/.room/plugins/` as shared libraries with
+    /// `.meta.json` sidecar files. Use `room plugin list` to see installed
+    /// plugins, `room plugin remove <name>` to uninstall, and
+    /// `room plugin update <name>` to rebuild from the latest crate version.
+    Plugin {
+        #[command(subcommand)]
+        action: PluginAction,
+    },
     /// List active rooms with running brokers.
     ///
     /// Scans `/tmp` for `room-*.sock` files and probes each to verify the broker
@@ -325,6 +335,23 @@ pub enum Cmd {
         /// to subsequent commands to target the isolated instance.
         #[arg(long)]
         isolated: bool,
+    },
+}
+
+/// Plugin management subcommands.
+#[derive(Subcommand, Debug)]
+pub enum PluginAction {
+    /// List all installed plugins with version and compatibility info.
+    List,
+    /// Remove an installed plugin by name.
+    Remove {
+        /// Plugin name (e.g. "agent", "taskboard")
+        name: String,
+    },
+    /// Update an installed plugin to the latest version from crates.io.
+    Update {
+        /// Plugin name (e.g. "agent", "taskboard")
+        name: String,
     },
 }
 

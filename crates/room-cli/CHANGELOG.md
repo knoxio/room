@@ -10,6 +10,11 @@ For changes prior to the workspace restructure (v0.1.2 through v1.0.2), see the
 
 ## [Unreleased]
 
+### Added
+
+- **cli:** `room plugin list|remove|update` subcommands for managing installed plugins (#746).
+  Scans `~/.room/plugins/*.meta.json` for installed plugin metadata. 10 unit tests.
+
 ## [3.4.0] - 2026-03-15
 
 ## [3.3.0] - 2026-03-15

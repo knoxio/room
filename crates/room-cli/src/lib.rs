@@ -5,4 +5,5 @@ pub use room_daemon::{broker, history, paths, plugin, query, registry};
 pub mod client;
 pub mod message;
 pub mod oneshot;
+pub mod plugin_cmd;
 pub mod tui;
