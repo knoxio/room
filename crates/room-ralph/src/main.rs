@@ -205,6 +205,11 @@ async fn main() -> ExitCode {
         cli.username = join_result.username;
     }
 
+    // Subscribe to the room so poll/watch deliver messages
+    if let Err(e) = room::subscribe_room(&cli.room_id, &token, socket_ref) {
+        tracing::warn!("failed to subscribe to room: {}", e);
+    }
+
     let announce = {
         let mut parts = vec![format!(
             "online (room-ralph, model={}, iter limit={}",

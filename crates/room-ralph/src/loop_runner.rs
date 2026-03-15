@@ -103,6 +103,9 @@ fn rejoin_and_poll(
         Ok(result) => {
             tracing::info!("re-joined as '{}' with new token", result.username);
             *token = result.token;
+            if let Err(e) = room::subscribe_room(&cli.room_id, token, socket_ref) {
+                tracing::warn!("failed to subscribe after re-join: {}", e);
+            }
             room::poll_messages(&cli.room_id, token, socket_ref).unwrap_or_default()
         }
         Err(join_err) => {

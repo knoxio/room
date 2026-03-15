@@ -169,6 +169,31 @@ fn is_username_taken(error: &str) -> bool {
         && (lower.contains("already in use") || lower.contains("already taken"))
 }
 
+/// Subscribe to a room so that `room poll` and `room watch` deliver messages.
+///
+/// Runs `room subscribe <room_id> -t <token>`.
+/// If `socket` is provided, passes `--socket <path>` to the `room` command.
+///
+/// This must be called after `join_room()` — joining only registers the user
+/// globally and issues a token, but does not subscribe to any specific room.
+pub fn subscribe_room(room_id: &str, token: &str, socket: Option<&str>) -> Result<(), String> {
+    let mut cmd = Command::new("room");
+    cmd.args(["subscribe", room_id, "-t", token]);
+    if let Some(s) = socket {
+        cmd.args(["--socket", s]);
+    }
+    let output = cmd
+        .output()
+        .map_err(|e| format!("failed to run `room subscribe`: {e}"))?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        Err(format!("room subscribe failed: {stderr}"))
+    }
+}
+
 /// Send a message to the room.
 ///
 /// Runs `room send <room_id> -t <token> <message>`.
