@@ -12,12 +12,38 @@ use serde::{Deserialize, Serialize};
 use room_protocol::plugin::{
     BoxFuture, CommandContext, CommandInfo, ParamSchema, ParamType, Plugin, PluginResult,
 };
+use room_protocol::Message;
 
 /// Grace period in seconds before sending SIGKILL after SIGTERM.
 const STOP_GRACE_PERIOD_SECS: u64 = 5;
 
 /// Default number of log lines to show.
 const DEFAULT_TAIL_LINES: usize = 20;
+
+/// Default threshold in seconds before an agent is considered stale.
+const DEFAULT_STALE_THRESHOLD_SECS: i64 = 300;
+
+/// Health status of a spawned agent.
+#[derive(Debug, Clone, PartialEq)]
+pub enum HealthStatus {
+    /// Agent is active — sent a message recently.
+    Healthy,
+    /// Agent has not sent any message within the stale threshold.
+    Stale,
+    /// Agent process has exited.
+    Exited(Option<i32>),
+}
+
+impl std::fmt::Display for HealthStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            HealthStatus::Healthy => write!(f, "healthy"),
+            HealthStatus::Stale => write!(f, "stale"),
+            HealthStatus::Exited(Some(code)) => write!(f, "exited ({code})"),
+            HealthStatus::Exited(None) => write!(f, "exited (signal)"),
+        }
+    }
+}
 
 /// A spawned agent process tracked by the plugin.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -43,6 +69,10 @@ pub struct AgentPlugin {
     children: Arc<Mutex<HashMap<String, Child>>>,
     /// Recorded exit codes for agents whose Child handles have been reaped.
     exit_codes: Arc<Mutex<HashMap<String, Option<i32>>>>,
+    /// Last time each tracked agent sent a message, keyed by username.
+    last_seen_at: Arc<Mutex<HashMap<String, DateTime<Utc>>>>,
+    /// Seconds of inactivity before an agent is marked stale.
+    stale_threshold_secs: i64,
     /// Path to persist agent state (e.g. `~/.room/state/agents-<room>.json`).
     state_path: PathBuf,
     /// Socket path to pass to spawned ralph processes.
@@ -67,6 +97,8 @@ impl AgentPlugin {
             agents: Arc::new(Mutex::new(agents)),
             children: Arc::new(Mutex::new(HashMap::new())),
             exit_codes: Arc::new(Mutex::new(HashMap::new())),
+            last_seen_at: Arc::new(Mutex::new(HashMap::new())),
+            stale_threshold_secs: DEFAULT_STALE_THRESHOLD_SECS,
             state_path,
             socket_path,
             log_dir,
@@ -286,6 +318,28 @@ impl AgentPlugin {
         Ok((text, data))
     }
 
+    /// Compute the health status for a given agent.
+    fn compute_health(
+        &self,
+        agent: &SpawnedAgent,
+        exit_codes: &HashMap<String, Option<i32>>,
+        now: DateTime<Utc>,
+    ) -> HealthStatus {
+        if !is_process_alive(agent.pid) {
+            let code = exit_codes.get(&agent.username).copied().unwrap_or(None);
+            return HealthStatus::Exited(code);
+        }
+        let last_seen = self.last_seen_at.lock().unwrap();
+        if let Some(&ts) = last_seen.get(&agent.username) {
+            let elapsed = (now - ts).num_seconds();
+            if elapsed > self.stale_threshold_secs {
+                return HealthStatus::Stale;
+            }
+        }
+        // No message tracked yet but process is alive — healthy (just spawned).
+        HealthStatus::Healthy
+    }
+
     fn handle_list(&self) -> (String, serde_json::Value) {
         let agents = self.agents.lock().unwrap();
         if agents.is_empty() {
@@ -293,8 +347,9 @@ impl AgentPlugin {
             return ("no agents spawned".to_owned(), data);
         }
 
-        let mut lines =
-            vec!["username     | pid   | personality | model  | uptime  | status".to_owned()];
+        let mut lines = vec![
+            "username     | pid   | personality | model  | uptime  | health  | status".to_owned(),
+        ];
 
         // Try to reap exit codes from child handles.
         {
@@ -319,6 +374,7 @@ impl AgentPlugin {
 
         for agent in entries {
             let uptime = format_duration(now - agent.spawned_at);
+            let health = self.compute_health(agent, &exit_codes, now);
             let status = if is_process_alive(agent.pid) {
                 "running".to_owned()
             } else if let Some(code) = exit_codes.get(&agent.username) {
@@ -334,9 +390,16 @@ impl AgentPlugin {
             } else {
                 &agent.personality
             };
+            let health_str = health.to_string();
             lines.push(format!(
-                "{:<12} | {:<5} | {:<11} | {:<6} | {:<7} | {}",
-                agent.username, agent.pid, personality_display, agent.model, uptime, status,
+                "{:<12} | {:<5} | {:<11} | {:<6} | {:<7} | {:<7} | {}",
+                agent.username,
+                agent.pid,
+                personality_display,
+                agent.model,
+                uptime,
+                health_str,
+                status,
             ));
             agent_data.push(serde_json::json!({
                 "username": agent.username,
@@ -344,6 +407,7 @@ impl AgentPlugin {
                 "model": agent.model,
                 "personality": agent.personality,
                 "uptime_secs": (now - agent.spawned_at).num_seconds(),
+                "health": health_str,
                 "status": status,
             }));
         }
@@ -641,6 +705,17 @@ impl Plugin for AgentPlugin {
 
     fn commands(&self) -> Vec<CommandInfo> {
         Self::default_commands()
+    }
+
+    fn on_message(&self, msg: &Message) {
+        let user = msg.user();
+        let agents = self.agents.lock().unwrap();
+        if agents.contains_key(user) {
+            drop(agents);
+            let now = Utc::now();
+            let mut last_seen = self.last_seen_at.lock().unwrap();
+            last_seen.insert(user.to_owned(), now);
+        }
     }
 
     fn handle(&self, ctx: CommandContext) -> BoxFuture<'_, anyhow::Result<PluginResult>> {
@@ -1802,5 +1877,241 @@ mod tests {
         assert_eq!(data["action"], "stop");
         assert_eq!(data["username"], "bot1");
         assert_eq!(data["was_alive"], false);
+    }
+
+    // ── HealthStatus tests ───────────────────────────────────────────────
+
+    #[test]
+    fn health_status_display_healthy() {
+        assert_eq!(HealthStatus::Healthy.to_string(), "healthy");
+    }
+
+    #[test]
+    fn health_status_display_stale() {
+        assert_eq!(HealthStatus::Stale.to_string(), "stale");
+    }
+
+    #[test]
+    fn health_status_display_exited_code() {
+        assert_eq!(HealthStatus::Exited(Some(0)).to_string(), "exited (0)");
+        assert_eq!(HealthStatus::Exited(Some(1)).to_string(), "exited (1)");
+    }
+
+    #[test]
+    fn health_status_display_exited_signal() {
+        assert_eq!(HealthStatus::Exited(None).to_string(), "exited (signal)");
+    }
+
+    #[test]
+    fn health_status_equality() {
+        assert_eq!(HealthStatus::Healthy, HealthStatus::Healthy);
+        assert_eq!(HealthStatus::Stale, HealthStatus::Stale);
+        assert_ne!(HealthStatus::Healthy, HealthStatus::Stale);
+        assert_ne!(HealthStatus::Exited(Some(0)), HealthStatus::Exited(Some(1)));
+        assert_eq!(HealthStatus::Exited(None), HealthStatus::Exited(None));
+    }
+
+    #[test]
+    fn compute_health_exited_process() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin = test_plugin(dir.path());
+
+        let agent = SpawnedAgent {
+            username: "dead-bot".to_owned(),
+            pid: 999_999_999, // non-existent PID
+            model: "sonnet".to_owned(),
+            personality: "coder".to_owned(),
+            spawned_at: Utc::now() - chrono::Duration::minutes(10),
+            log_path: dir.path().join("dead-bot.log"),
+            room_id: "test-room".to_owned(),
+        };
+
+        let exit_codes = HashMap::new();
+        let health = plugin.compute_health(&agent, &exit_codes, Utc::now());
+        assert_eq!(health, HealthStatus::Exited(None));
+    }
+
+    #[test]
+    fn compute_health_exited_with_code() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin = test_plugin(dir.path());
+
+        let agent = SpawnedAgent {
+            username: "dead-bot".to_owned(),
+            pid: 999_999_999,
+            model: "sonnet".to_owned(),
+            personality: "coder".to_owned(),
+            spawned_at: Utc::now() - chrono::Duration::minutes(10),
+            log_path: dir.path().join("dead-bot.log"),
+            room_id: "test-room".to_owned(),
+        };
+
+        let mut exit_codes = HashMap::new();
+        exit_codes.insert("dead-bot".to_owned(), Some(1));
+        let health = plugin.compute_health(&agent, &exit_codes, Utc::now());
+        assert_eq!(health, HealthStatus::Exited(Some(1)));
+    }
+
+    #[test]
+    fn on_message_updates_last_seen() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin = test_plugin(dir.path());
+
+        // Insert a tracked agent.
+        {
+            let mut agents = plugin.agents.lock().unwrap();
+            agents.insert(
+                "tracked-bot".to_owned(),
+                SpawnedAgent {
+                    username: "tracked-bot".to_owned(),
+                    pid: std::process::id(),
+                    model: "sonnet".to_owned(),
+                    personality: "coder".to_owned(),
+                    spawned_at: Utc::now(),
+                    log_path: dir.path().join("bot.log"),
+                    room_id: "test-room".to_owned(),
+                },
+            );
+        }
+
+        // Before any message, last_seen should be empty.
+        assert!(plugin.last_seen_at.lock().unwrap().is_empty());
+
+        // Simulate a message from the tracked agent.
+        let msg = room_protocol::make_message("test-room", "tracked-bot", "hello");
+        plugin.on_message(&msg);
+
+        let last_seen = plugin.last_seen_at.lock().unwrap();
+        assert!(last_seen.contains_key("tracked-bot"));
+    }
+
+    #[test]
+    fn on_message_ignores_untracked_users() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin = test_plugin(dir.path());
+
+        // No agents registered — message from random user should be ignored.
+        let msg = room_protocol::make_message("test-room", "random-user", "hello");
+        plugin.on_message(&msg);
+
+        assert!(plugin.last_seen_at.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn stale_threshold_default_is_five_minutes() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin = test_plugin(dir.path());
+        assert_eq!(plugin.stale_threshold_secs, 300);
+    }
+
+    #[test]
+    fn health_stale_when_last_seen_exceeds_threshold() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut plugin = test_plugin(dir.path());
+        plugin.stale_threshold_secs = 60; // 1 minute for test
+
+        let agent = SpawnedAgent {
+            username: "stale-bot".to_owned(),
+            pid: std::process::id(), // current process = alive
+            model: "sonnet".to_owned(),
+            personality: "coder".to_owned(),
+            spawned_at: Utc::now() - chrono::Duration::minutes(10),
+            log_path: dir.path().join("stale-bot.log"),
+            room_id: "test-room".to_owned(),
+        };
+
+        // Set last_seen to 2 minutes ago (exceeds 1 minute threshold).
+        {
+            let mut last_seen = plugin.last_seen_at.lock().unwrap();
+            last_seen.insert(
+                "stale-bot".to_owned(),
+                Utc::now() - chrono::Duration::seconds(120),
+            );
+        }
+
+        let exit_codes = HashMap::new();
+        let health = plugin.compute_health(&agent, &exit_codes, Utc::now());
+        assert_eq!(health, HealthStatus::Stale);
+    }
+
+    #[test]
+    fn health_healthy_when_recently_seen() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut plugin = test_plugin(dir.path());
+        plugin.stale_threshold_secs = 60;
+
+        let agent = SpawnedAgent {
+            username: "active-bot".to_owned(),
+            pid: std::process::id(),
+            model: "sonnet".to_owned(),
+            personality: "coder".to_owned(),
+            spawned_at: Utc::now() - chrono::Duration::minutes(10),
+            log_path: dir.path().join("active-bot.log"),
+            room_id: "test-room".to_owned(),
+        };
+
+        // Set last_seen to 30 seconds ago (within 1 minute threshold).
+        {
+            let mut last_seen = plugin.last_seen_at.lock().unwrap();
+            last_seen.insert(
+                "active-bot".to_owned(),
+                Utc::now() - chrono::Duration::seconds(30),
+            );
+        }
+
+        let exit_codes = HashMap::new();
+        let health = plugin.compute_health(&agent, &exit_codes, Utc::now());
+        assert_eq!(health, HealthStatus::Healthy);
+    }
+
+    #[test]
+    fn health_healthy_when_never_seen_but_alive() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin = test_plugin(dir.path());
+
+        let agent = SpawnedAgent {
+            username: "new-bot".to_owned(),
+            pid: std::process::id(), // current process = alive
+            model: "sonnet".to_owned(),
+            personality: "coder".to_owned(),
+            spawned_at: Utc::now(),
+            log_path: dir.path().join("new-bot.log"),
+            room_id: "test-room".to_owned(),
+        };
+
+        let exit_codes = HashMap::new();
+        let health = plugin.compute_health(&agent, &exit_codes, Utc::now());
+        assert_eq!(health, HealthStatus::Healthy);
+    }
+
+    #[test]
+    fn handle_list_includes_health_column() {
+        let dir = tempfile::tempdir().unwrap();
+        let plugin = test_plugin(dir.path());
+
+        // Insert an agent with the current PID so it shows as alive.
+        {
+            let mut agents = plugin.agents.lock().unwrap();
+            agents.insert(
+                "test-bot".to_owned(),
+                SpawnedAgent {
+                    username: "test-bot".to_owned(),
+                    pid: std::process::id(),
+                    model: "sonnet".to_owned(),
+                    personality: "coder".to_owned(),
+                    spawned_at: Utc::now(),
+                    log_path: dir.path().join("test-bot.log"),
+                    room_id: "test-room".to_owned(),
+                },
+            );
+        }
+
+        let (text, data) = plugin.handle_list();
+        // Header should include health column.
+        assert!(text.contains("health"));
+        // Agent data should include health field.
+        let agents = data["agents"].as_array().unwrap();
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0]["health"], "healthy");
     }
 }

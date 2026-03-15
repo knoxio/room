@@ -211,6 +211,11 @@ async fn process_passthrough(msg: &Message, username: &str, state: &RoomState) -
         eprintln!("[broker] persist error: {e:#}");
     }
 
+    // Notify plugins about the broadcast message so they can track activity.
+    if let Ok(ref persisted) = result {
+        state.plugin_registry.notify_message(persisted);
+    }
+
     if !newly_subscribed.is_empty() && result.is_ok() {
         broadcast_subscribe_notices(&newly_subscribed, state).await;
     }

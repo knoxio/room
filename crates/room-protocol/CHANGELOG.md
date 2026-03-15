@@ -7,6 +7,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `Plugin::on_message()` lifecycle hook — called after every broadcast, default no-op
+
 ## [3.4.0] - 2026-03-15
 
 ## [3.3.0] - 2026-03-15

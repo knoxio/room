@@ -87,6 +87,14 @@ pub trait Plugin: Send + Sync {
     /// Invoked synchronously during the leave broadcast path. Implementations
     /// must not block — spawn a task if async work is needed.
     fn on_user_leave(&self, _user: &str) {}
+
+    /// Called after every message is broadcast to the room. The default is a
+    /// no-op.
+    ///
+    /// Plugins can use this to observe message flow (e.g. tracking agent
+    /// activity for stale detection). Invoked synchronously after
+    /// `broadcast_and_persist` — implementations must not block.
+    fn on_message(&self, _msg: &Message) {}
 }
 
 /// Current Plugin API version. Increment when the `Plugin` trait changes in
