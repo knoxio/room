@@ -1,4 +1,5 @@
 pub mod bridge;
+pub mod loader;
 pub mod queue;
 pub mod schema;
 pub mod stats;
@@ -89,6 +90,22 @@ impl PluginRegistry {
             agent_socket_path,
             agent_log_dir,
         )))?;
+
+        // Load external plugins from ~/.room/plugins/
+        let plugins_dir = crate::paths::room_plugins_dir();
+        for loaded in loader::scan_plugin_dir(&plugins_dir) {
+            let name = loaded.plugin().name().to_owned();
+            // SAFETY: the plugin is registered into the registry which lives
+            // for the broker's lifetime. The library handle is leaked (not
+            // unloaded) to keep vtable pointers valid.
+            let plugin = unsafe { loaded.into_boxed_plugin() };
+            if let Err(e) = registry.register(plugin) {
+                eprintln!(
+                    "[plugin] external plugin '{}' registration failed: {e}",
+                    name
+                );
+            }
+        }
 
         Ok(registry)
     }

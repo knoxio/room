@@ -112,6 +112,15 @@ pub fn broker_tokens_path(state_dir: &Path, room_id: &str) -> PathBuf {
     state_dir.join(format!("{room_id}.tokens"))
 }
 
+/// Directory for installed plugin shared libraries and metadata.
+///
+/// Returns `~/.room/plugins/`. Each plugin installs two files here:
+/// - `libroom_plugin_<name>.so` (or `.dylib` on macOS)
+/// - `<name>.meta.json` — version, source crate, protocol compatibility
+pub fn room_plugins_dir() -> PathBuf {
+    room_home().join("plugins")
+}
+
 /// PID file for the daemon process: `~/.room/roomd.pid`.
 ///
 /// Written by `ensure_daemon_running` when it auto-starts the daemon.
@@ -370,6 +379,12 @@ mod tests {
         let p = legacy_token_dir();
         // Must be absolute and non-empty.
         assert!(p.is_absolute(), "expected absolute path, got: {p:?}");
+    }
+
+    #[test]
+    fn room_plugins_dir_under_room_home() {
+        assert!(room_plugins_dir().starts_with(room_home()));
+        assert!(room_plugins_dir().ends_with("plugins"));
     }
 
     #[test]

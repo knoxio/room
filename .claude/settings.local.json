@@ -1,0 +1,35 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git clone:*)",
+      "Bash(python3:*)",
+      "Bash(/tmp/room_watch_saphire.sh:*)",
+      "Bash(do printf:*)",
+      "mcp__notion__notion-update-page",
+      "mcp__notion__notion-create-pages",
+      "Bash(git:*)",
+      "Bash(git commit:*)",
+      "Bash(shellcheck:*)",
+      "Bash(./target/debug/room-ralph:*)",
+      "Bash(lsof:*)",
+      "Bash(pgrep:*)",
+      "Bash(/tmp/room_watch_saphire3.sh:*)",
+      "Bash(chmod +x:*)",
+      "Bash(/tmp/room_watch_saphire4b.sh:*)",
+      "Bash(/tmp/room_cmd.sh watch:*)",
+      "Bash(/tmp/room_cmd.sh poll:*)",
+      "Bash(ROOM_SOCKET=/var/folders/fg/x1dvp9t94hvg3sj349ycf0mh0000gp/T/room-agent-room-2.sock room watch:*)",
+      "Read(//Users/helix/.room/state/**)",
+      "Bash(room send:*)",
+      "Bash(source:*)",
+      "Bash(/Users/helix/.cargo/bin/cargo check:*)",
+      "Read(//Users/helix/.cargo/bin/**)",
+      "Read(//opt/homebrew/bin/**)",
+      "Bash(~/.cargo/bin/room join:*)",
+      "Bash(~/.cargo/bin/room subscribe:*)",
+      "Bash(~/.cargo/bin/room tail:*)",
+      "Bash(~/.cargo/bin/room pull:*)",
+      "Bash(~/.cargo/bin/room send:*)"
+    ]
+  }
+}

@@ -7,6 +7,13 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- C ABI entry points for dynamic loading via `declare_plugin!` macro
+- `cdylib-exports` feature flag for `#[no_mangle]` symbol export
+- `crate-type = ["cdylib", "rlib"]` for shared library builds
+- JSON config parsing for dynamic plugin instantiation
+
 ## [3.4.0] - 2026-03-15
 
 ## [3.3.0] - 2026-03-15

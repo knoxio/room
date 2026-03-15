@@ -14,6 +14,43 @@ use room_protocol::plugin::{
 };
 use room_protocol::Message;
 
+// ── C ABI entry points for cdylib loading ─────────────────────────────────
+
+/// JSON configuration for the agent plugin when loaded dynamically.
+///
+/// ```json
+/// {
+///   "state_path": "/home/user/.room/state/agents-myroom.json",
+///   "socket_path": "/tmp/room-myroom.sock",
+///   "log_dir": "/home/user/.room/logs"
+/// }
+/// ```
+#[derive(Deserialize)]
+struct AgentConfig {
+    state_path: PathBuf,
+    socket_path: PathBuf,
+    log_dir: PathBuf,
+}
+
+/// Create an [`AgentPlugin`] from a JSON config string.
+///
+/// Falls back to temp-path defaults if config is empty (for testing).
+fn create_agent_from_config(config: &str) -> AgentPlugin {
+    if config.is_empty() {
+        AgentPlugin::new(
+            PathBuf::from("/tmp/room-agents.json"),
+            PathBuf::from("/tmp/room-default.sock"),
+            PathBuf::from("/tmp/room-logs"),
+        )
+    } else {
+        let cfg: AgentConfig =
+            serde_json::from_str(config).expect("invalid agent plugin config JSON");
+        AgentPlugin::new(cfg.state_path, cfg.socket_path, cfg.log_dir)
+    }
+}
+
+room_protocol::declare_plugin!("agent", create_agent_from_config);
+
 /// Grace period in seconds before sending SIGKILL after SIGTERM.
 const STOP_GRACE_PERIOD_SECS: u64 = 5;
 
@@ -1880,6 +1917,55 @@ mod tests {
         assert_eq!(data["action"], "stop");
         assert_eq!(data["username"], "bot1");
         assert_eq!(data["was_alive"], false);
+    }
+
+    // ── ABI entry point tests ────────────────────────────────────────────
+
+    #[test]
+    fn abi_declaration_matches_plugin() {
+        let decl = &ROOM_PLUGIN_DECLARATION;
+        assert_eq!(decl.api_version, room_protocol::plugin::PLUGIN_API_VERSION);
+        unsafe {
+            assert_eq!(decl.name().unwrap(), "agent");
+            assert_eq!(decl.version().unwrap(), env!("CARGO_PKG_VERSION"));
+            assert_eq!(decl.min_protocol().unwrap(), "0.0.0");
+        }
+    }
+
+    #[test]
+    fn abi_create_with_empty_config() {
+        let plugin_ptr = unsafe { room_plugin_create(std::ptr::null(), 0) };
+        assert!(!plugin_ptr.is_null());
+        let plugin = unsafe { Box::from_raw(plugin_ptr) };
+        assert_eq!(plugin.name(), "agent");
+        assert_eq!(plugin.version(), env!("CARGO_PKG_VERSION"));
+    }
+
+    #[test]
+    fn abi_create_with_json_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = format!(
+            r#"{{"state_path":"{}","socket_path":"{}","log_dir":"{}"}}"#,
+            dir.path().join("agents.json").display(),
+            dir.path().join("room.sock").display(),
+            dir.path().join("logs").display()
+        );
+        let plugin_ptr = unsafe { room_plugin_create(config.as_ptr(), config.len()) };
+        assert!(!plugin_ptr.is_null());
+        let plugin = unsafe { Box::from_raw(plugin_ptr) };
+        assert_eq!(plugin.name(), "agent");
+    }
+
+    #[test]
+    fn abi_destroy_frees_plugin() {
+        let plugin_ptr = unsafe { room_plugin_create(std::ptr::null(), 0) };
+        assert!(!plugin_ptr.is_null());
+        unsafe { room_plugin_destroy(plugin_ptr) };
+    }
+
+    #[test]
+    fn abi_destroy_null_is_safe() {
+        unsafe { room_plugin_destroy(std::ptr::null_mut()) };
     }
 
     // ── HealthStatus tests ───────────────────────────────────────────────

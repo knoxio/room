@@ -14,7 +14,7 @@ use room_cli::{
     query::{has_narrowing_filter, QueryFilter},
 };
 
-use cli::{AgentAction, Args, Cmd};
+use cli::{AgentAction, Args, Cmd, PluginAction};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -373,6 +373,23 @@ async fn main() -> anyhow::Result<()> {
         }
         Some(Cmd::Upgrade { execute }) => {
             room_cli::upgrade::cmd_upgrade(execute)?;
+        }
+        Some(Cmd::Plugin { action }) => {
+            let plugins_dir = paths::room_plugins_dir();
+            match action {
+                PluginAction::Install { name, version } => {
+                    room_cli::plugin_cmd::cmd_install(&plugins_dir, &name, version.as_deref())?;
+                }
+                PluginAction::List => {
+                    room_cli::plugin_cmd::cmd_list(&plugins_dir)?;
+                }
+                PluginAction::Remove { name } => {
+                    room_cli::plugin_cmd::cmd_remove(&plugins_dir, &name)?;
+                }
+                PluginAction::Update { name, version } => {
+                    room_cli::plugin_cmd::cmd_update(&plugins_dir, &name, version.as_deref())?;
+                }
+            }
         }
         Some(Cmd::List) => {
             oneshot::cmd_list().await?;

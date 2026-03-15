@@ -110,6 +110,244 @@ pub const PLUGIN_API_VERSION: u32 = 1;
 /// than the one currently running.
 pub const PROTOCOL_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+// ── C ABI for dynamic plugin loading ──────────────────────────────────────
+
+/// Types and conventions for loading plugins from `cdylib` shared libraries.
+///
+/// Each plugin cdylib exports two symbols:
+/// - [`DECLARATION_SYMBOL`]: a static [`PluginDeclaration`] with metadata
+/// - [`CREATE_SYMBOL`]: a [`CreateFn`] that constructs the plugin
+///
+/// The loader reads the declaration first to check API/protocol compatibility,
+/// then calls the create function to obtain a `Box<dyn Plugin>`.
+pub mod abi {
+    use super::Plugin;
+
+    /// Null-terminated symbol name for the [`PluginDeclaration`] static.
+    pub const DECLARATION_SYMBOL: &[u8] = b"ROOM_PLUGIN_DECLARATION\0";
+
+    /// Null-terminated symbol name for the [`CreateFn`] function.
+    pub const CREATE_SYMBOL: &[u8] = b"room_plugin_create\0";
+
+    /// Null-terminated symbol name for the [`DestroyFn`] function.
+    pub const DESTROY_SYMBOL: &[u8] = b"room_plugin_destroy\0";
+
+    /// C-compatible plugin metadata exported as a `#[no_mangle]` static from
+    /// each cdylib plugin.
+    ///
+    /// The loader reads this before calling [`CreateFn`] to verify that the
+    /// plugin's API version and protocol requirements are compatible with the
+    /// running broker.
+    ///
+    /// Use [`PluginDeclaration::new`] to construct in a `static` context.
+    #[repr(C)]
+    pub struct PluginDeclaration {
+        /// Must equal [`super::PLUGIN_API_VERSION`] for the plugin to load.
+        pub api_version: u32,
+        /// Pointer to the plugin name string (UTF-8, not necessarily null-terminated).
+        pub name_ptr: *const u8,
+        /// Length of the plugin name string in bytes.
+        pub name_len: usize,
+        /// Pointer to the plugin version string (semver, UTF-8).
+        pub version_ptr: *const u8,
+        /// Length of the plugin version string in bytes.
+        pub version_len: usize,
+        /// Pointer to the minimum room-protocol version string (semver, UTF-8).
+        pub min_protocol_ptr: *const u8,
+        /// Length of the minimum protocol version string in bytes.
+        pub min_protocol_len: usize,
+    }
+
+    // SAFETY: PluginDeclaration contains only raw pointers to static data and
+    // plain integers — no interior mutability, no heap allocation. The pointed-to
+    // data lives for `'static` (string literals or env!() constants).
+    unsafe impl Send for PluginDeclaration {}
+    unsafe impl Sync for PluginDeclaration {}
+
+    impl PluginDeclaration {
+        /// Construct a declaration from static string slices. All arguments must
+        /// be `'static` — this is enforced by the function signature and is
+        /// required because the declaration is stored as a `static`.
+        pub const fn new(
+            api_version: u32,
+            name: &'static str,
+            version: &'static str,
+            min_protocol: &'static str,
+        ) -> Self {
+            Self {
+                api_version,
+                name_ptr: name.as_ptr(),
+                name_len: name.len(),
+                version_ptr: version.as_ptr(),
+                version_len: version.len(),
+                min_protocol_ptr: min_protocol.as_ptr(),
+                min_protocol_len: min_protocol.len(),
+            }
+        }
+
+        /// Reconstruct the plugin name.
+        ///
+        /// Returns `Err` if the bytes are not valid UTF-8.
+        ///
+        /// # Safety
+        ///
+        /// The declaration must still be valid — i.e. the shared library that
+        /// exported it must not have been unloaded, and the pointer/length pair
+        /// must point to a valid byte slice.
+        pub unsafe fn name(&self) -> Result<&str, core::str::Utf8Error> {
+            core::str::from_utf8(core::slice::from_raw_parts(self.name_ptr, self.name_len))
+        }
+
+        /// Reconstruct the plugin version string.
+        ///
+        /// Returns `Err` if the bytes are not valid UTF-8.
+        ///
+        /// # Safety
+        ///
+        /// Same as [`name`](Self::name).
+        pub unsafe fn version(&self) -> Result<&str, core::str::Utf8Error> {
+            core::str::from_utf8(core::slice::from_raw_parts(
+                self.version_ptr,
+                self.version_len,
+            ))
+        }
+
+        /// Reconstruct the minimum protocol version string.
+        ///
+        /// Returns `Err` if the bytes are not valid UTF-8.
+        ///
+        /// # Safety
+        ///
+        /// Same as [`name`](Self::name).
+        pub unsafe fn min_protocol(&self) -> Result<&str, core::str::Utf8Error> {
+            core::str::from_utf8(core::slice::from_raw_parts(
+                self.min_protocol_ptr,
+                self.min_protocol_len,
+            ))
+        }
+    }
+
+    /// Type signature for the plugin creation function exported by cdylib plugins.
+    ///
+    /// The function receives a UTF-8 JSON configuration string (pointer + length)
+    /// and returns a double-boxed `Plugin` trait object. The outer `Box` yields a
+    /// thin pointer (C-ABI safe); the inner `Box<dyn Plugin>` is a fat pointer
+    /// stored on the heap.
+    ///
+    /// # Arguments
+    ///
+    /// * `config_json` — pointer to a UTF-8 JSON string, or null for default config
+    /// * `config_len` — length of the config string in bytes (0 if null)
+    ///
+    /// # Returns
+    ///
+    /// A thin pointer to a heap-allocated `Box<dyn Plugin>`. The caller takes
+    /// ownership and must free it via [`DestroyFn`] or
+    /// `drop(Box::from_raw(ptr))`.
+    ///
+    /// # Safety
+    ///
+    /// * If `config_json` is non-null, it must be valid for reads of `config_len` bytes
+    /// * The returned pointer must not be null
+    pub type CreateFn =
+        unsafe extern "C" fn(config_json: *const u8, config_len: usize) -> *mut Box<dyn Plugin>;
+
+    /// Type signature for the plugin destruction function exported by cdylib plugins.
+    ///
+    /// Frees a plugin previously returned by [`CreateFn`]. The loader calls this
+    /// during shutdown or when unloading a plugin.
+    ///
+    /// # Safety
+    ///
+    /// * `plugin` must have been returned by [`CreateFn`] from the same library
+    /// * Must not be called more than once on the same pointer
+    pub type DestroyFn = unsafe extern "C" fn(plugin: *mut Box<dyn Plugin>);
+
+    /// Helper to extract a `&str` config from raw FFI pointers.
+    ///
+    /// Returns an empty string if the pointer is null or the length is zero.
+    /// Panics if the bytes are not valid UTF-8.
+    ///
+    /// # Safety
+    ///
+    /// If `ptr` is non-null, it must be valid for reads of `len` bytes.
+    pub unsafe fn config_from_raw(ptr: *const u8, len: usize) -> &'static str {
+        if ptr.is_null() || len == 0 {
+            ""
+        } else {
+            let bytes = core::slice::from_raw_parts(ptr, len);
+            core::str::from_utf8(bytes).expect("plugin config is not valid UTF-8")
+        }
+    }
+}
+
+/// Declares the C ABI entry points for a cdylib plugin.
+///
+/// Generates three `#[no_mangle]` exports:
+/// - `ROOM_PLUGIN_DECLARATION` — a [`abi::PluginDeclaration`] static
+/// - `room_plugin_create` — calls the provided closure with a `&str` config
+///   and returns a double-boxed `dyn Plugin`
+/// - `room_plugin_destroy` — frees a plugin returned by `room_plugin_create`
+///
+/// # Arguments
+///
+/// * `$name` — plugin name as a string literal (e.g. `"taskboard"`)
+/// * `$create` — an expression that takes `config: &str` and returns
+///   `impl Plugin` (e.g. a closure or function call)
+///
+/// # Example
+///
+/// ```ignore
+/// use room_protocol::declare_plugin;
+///
+/// declare_plugin!("my-plugin", |config: &str| {
+///     MyPlugin::from_config(config)
+/// });
+/// ```
+#[macro_export]
+macro_rules! declare_plugin {
+    ($name:expr, $create:expr) => {
+        /// Plugin metadata for dynamic loading.
+        ///
+        /// When the `cdylib-exports` feature is enabled, this static is exported
+        /// with `#[no_mangle]` so that `libloading` can find it by name. When
+        /// the feature is off (rlib / static linking), the symbol is mangled to
+        /// avoid collisions with other plugins in the same binary.
+        #[cfg_attr(feature = "cdylib-exports", no_mangle)]
+        pub static ROOM_PLUGIN_DECLARATION: $crate::plugin::abi::PluginDeclaration =
+            $crate::plugin::abi::PluginDeclaration::new(
+                $crate::plugin::PLUGIN_API_VERSION,
+                $name,
+                env!("CARGO_PKG_VERSION"),
+                "0.0.0",
+            );
+
+        /// # Safety
+        ///
+        /// See [`room_protocol::plugin::abi::CreateFn`] for safety contract.
+        #[cfg_attr(feature = "cdylib-exports", no_mangle)]
+        pub unsafe extern "C" fn room_plugin_create(
+            config_json: *const u8,
+            config_len: usize,
+        ) -> *mut Box<dyn $crate::plugin::Plugin> {
+            let config = unsafe { $crate::plugin::abi::config_from_raw(config_json, config_len) };
+            let create_fn = $create;
+            let plugin: Box<dyn $crate::plugin::Plugin> = Box::new(create_fn(config));
+            Box::into_raw(Box::new(plugin))
+        }
+
+        /// # Safety
+        ///
+        /// See [`room_protocol::plugin::abi::DestroyFn`] for safety contract.
+        #[cfg_attr(feature = "cdylib-exports", no_mangle)]
+        pub unsafe extern "C" fn room_plugin_destroy(plugin: *mut Box<dyn $crate::plugin::Plugin>) {
+            if !plugin.is_null() {
+                drop(unsafe { Box::from_raw(plugin) });
+            }
+        }
+    };
+}
+
 // ── CommandInfo ─────────────────────────────────────────────────────────────
 
 /// Describes a single command for `/help` and autocomplete.
@@ -402,5 +640,76 @@ mod tests {
         assert_eq!(VersionedPlugin.version(), "2.5.1");
         assert_eq!(VersionedPlugin.api_version(), 1);
         assert_eq!(VersionedPlugin.min_protocol(), "3.0.0");
+    }
+
+    // ── ABI types ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn declaration_new_stores_correct_values() {
+        let decl = abi::PluginDeclaration::new(1, "test-plugin", "1.2.3", "3.0.0");
+        assert_eq!(decl.api_version, 1);
+        unsafe {
+            assert_eq!(decl.name().unwrap(), "test-plugin");
+            assert_eq!(decl.version().unwrap(), "1.2.3");
+            assert_eq!(decl.min_protocol().unwrap(), "3.0.0");
+        }
+    }
+
+    #[test]
+    fn declaration_with_empty_strings() {
+        let decl = abi::PluginDeclaration::new(0, "", "", "");
+        assert_eq!(decl.api_version, 0);
+        assert_eq!(decl.name_len, 0);
+        assert_eq!(decl.version_len, 0);
+        assert_eq!(decl.min_protocol_len, 0);
+    }
+
+    #[test]
+    fn declaration_is_repr_c_sized() {
+        // PluginDeclaration must have a stable, known size for FFI.
+        // On 64-bit: u32(4) + padding(4) + 3*(ptr+usize) = 4+4+48 = 56 bytes
+        let size = std::mem::size_of::<abi::PluginDeclaration>();
+        assert!(size > 0, "PluginDeclaration must have non-zero size");
+        // Alignment must be pointer-aligned for C compatibility.
+        let align = std::mem::align_of::<abi::PluginDeclaration>();
+        assert!(
+            align >= std::mem::align_of::<usize>(),
+            "PluginDeclaration must be at least pointer-aligned"
+        );
+    }
+
+    #[test]
+    fn config_from_raw_null_returns_empty() {
+        let result = unsafe { abi::config_from_raw(std::ptr::null(), 0) };
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn config_from_raw_zero_len_returns_empty() {
+        let data = b"some data";
+        let result = unsafe { abi::config_from_raw(data.as_ptr(), 0) };
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn config_from_raw_valid_data() {
+        let json = b"{\"path\":\"/tmp\"}";
+        let result = unsafe { abi::config_from_raw(json.as_ptr(), json.len()) };
+        assert_eq!(result, "{\"path\":\"/tmp\"}");
+    }
+
+    #[test]
+    fn symbol_names_are_null_terminated() {
+        assert!(abi::DECLARATION_SYMBOL.ends_with(b"\0"));
+        assert!(abi::CREATE_SYMBOL.ends_with(b"\0"));
+        assert!(abi::DESTROY_SYMBOL.ends_with(b"\0"));
+    }
+
+    #[test]
+    fn create_fn_type_is_c_abi() {
+        // Verify CreateFn can be stored in a function pointer variable.
+        // This is a compile-time check — if the type is invalid, it won't compile.
+        let _: Option<abi::CreateFn> = None;
+        let _: Option<abi::DestroyFn> = None;
     }
 }

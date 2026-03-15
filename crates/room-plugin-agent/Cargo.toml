@@ -6,6 +6,16 @@ description = "Agent spawn/stop/list plugin for the room multi-user chat system"
 license = "MIT"
 repository = "https://github.com/knoxio/room"
 
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+## Enable `#[no_mangle]` on the C ABI entry points. Required when building as
+## a standalone cdylib for dynamic loading. Must be OFF when the crate is
+## statically linked as an rlib (e.g. into room-daemon) to avoid symbol
+## collisions with other plugins.
+cdylib-exports = []
+
 [dependencies]
 room-protocol = { path = "../room-protocol", version = "3.4.0" }
 chrono = { version = "0.4", features = ["serde"] }

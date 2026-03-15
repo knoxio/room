@@ -12,6 +12,36 @@ use room_protocol::plugin::{
 };
 use room_protocol::EventType;
 
+// ── C ABI entry points for cdylib loading ─────────────────────────────────
+
+/// JSON configuration for the taskboard plugin when loaded dynamically.
+///
+/// ```json
+/// { "storage_path": "/path/to/room.taskboard", "lease_ttl_secs": 600 }
+/// ```
+#[derive(serde::Deserialize)]
+struct TaskboardConfig {
+    storage_path: PathBuf,
+    #[serde(default)]
+    lease_ttl_secs: Option<u64>,
+}
+
+/// Create a [`TaskboardPlugin`] from a JSON config string.
+///
+/// Falls back to a temp-file default if config is empty (for testing).
+fn create_taskboard_from_config(config: &str) -> TaskboardPlugin {
+    if config.is_empty() {
+        // Default: use a temp path — useful for tests, not for production.
+        TaskboardPlugin::new(PathBuf::from("/tmp/room-default.taskboard"), None)
+    } else {
+        let cfg: TaskboardConfig =
+            serde_json::from_str(config).expect("invalid taskboard plugin config JSON");
+        TaskboardPlugin::new(cfg.storage_path, cfg.lease_ttl_secs)
+    }
+}
+
+room_protocol::declare_plugin!("taskboard", create_taskboard_from_config);
+
 /// Default lease TTL in seconds (10 minutes).
 const DEFAULT_LEASE_TTL_SECS: u64 = 600;
 
@@ -321,6 +351,55 @@ mod tests {
             output.contains("/taskboard list all"),
             "should hint at 'list all' command"
         );
+    }
+
+    // ── ABI entry point tests ────────────────────────────────────────────
+
+    #[test]
+    fn abi_declaration_matches_plugin() {
+        let decl = &ROOM_PLUGIN_DECLARATION;
+        assert_eq!(decl.api_version, room_protocol::plugin::PLUGIN_API_VERSION);
+        unsafe {
+            assert_eq!(decl.name().unwrap(), "taskboard");
+            assert_eq!(decl.version().unwrap(), env!("CARGO_PKG_VERSION"));
+            assert_eq!(decl.min_protocol().unwrap(), "0.0.0");
+        }
+    }
+
+    #[test]
+    fn abi_create_with_empty_config() {
+        let plugin_ptr = unsafe { room_plugin_create(std::ptr::null(), 0) };
+        assert!(!plugin_ptr.is_null());
+        let plugin = unsafe { Box::from_raw(plugin_ptr) };
+        assert_eq!(plugin.name(), "taskboard");
+        assert_eq!(plugin.version(), env!("CARGO_PKG_VERSION"));
+    }
+
+    #[test]
+    fn abi_create_with_json_config() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let config = format!(
+            r#"{{"storage_path":"{}","lease_ttl_secs":300}}"#,
+            tmp.path().display()
+        );
+        let plugin_ptr = unsafe { room_plugin_create(config.as_ptr(), config.len()) };
+        assert!(!plugin_ptr.is_null());
+        let plugin = unsafe { Box::from_raw(plugin_ptr) };
+        assert_eq!(plugin.name(), "taskboard");
+    }
+
+    #[test]
+    fn abi_destroy_frees_plugin() {
+        let plugin_ptr = unsafe { room_plugin_create(std::ptr::null(), 0) };
+        assert!(!plugin_ptr.is_null());
+        // Should not panic or double-free.
+        unsafe { room_plugin_destroy(plugin_ptr) };
+    }
+
+    #[test]
+    fn abi_destroy_null_is_safe() {
+        // Passing null to destroy must be a no-op.
+        unsafe { room_plugin_destroy(std::ptr::null_mut()) };
     }
 
     /// Multiple tasks with expired leases must all be swept in a single call,

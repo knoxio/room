@@ -13,6 +13,12 @@ For changes prior to the workspace restructure (v0.1.2 through v1.0.2), see the
 ### Added
 
 - `room upgrade` command — checks crates.io for newer room-cli/room-ralph versions, verifies plugin compatibility, displays upgrade plan. Pass `--execute` to run `cargo install` (#747)
+- **tests:** 27 integration tests covering manual test plan gaps (#675) — slash commands
+  (/help, /info, /stats), queue lifecycle, taskboard cancel/reclaim, team commands, REST
+  regex+combined filters, subscription tiers, unicode/emoji handling, edge cases
+- `room plugin install/list/remove/update` subcommands for managing dynamic
+  plugins in `~/.room/plugins/`. Includes `PluginMeta` serialization, crate name
+  resolution, and plugin directory scanning. 23 new unit tests. (#745)
 
 ### Fixed
 

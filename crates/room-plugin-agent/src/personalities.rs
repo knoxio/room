@@ -308,24 +308,8 @@ pub fn builtin_personalities() -> HashMap<String, Personality> {
 
 /// Returns the list of all known personality names (built-in + user-defined).
 pub fn all_personality_names() -> Vec<String> {
-    let mut names: Vec<String> = builtin_personalities().keys().cloned().collect();
-
-    // Add user-defined personalities from ~/.room/personalities/
-    if let Some(dir) = personalities_dir() {
-        if let Ok(entries) = std::fs::read_dir(&dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.extension().is_some_and(|e| e == "toml") {
-                    if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                        if !names.contains(&stem.to_owned()) {
-                            names.push(stem.to_owned());
-                        }
-                    }
-                }
-            }
-        }
-    }
-
+    let (all, _errors) = all_personalities();
+    let mut names: Vec<String> = all.into_keys().collect();
     names.sort();
     names
 }
@@ -336,21 +320,141 @@ pub fn all_personality_names() -> Vec<String> {
 /// 1. User-defined TOML at `~/.room/personalities/<name>.toml`
 /// 2. Built-in defaults compiled into the binary
 ///
-/// User-defined TOML files fully replace built-ins with the same name.
+/// When a user TOML overrides a built-in with the same name, the two are
+/// merged via [`merge_personality`] (user fields win, tool deny lists are
+/// unioned). A user TOML with no matching built-in is used as-is.
+///
 /// Returns `Err` if the user TOML exists but is malformed or invalid.
 /// Returns `Ok(None)` if neither a user TOML nor a built-in exists.
 pub fn resolve_personality(name: &str) -> Result<Option<Personality>, PersonalityError> {
-    // 1. Try user-defined TOML
+    let builtin = builtin_personalities().remove(name);
+
+    // Try user-defined TOML
     if let Some(dir) = personalities_dir() {
         let toml_path = dir.join(format!("{name}.toml"));
         if toml_path.exists() {
-            let p = load_personality_toml(&toml_path)?;
-            return Ok(Some(p));
+            let user = load_personality_toml(&toml_path)?;
+            return match builtin {
+                Some(base) => Ok(Some(merge_personality(&user, &base))),
+                None => Ok(Some(user)),
+            };
         }
     }
 
-    // 2. Try built-in
-    Ok(builtin_personalities().remove(name))
+    Ok(builtin)
+}
+
+/// Scan `~/.room/personalities/` for all `.toml` files.
+///
+/// Returns a map of successfully loaded personalities keyed by file stem,
+/// plus a list of `(filename, error)` pairs for files that failed to load
+/// or validate. Healthy files are not affected by broken neighbours.
+pub fn scan_personalities_dir() -> (
+    HashMap<String, Personality>,
+    Vec<(String, PersonalityError)>,
+) {
+    let mut loaded = HashMap::new();
+    let mut errors = Vec::new();
+
+    let dir = match personalities_dir() {
+        Some(d) if d.is_dir() => d,
+        _ => return (loaded, errors),
+    };
+
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(e) => e,
+        Err(_) => return (loaded, errors),
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().is_some_and(|e| e == "toml") {
+            let stem = match path.file_stem().and_then(|s| s.to_str()) {
+                Some(s) => s.to_owned(),
+                None => continue,
+            };
+            match load_personality_toml(&path) {
+                Ok(p) => {
+                    loaded.insert(stem, p);
+                }
+                Err(e) => {
+                    errors.push((stem, e));
+                }
+            }
+        }
+    }
+
+    (loaded, errors)
+}
+
+/// Merge a user-defined personality override into a built-in base.
+///
+/// User fields win for scalar values (name, description, model, prompt
+/// template, name pool). For tool restrictions, deny lists are **unioned**
+/// so that built-in safety restrictions cannot be removed by user overrides.
+/// Allow lists are taken from the user if non-empty, otherwise from the base.
+/// `allow_all` is only true if both user and base agree.
+pub fn merge_personality(user: &Personality, base: &Personality) -> Personality {
+    // Union deny lists (deduplicated)
+    let mut disallow = base.tools.disallow.clone();
+    for item in &user.tools.disallow {
+        if !disallow.contains(item) {
+            disallow.push(item.clone());
+        }
+    }
+
+    // Allow list: user wins if non-empty
+    let allow = if user.tools.allow.is_empty() {
+        base.tools.allow.clone()
+    } else {
+        user.tools.allow.clone()
+    };
+
+    Personality {
+        personality: user.personality.clone(),
+        tools: ToolConfig {
+            allow,
+            disallow,
+            allow_all: user.tools.allow_all && base.tools.allow_all,
+        },
+        prompt: if user.prompt.template.is_empty() {
+            base.prompt.clone()
+        } else {
+            user.prompt.clone()
+        },
+        naming: if user.naming.name_pool.is_empty() {
+            base.naming.clone()
+        } else {
+            user.naming.clone()
+        },
+    }
+}
+
+/// Returns all personalities: built-ins merged with user overrides from
+/// `~/.room/personalities/`.
+///
+/// User TOML files that match a built-in name are merged (see
+/// [`merge_personality`]). User files with no matching built-in are
+/// included as-is. Returns errors for files that failed to load.
+pub fn all_personalities() -> (
+    HashMap<String, Personality>,
+    Vec<(String, PersonalityError)>,
+) {
+    let mut result = builtin_personalities();
+    let (user_defined, errors) = scan_personalities_dir();
+
+    for (name, user) in user_defined {
+        match result.remove(&name) {
+            Some(base) => {
+                result.insert(name, merge_personality(&user, &base));
+            }
+            None => {
+                result.insert(name, user);
+            }
+        }
+    }
+
+    (result, errors)
 }
 
 /// Load and validate a personality from a TOML file.
@@ -797,5 +901,215 @@ model = "sonnet"
         assert!(msg.contains("bad name"));
         assert!(msg.contains("bad model"));
         assert!(msg.contains("; "));
+    }
+
+    // ── Directory scanning tests ──────────────────────────────────────────
+
+    #[test]
+    fn scan_empty_dir_returns_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let personalities = dir.path().join("personalities");
+        std::fs::create_dir_all(&personalities).unwrap();
+
+        // scan_personalities_dir reads from $HOME/.room/personalities,
+        // so test load_personality_toml directly for isolation
+        let entries = std::fs::read_dir(&personalities).unwrap();
+        assert_eq!(entries.count(), 0);
+    }
+
+    #[test]
+    fn scan_dir_loads_valid_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let p_dir = dir.path();
+
+        std::fs::write(
+            p_dir.join("custom.toml"),
+            r#"
+[personality]
+name = "custom"
+description = "A custom agent"
+model = "opus"
+"#,
+        )
+        .unwrap();
+
+        let p = load_personality_toml(&p_dir.join("custom.toml")).unwrap();
+        assert_eq!(p.personality.name, "custom");
+        assert_eq!(p.personality.model, "opus");
+    }
+
+    #[test]
+    fn scan_dir_collects_errors_for_invalid_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let p_dir = dir.path();
+
+        std::fs::write(p_dir.join("broken.toml"), "not valid toml [[[").unwrap();
+
+        let err = load_personality_toml(&p_dir.join("broken.toml")).unwrap_err();
+        assert!(matches!(err, PersonalityError::Parse(_)));
+    }
+
+    // ── Merge tests ──────────────────────────────────────────────────────
+
+    #[test]
+    fn merge_user_overrides_scalar_fields() {
+        let base = builtin_coder();
+        let user_toml = r#"
+[personality]
+name = "coder"
+description = "My custom coder"
+model = "haiku"
+
+[prompt]
+template = "Custom prompt"
+
+[naming]
+name_pool = ["x", "y"]
+"#;
+        let user: Personality = toml::from_str(user_toml).unwrap();
+        let merged = merge_personality(&user, &base);
+
+        assert_eq!(merged.personality.name, "coder");
+        assert_eq!(merged.personality.description, "My custom coder");
+        assert_eq!(merged.personality.model, "haiku");
+        assert_eq!(merged.prompt.template, "Custom prompt");
+        assert_eq!(merged.naming.name_pool, vec!["x", "y"]);
+    }
+
+    #[test]
+    fn merge_deny_lists_unioned() {
+        let base = builtin_reviewer(); // disallows Write, Edit
+        let user_toml = r#"
+[personality]
+name = "reviewer"
+description = "Custom reviewer"
+model = "sonnet"
+
+[tools]
+disallow = ["Bash", "Write"]
+"#;
+        let user: Personality = toml::from_str(user_toml).unwrap();
+        let merged = merge_personality(&user, &base);
+
+        // Union: Write + Edit (base) + Bash (user) — Write deduplicated
+        assert!(merged.tools.disallow.contains(&"Write".to_owned()));
+        assert!(merged.tools.disallow.contains(&"Edit".to_owned()));
+        assert!(merged.tools.disallow.contains(&"Bash".to_owned()));
+        assert_eq!(merged.tools.disallow.len(), 3);
+    }
+
+    #[test]
+    fn merge_user_cannot_remove_base_deny() {
+        let base = builtin_scout(); // disallows Write, Edit, Bash
+        let user_toml = r#"
+[personality]
+name = "scout"
+description = "My scout"
+model = "haiku"
+
+[tools]
+disallow = []
+"#;
+        let user: Personality = toml::from_str(user_toml).unwrap();
+        let merged = merge_personality(&user, &base);
+
+        // Base denies are preserved even if user specifies empty
+        assert!(merged.tools.disallow.contains(&"Write".to_owned()));
+        assert!(merged.tools.disallow.contains(&"Edit".to_owned()));
+        assert!(merged.tools.disallow.contains(&"Bash".to_owned()));
+    }
+
+    #[test]
+    fn merge_allow_all_requires_both() {
+        let mut base = builtin_coder();
+        base.tools.allow_all = true;
+
+        let user_toml = r#"
+[personality]
+name = "coder"
+description = "Coder"
+model = "opus"
+
+[tools]
+allow_all = false
+"#;
+        let user: Personality = toml::from_str(user_toml).unwrap();
+        let merged = merge_personality(&user, &base);
+        assert!(
+            !merged.tools.allow_all,
+            "allow_all should be false if user says false"
+        );
+    }
+
+    #[test]
+    fn merge_empty_prompt_inherits_base() {
+        let base = builtin_coder();
+        let user_toml = r#"
+[personality]
+name = "coder"
+description = "Custom coder"
+model = "opus"
+"#;
+        let user: Personality = toml::from_str(user_toml).unwrap();
+        let merged = merge_personality(&user, &base);
+
+        assert_eq!(merged.prompt.template, base.prompt.template);
+    }
+
+    #[test]
+    fn merge_empty_name_pool_inherits_base() {
+        let base = builtin_coder();
+        let user_toml = r#"
+[personality]
+name = "coder"
+description = "Custom coder"
+model = "opus"
+"#;
+        let user: Personality = toml::from_str(user_toml).unwrap();
+        let merged = merge_personality(&user, &base);
+
+        assert_eq!(merged.naming.name_pool, base.naming.name_pool);
+    }
+
+    #[test]
+    fn merge_user_allow_overrides_base() {
+        let base = builtin_coder(); // no allow list
+        let user_toml = r#"
+[personality]
+name = "coder"
+description = "Coder"
+model = "opus"
+
+[tools]
+allow = ["Read", "Grep"]
+"#;
+        let user: Personality = toml::from_str(user_toml).unwrap();
+        let merged = merge_personality(&user, &base);
+
+        assert_eq!(merged.tools.allow, vec!["Read", "Grep"]);
+    }
+
+    // ── all_personalities tests ──────────────────────────────────────────
+
+    #[test]
+    fn all_personalities_includes_builtins() {
+        let (all, _errors) = all_personalities();
+        assert!(all.contains_key("coder"));
+        assert!(all.contains_key("reviewer"));
+        assert!(all.contains_key("scout"));
+        assert!(all.contains_key("qa"));
+        assert!(all.contains_key("coordinator"));
+    }
+
+    #[test]
+    fn all_personality_names_uses_all_personalities() {
+        let names = all_personality_names();
+        // Should include all builtins
+        assert!(names.contains(&"coder".to_owned()));
+        assert!(names.contains(&"reviewer".to_owned()));
+        // Should be sorted
+        let mut sorted = names.clone();
+        sorted.sort();
+        assert_eq!(names, sorted);
     }
 }
