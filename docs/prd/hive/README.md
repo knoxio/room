@@ -105,6 +105,8 @@ and other plugin data programmatically without scraping chat text.
 
 | Document | Status | Summary |
 |---|---|---|
+| [prd-hive-server.md](prd-hive-server.md) | Draft | Backend: Rust/axum server, auth, agent lifecycle, room proxy |
+| [prd-hive-frontend.md](prd-hive-frontend.md) | Draft | Frontend: web dashboard (Phase 1), Tauri desktop (Phase 2) |
 | [prd-workspace.md](prd-workspace.md) | Draft | Workspace concept: room grouping, team rosters, cross-room views |
 | [prd-team-provisioning.md](prd-team-provisioning.md) | Draft | Agent team manifests, spawn/stop/scale, billing integration |
 | [prd-agent-discovery.md](prd-agent-discovery.md) | Draft | Expertise indexing, capacity tracking, skill matching |
@@ -135,7 +137,7 @@ initial development:
 | read_line size limit (#470) | Bound incoming message size to prevent OOM | Medium |
 | WS bind address (#455-MED-2) | Default to 127.0.0.1 instead of 0.0.0.0 | Low |
 
-## Decisions made (2026-03-12)
+## Decisions made (2026-03-16, updated from 2026-03-12)
 
 These questions from the original PRDs have been answered by joao:
 
