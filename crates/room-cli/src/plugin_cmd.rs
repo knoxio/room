@@ -205,24 +205,25 @@ pub fn cmd_list(plugins_dir: &Path) -> anyhow::Result<()> {
     let externals = scan_installed(plugins_dir);
 
     println!(
-        "{:<16} {:<12} {:<10} {}",
-        "NAME", "VERSION", "SOURCE", "DESCRIPTION"
+        "{:<16} {:<12} {:<10} DESCRIPTION",
+        "NAME", "VERSION", "SOURCE"
     );
 
     // Builtins — always shown
     let version = env!("CARGO_PKG_VERSION");
     for (name, description) in BUILTIN_PLUGINS {
         println!(
-            "{:<16} {:<12} {:<10} {}",
-            name, version, "[builtin]", description
+            "{:<16} {:<12} {:<10} {description}",
+            name, version, "[builtin]"
         );
     }
 
     // External plugins from ~/.room/plugins/
     for m in &externals {
+        let crate_name = &m.crate_name;
         println!(
-            "{:<16} {:<12} {:<10} {}",
-            m.name, m.version, "[external]", m.crate_name
+            "{:<16} {:<12} {:<10} {crate_name}",
+            m.name, m.version, "[external]"
         );
     }
 
