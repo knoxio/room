@@ -560,9 +560,17 @@ impl AgentPlugin {
             }
         }
 
-        // Apply prompt
+        // Apply personality template as a file — room-ralph's --personality flag
+        // reads the file and prepends its contents to the default system context
+        // (which includes room send/poll commands and the token). Using --prompt
+        // would REPLACE the default context entirely, breaking room communication.
         if !personality.prompt.template.is_empty() {
-            cmd.arg("--prompt").arg(&personality.prompt.template);
+            let template_path =
+                self.log_dir.join(format!("{username}-personality.txt"));
+            if let Err(e) = std::fs::write(&template_path, &personality.prompt.template) {
+                return Err(format!("failed to write personality template: {e}"));
+            }
+            cmd.arg("--personality").arg(&template_path);
         }
 
         cmd.stdin(Stdio::null())

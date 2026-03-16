@@ -13,6 +13,18 @@ For changes prior to the workspace restructure (v0.1.2 through v1.0.2), see the
 ### Added
 
 - 5 integration tests for persistence and cross-transport visibility (Section 4+5 of #675 manual test plan)
+- 6 integration tests for auth/error edge cases from manual test plan (#675):
+  bare username compat, path traversal rejection, JSON injection preservation,
+  long username handling, broker kill recovery, chat file deletion mid-session
+- 5 integration tests for Section 2 CLI workflows from manual test plan (#675):
+  send echo fields, interactive message delivery, multi-send visibility,
+  delayed foreign message receipt, multi-room isolation.
+- 5 integration tests for Section 6+10 plugin/filesystem from manual test plan (#675):
+  taskboard direct assign, lease TTL cycle, lazy sweep terminal states,
+  queue NDJSON persistence, token file recreation after deletion.
+- 5 integration tests for subscription tier filtering (Section 7 of manual test plan #675):
+  subscribe command persistence, Full/MentionsOnly/Unsubscribed tier verification,
+  and event filter setup.
 
 ## [3.5.0] - 2026-03-15
 

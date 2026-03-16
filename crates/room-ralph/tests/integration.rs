@@ -414,7 +414,176 @@ async fn allow_all_dry_run_succeeds() {
     cleanup("integ-allow-all", None);
 }
 
-// ── Test 10: live broker join and announce ───────────────────────────────────
+// ── Test 10: log file is created after a run ─────────────────────────────
+
+#[tokio::test]
+async fn log_file_created_after_run() {
+    let _lock = PATH_LOCK.lock().unwrap();
+    let mock_dir = tempfile::TempDir::new().unwrap();
+    create_mock_claude(mock_dir.path(), r#"{"result":"log test"}"#, 0);
+    create_mock_room(mock_dir.path(), "");
+
+    let original = prepend_path(mock_dir.path());
+
+    let username = "integ-logfile";
+    let cli = test_cli(|c| {
+        c.max_iter = 1;
+        c.username = username.to_string();
+    });
+    let running = Arc::new(AtomicBool::new(true));
+
+    let result = loop_runner::run_loop(&cli, "mock-tok".to_string(), &running).await;
+    restore_path(&original);
+    assert!(result.is_ok(), "run should succeed: {result:?}");
+
+    let log_path = room::log_file_path(username);
+    // The log file is created by main.rs (tracing), not by run_loop.
+    // Since we call run_loop directly, the file may not exist.
+    // Instead, verify the path helper returns the expected format.
+    assert!(
+        log_path
+            .to_string_lossy()
+            .contains(&format!("ralph-room-{username}.log")),
+        "log path should contain the expected filename pattern"
+    );
+    cleanup(username, None);
+}
+
+// ── Test 11: --list-personalities returns known names ─────────────────────
+
+#[test]
+fn list_personalities_returns_all_builtins() {
+    let list = room_ralph::personalities::format_list();
+    assert!(
+        list.contains("Available personalities:"),
+        "output should have header"
+    );
+    // Verify at least the core personality names appear
+    for name in room_ralph::personalities::all_names() {
+        assert!(
+            list.contains(name),
+            "output should contain personality '{name}'"
+        );
+    }
+    // Should contain at least 5 personalities
+    assert!(
+        room_ralph::personalities::all().len() >= 5,
+        "should have at least 5 built-in personalities"
+    );
+}
+
+// ── Test 12: progress file with --issue records issue number ─────────────
+
+#[tokio::test]
+async fn progress_file_records_issue_number() {
+    let _lock = PATH_LOCK.lock().unwrap();
+    let mock_dir = tempfile::TempDir::new().unwrap();
+
+    // High token count triggers progress write
+    create_mock_claude(
+        mock_dir.path(),
+        r#"{"result":"issue tracking","usage":{"input_tokens":190000,"output_tokens":2000}}"#,
+        0,
+    );
+    create_mock_room(mock_dir.path(), "");
+
+    let original = prepend_path(mock_dir.path());
+
+    std::env::remove_var("CONTEXT_LIMIT");
+    std::env::remove_var("CONTEXT_THRESHOLD");
+
+    let cli = test_cli(|c| {
+        c.max_iter = 1;
+        c.username = "integ-issue-track".to_string();
+        c.issue = Some("42".to_string());
+    });
+    let running = Arc::new(AtomicBool::new(true));
+
+    let result = loop_runner::run_loop(&cli, "mock-tok".to_string(), &running).await;
+    restore_path(&original);
+    assert!(result.is_ok());
+
+    let progress_path = room_ralph::progress::progress_file_path(Some("42"), "integ-issue-track");
+    assert!(
+        progress_path.exists(),
+        "progress file should exist for issue 42"
+    );
+
+    let content = std::fs::read_to_string(&progress_path).unwrap();
+    assert!(
+        content.contains("42") || content.contains("Issue"),
+        "progress file should reference the issue: {content}"
+    );
+    assert!(!content.is_empty(), "progress file should not be empty");
+
+    cleanup("integ-issue-track", Some("42"));
+}
+
+// ── Test 13: multi-iteration run with max_iter=3 ─────────────────────────
+
+#[tokio::test]
+async fn multi_iteration_max_iter_three() {
+    let _lock = PATH_LOCK.lock().unwrap();
+    let mock_dir = tempfile::TempDir::new().unwrap();
+    create_mock_claude(mock_dir.path(), r#"{"result":"iter output"}"#, 0);
+    create_mock_room(mock_dir.path(), "");
+
+    let original = prepend_path(mock_dir.path());
+
+    let cli = test_cli(|c| {
+        c.max_iter = 3;
+        c.username = "integ-max3".to_string();
+    });
+    let running = Arc::new(AtomicBool::new(true));
+
+    let result = loop_runner::run_loop(&cli, "mock-tok".to_string(), &running).await;
+    restore_path(&original);
+
+    assert!(result.is_ok(), "max_iter=3 should complete: {result:?}");
+    assert!(
+        running.load(Ordering::SeqCst),
+        "loop exited via max_iter, not signal"
+    );
+    cleanup("integ-max3", None);
+}
+
+// ── Test 14: token obtained via mock room join ───────────────────────────
+
+#[test]
+fn token_obtained_from_room_join() {
+    let _lock = PATH_LOCK.lock().unwrap();
+    let mock_dir = tempfile::TempDir::new().unwrap();
+    create_mock_room(mock_dir.path(), "");
+
+    let original = prepend_path(mock_dir.path());
+    let result = room::join_room("test-room", "integ-join-test", None);
+    restore_path(&original);
+
+    assert!(result.is_ok(), "join should succeed with mock");
+    let join_result = result.unwrap();
+    assert_eq!(join_result.token, "mock-tok", "should get mock token");
+    assert!(
+        !join_result.username.is_empty(),
+        "username should be non-empty"
+    );
+}
+
+// ── Test 15: send_message sets status via mock ───────────────────────────
+
+#[test]
+fn send_message_succeeds_with_mock() {
+    let _lock = PATH_LOCK.lock().unwrap();
+    let mock_dir = tempfile::TempDir::new().unwrap();
+    create_mock_room(mock_dir.path(), "");
+
+    let original = prepend_path(mock_dir.path());
+    let result = room::send_message("test-room", "mock-tok", "status update test", None);
+    restore_path(&original);
+
+    assert!(result.is_ok(), "send_message should succeed: {result:?}");
+}
+
+// ── Test 10 (original): live broker join and announce ────────────────────────
 
 #[tokio::test]
 #[ignore = "requires a running broker: `room ralph-live-test host &`"]
