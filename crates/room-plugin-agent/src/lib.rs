@@ -310,6 +310,7 @@ impl AgentPlugin {
         cmd.stdin(Stdio::null())
             .stdout(Stdio::from(log_file))
             .stderr(Stdio::from(stderr_file));
+        set_process_group(&mut cmd);
 
         let child = cmd
             .spawn()
@@ -565,8 +566,7 @@ impl AgentPlugin {
         // (which includes room send/poll commands and the token). Using --prompt
         // would REPLACE the default context entirely, breaking room communication.
         if !personality.prompt.template.is_empty() {
-            let template_path =
-                self.log_dir.join(format!("{username}-personality.txt"));
+            let template_path = self.log_dir.join(format!("{username}-personality.txt"));
             if let Err(e) = std::fs::write(&template_path, &personality.prompt.template) {
                 return Err(format!("failed to write personality template: {e}"));
             }
@@ -576,6 +576,7 @@ impl AgentPlugin {
         cmd.stdin(Stdio::null())
             .stdout(Stdio::from(log_file))
             .stderr(Stdio::from(stderr_file));
+        set_process_group(&mut cmd);
 
         let child = cmd
             .spawn()
@@ -634,16 +635,17 @@ impl AgentPlugin {
         // Check if already exited before attempting to stop
         let was_alive = is_process_alive(agent.pid);
         if was_alive {
-            // Try to use stored Child handle for clean shutdown, fall back to PID signal.
+            // Always use process group kill to terminate ralph AND all child
+            // claude processes. child.kill() only kills the direct child,
+            // leaving orphaned claude processes responding to messages (#777).
+            stop_process(agent.pid, STOP_GRACE_PERIOD_SECS);
+            // Clean up the Child handle if we have one.
             let mut child = {
                 let mut children = self.children.lock().unwrap();
                 children.remove(username.as_str())
             };
             if let Some(ref mut child) = child {
-                let _ = child.kill();
                 let _ = child.wait();
-            } else {
-                stop_process(agent.pid, STOP_GRACE_PERIOD_SECS);
             }
         }
 
@@ -803,6 +805,26 @@ impl Plugin for AgentPlugin {
     }
 }
 
+/// Configure a [`Command`] to spawn in its own process group.
+///
+/// This ensures `/agent stop` can kill the entire process tree (ralph + all
+/// child claude processes) with a single `kill(-pgid, SIGTERM)`.
+#[cfg(unix)]
+fn set_process_group(cmd: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    // Safety: setsid() is async-signal-safe.
+    unsafe {
+        cmd.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+}
+
+/// No-op on non-Unix platforms.
+#[cfg(not(unix))]
+fn set_process_group(_cmd: &mut Command) {}
+
 /// Check whether a process with the given PID is still running.
 fn is_process_alive(pid: u32) -> bool {
     #[cfg(unix)]
@@ -817,17 +839,23 @@ fn is_process_alive(pid: u32) -> bool {
     }
 }
 
-/// Send SIGTERM to a process, wait `grace_secs`, then SIGKILL if still alive.
+/// Send SIGTERM to a process group, wait `grace_secs`, then SIGKILL if the
+/// leader is still alive.
+///
+/// Uses `kill(-pid, ...)` to signal the entire process group, ensuring child
+/// processes (e.g. claude spawned by room-ralph) are also terminated.
 fn stop_process(pid: u32, grace_secs: u64) {
     #[cfg(unix)]
     {
+        // Negative PID signals the entire process group.
+        let pgid = -(pid as i32);
         unsafe {
-            libc::kill(pid as i32, libc::SIGTERM);
+            libc::kill(pgid, libc::SIGTERM);
         }
         std::thread::sleep(std::time::Duration::from_secs(grace_secs));
         if is_process_alive(pid) {
             unsafe {
-                libc::kill(pid as i32, libc::SIGKILL);
+                libc::kill(pgid, libc::SIGKILL);
             }
         }
     }
