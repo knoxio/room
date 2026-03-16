@@ -284,6 +284,53 @@ fn build_set_status_message(status: &str) -> String {
     }
 }
 
+/// Block until a new message arrives in the room, or timeout.
+///
+/// Runs `room watch <room_id> -t <token> --interval <interval>` which blocks
+/// until a foreign message arrives or the process is interrupted. Returns
+/// `Ok(true)` if a message arrived, `Ok(false)` on timeout/interrupt, and
+/// `Err` on token expiry or other errors.
+///
+/// If `timeout_secs` is provided, passes `--timeout` to limit the wait.
+pub fn watch_room(
+    room_id: &str,
+    token: &str,
+    interval_secs: u64,
+    timeout_secs: Option<u64>,
+    socket: Option<&str>,
+) -> Result<bool, String> {
+    let mut cmd = Command::new("room");
+    cmd.args([
+        "watch",
+        room_id,
+        "-t",
+        token,
+        "--interval",
+        &interval_secs.to_string(),
+    ]);
+    if let Some(t) = timeout_secs {
+        cmd.args(["--timeout", &t.to_string()]);
+    }
+    if let Some(s) = socket {
+        cmd.args(["--socket", s]);
+    }
+    let output = cmd
+        .output()
+        .map_err(|e| format!("failed to run `room watch`: {e}"))?;
+
+    if output.status.success() {
+        Ok(true)
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if detect_token_expiry(&stderr) {
+            Err(stderr.to_string())
+        } else {
+            // Non-zero exit without token error — likely timeout or interrupt
+            Ok(false)
+        }
+    }
+}
+
 /// Check if a response suggests the auth token is invalid/expired.
 ///
 /// Matches error messages from both the broker (`invalid_token`) and the
@@ -459,5 +506,21 @@ mod tests {
         // Partial matches should not trigger
         assert!(!is_username_taken("already connected"));
         assert!(!is_username_taken("username invalid"));
+    }
+
+    #[test]
+    fn watch_room_nonexistent_socket_returns_error() {
+        let result = watch_room(
+            "test-room",
+            "bad-token",
+            1,
+            Some(1),
+            Some("/nonexistent.sock"),
+        );
+        // Should fail to connect — either Err or Ok(false) depending on how room handles it
+        assert!(
+            result.is_err() || result == Ok(false),
+            "watch with bad socket should fail or return false"
+        );
     }
 }

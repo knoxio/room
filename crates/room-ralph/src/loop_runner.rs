@@ -56,7 +56,7 @@ pub async fn run_loop(cli: &Cli, token: String, running: &Arc<AtomicBool>) -> Re
         };
 
         process_output(cli, &token, socket_ref, iteration, &output, &progress_file)?;
-        cooldown(cli.cooldown, running).await;
+        wait_for_messages(cli, &token, socket_ref, running).await;
     }
 
     shutdown(cli, &token, socket_ref, iteration);
@@ -417,6 +417,37 @@ fn effective_model(cli: &Cli) -> &str {
         }
     }
     &cli.model
+}
+
+/// Wait for new messages before starting the next iteration.
+///
+/// Uses `room watch` to block until a message arrives, avoiding busy-polling.
+/// Falls back to a cooldown sleep if watch fails (e.g. token expiry).
+/// The watch timeout matches the cooldown period — if no messages arrive
+/// within that window, the next iteration runs anyway (to handle context
+/// cycling and status updates).
+async fn wait_for_messages(
+    cli: &Cli,
+    token: &str,
+    socket_ref: Option<&str>,
+    running: &Arc<AtomicBool>,
+) {
+    if !running.load(Ordering::SeqCst) {
+        return;
+    }
+    let timeout = cli.cooldown.max(5);
+    match room::watch_room(&cli.room_id, token, 2, Some(timeout), socket_ref) {
+        Ok(true) => {
+            tracing::debug!("watch: message arrived, proceeding to next iteration");
+        }
+        Ok(false) => {
+            tracing::debug!("watch: timeout after {timeout}s, proceeding anyway");
+        }
+        Err(e) => {
+            tracing::warn!("watch failed: {e}, falling back to cooldown");
+            cooldown(cli.cooldown, running).await;
+        }
+    }
 }
 
 /// Sleep for the cooldown period, but wake early if running is set to false.

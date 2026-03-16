@@ -7,8 +7,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- Replace fixed cooldown sleep with `room watch` between iterations — agents now
+  block until a new message arrives instead of busy-polling on a timer. Falls back
+  to cooldown sleep on watch failure. (#776)
+
 ### Added
 
+- `watch_room()` function in room.rs for blocking until messages arrive
 - 6 integration tests for manual test plan coverage (#675): log file path, list
   personalities, progress file with --issue, multi-iteration run, token join, send message.
 
