@@ -10,6 +10,10 @@ For changes prior to the workspace restructure (v0.1.2 through v1.0.2), see the
 
 ## [Unreleased]
 
+### Added
+
+- 5 integration tests for persistence and cross-transport visibility (Section 4+5 of #675 manual test plan)
+
 ## [3.5.0] - 2026-03-15
 
 ### Added
