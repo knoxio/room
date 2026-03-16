@@ -10,7 +10,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 > Post-monorepo changes are tracked per-crate. See:
 > - [room-cli CHANGELOG](crates/room-cli/CHANGELOG.md)
 > - [room-protocol CHANGELOG](crates/room-protocol/CHANGELOG.md)
-> - [room-ralph CHANGELOG](crates/room-ralph/CHANGELOG.md)
+>
+> Note: room-ralph has been moved to [knoxio/room-ralph](https://github.com/knoxio/room-ralph).
 
 ### Added
 

@@ -120,8 +120,9 @@ room send myroom -t $TOKEN "fix pushed"
 ## Shell environment constraints
 
 > **Note:** These restrictions apply to **interactive Claude Code sessions only**.
-> Agents spawned via room-ralph (`claude -p`) run non-interactively and do not
-> trigger permission prompts, so heredocs, `$()`, and env expansion are fine there.
+> Agents spawned via room-ralph (now in [knoxio/room-ralph](https://github.com/knoxio/room-ralph))
+> run non-interactively and do not trigger permission prompts, so heredocs, `$()`,
+> and env expansion are fine there.
 
 Claude Code's Bash tool triggers permission prompts on certain shell patterns. Avoid these
 to keep the workflow smooth:
@@ -532,12 +533,13 @@ crates/
   room-protocol/          — wire format types (lib, package: room-protocol)
   room-cli/               — CLI + TUI (bin: room, package: room-cli)
   room-daemon/            — broker + plugins + WS/REST (lib, package: room-daemon)
-  room-ralph/             — agent wrapper (bin: room-ralph, package: room-ralph)
-  room-plugin-agent/      — agent spawn/stop/list plugin (lib, package: room-plugin-agent)
   room-plugin-taskboard/  — task lifecycle plugin (lib, package: room-plugin-taskboard)
   room-plugin-hello/      — sample external plugin (lib+cdylib, package: room-plugin-hello)
 scripts/                  — shell scripts (pre-push, tests, legacy ralph wrapper)
 ```
+
+> **Note:** `room-ralph` (agent wrapper) and `room-plugin-agent` (agent spawn/stop/list plugin)
+> have been moved to a separate repository: [knoxio/room-ralph](https://github.com/knoxio/room-ralph).
 
 ## Codebase overview
 
@@ -611,17 +613,6 @@ crates/room-cli/tests/
   ws.rs                — WebSocket transport tests
   ws_smoke.rs          — End-to-end smoke tests spawning the real binary with --ws-port
 
-crates/room-ralph/src/
-  main.rs              — CLI (clap), dependency check, tmux launch, main entry
-  lib.rs               — Module declarations, Cli struct
-  loop_runner.rs       — Iteration loop: spawn claude, check output, restart logic
-  monitor.rs           — Context monitoring: parse_usage, should_restart, threshold math
-  progress.rs          — Progress file I/O: write/read/delete, log usage
-  prompt.rs            — Prompt builder: custom prompts, progress inclusion
-  room.rs              — Room CLI wrapper: join/send/poll/set_status via Command::new
-  claude.rs            — Claude subprocess wrapper: spawn, parse output, resolve_allowed/disallowed_tools,
-                          Profile enum, merge_profiles, tool profiles
-
 docs/
   README.md                    — Docs index with page listing
   quick-start.md               — Install and first-room walkthrough
@@ -632,7 +623,6 @@ docs/
   broker-internals.md          — Architecture: socket, fanout, persistence, shutdown
   dms.md                       — DM delivery semantics
   plugin.md                    — Claude Code plugin setup
-  ralph-setup.md               — room-ralph permissions, personality, memory
   testing.md                   — Writing and running tests
   contributing.md              — Contributor guide, pre-push checklist
   deployment.md                — Self-hosting, socket paths, configuration
@@ -655,8 +645,8 @@ docs/
 
 scripts/
   pre-push.sh          — Git hook: check + fmt + clippy + test
-  ralph-room.sh        — Legacy shell agent wrapper (superseded by room-ralph)
-  context-monitor.sh   — Legacy shell context monitor (superseded by room-ralph)
+  ralph-room.sh        — Legacy shell agent wrapper (superseded by room-ralph in knoxio/room-ralph)
+  context-monitor.sh   — Legacy shell context monitor (superseded by room-ralph in knoxio/room-ralph)
   test-ralph-room.sh   — Shell tests for ralph-room.sh (59 tests)
   test-context-monitor.sh — Shell tests for context-monitor.sh (48 tests)
   progress-template.md — Structured progress file template
@@ -669,15 +659,9 @@ Key invariants to preserve:
 - **All file IO uses `std::fs` (synchronous) or explicit `spawn_blocking`** — `tokio::fs`
   wrappers get cancelled on runtime shutdown.
 - **`crates/room-cli/src/lib.rs` must export any new modules** so integration tests can import them.
-- **room-ralph is a CLIENT** — it shells out to `room` and `claude` via `Command::new`.
-  It must NOT link room-cli transport or broker code. Depend on room-protocol only.
-- **Tests touching env vars must use `ENV_LOCK`** — env is process-global state.
-  Use the static `Mutex<()>` in `lib.rs` tests and call `clear_ralph_env()` before
-  and after each test to prevent cross-test contamination.
-- **`--disallowedTools` restricts, `--allowedTools` does not** — claude's
-  `--allowedTools` only controls auto-approval (additive), not tool availability.
-  `--disallowedTools` hard-blocks tools. ralph uses `--disallow-tools` (mapped to
-  `--disallowedTools`) for actual enforcement.
+- **room-ralph is in a separate repo** — [knoxio/room-ralph](https://github.com/knoxio/room-ralph).
+  It is a CLIENT that shells out to `room` and `claude` via `Command::new`. It must NOT
+  link room-cli transport or broker code. Depends on room-protocol only.
 - **Token persistence writes .tokens alongside .chat** — broker saves the token map
   to disk on every issuance and loads it on startup. Tests must clean up `.tokens` files.
 - **UserRegistry owns persistent identity** — `users.json` is the source of truth for
@@ -767,14 +751,14 @@ All tests must remain green. Add tests for any new behaviour.
 
 ## Baseline test count
 
-**Current baseline: 1373 Rust tests + 107 shell tests**
+**Current baseline: ~1199 Rust tests + 107 shell tests** (room-ralph tests now in knoxio/room-ralph)
 
 Rust breakdown:
 - room-protocol: 116 unit tests
 - room-cli: 888 unit + 195 integration (33 auth + 37 broker + 25 daemon + 10 events + 22 oneshot + 11 rest_query + 29 room_lifecycle + 8 scripted + 20 ws + 7 ws_smoke ignored) = 1083 tests
-- room-ralph: 164 unit + 10 integration = 174 tests
 
-Note: integration tests are split into focused modules under `tests/` (auth, broker, daemon,
+Note: room-ralph (174 tests) has been moved to [knoxio/room-ralph](https://github.com/knoxio/room-ralph).
+Integration tests are split into focused modules under `tests/` (auth, broker, daemon,
 events, oneshot, rest_query, room_lifecycle, scripted, ws, ws_smoke). No single `integration.rs` file.
 
 Shell breakdown:

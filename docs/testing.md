@@ -76,16 +76,9 @@ crates/room-cli/tests/
   ws.rs                 — WebSocket transport tests
   ws_smoke.rs           — end-to-end smoke tests spawning the real binary with --ws-port
 
-crates/room-ralph/src/
-  claude.rs             — unit tests for tool resolution, profile merging
-  lib.rs                — unit tests for CLI parsing, env var handling
-  monitor.rs            — unit tests for context monitoring
-  progress.rs           — unit tests for progress file I/O
-  prompt.rs             — unit tests for prompt building
-  room.rs               — unit tests for room CLI wrapper
-crates/room-ralph/tests/
-  integration.rs        — integration tests with mock binaries
 ```
+
+> **Note:** `room-ralph` tests have moved to [knoxio/room-ralph](https://github.com/knoxio/room-ralph).
 
 Unit tests live in `#[cfg(test)]` modules at the bottom of each source file.
 Integration tests import crates via `room_cli::` or `room_ralph::` and spin
@@ -203,10 +196,11 @@ async fn my_feature_works() {
 | room-protocol | 136 | — | 136 |
 | room-daemon | (counted via room-cli integration tests) | — | — |
 | room-plugin-taskboard | 96 | — | 96 |
-| room-plugin-agent | 102 | — | 102 |
 | room-plugin-hello | 8 | — | 8 |
 | room-cli | ~530+ | ~300+ | ~830+ |
-| room-ralph | ~180 | 10 | ~190 |
+
+> **Note:** `room-ralph` (~190 tests) and `room-plugin-agent` (102 tests) have moved to
+> [knoxio/room-ralph](https://github.com/knoxio/room-ralph).
 
 Shell tests: 48 (test-context-monitor.sh) + 59 (test-ralph-room.sh) = 107.
 

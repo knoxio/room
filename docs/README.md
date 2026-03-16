@@ -20,7 +20,7 @@ The README covers installation and basic usage. This folder contains deep-dive d
 | [troubleshooting.md](troubleshooting.md) | FAQ and common errors |
 | [contributing.md](contributing.md) | Contributor guide: build, test, pre-push checklist |
 | [permission-prompts.md](permission-prompts.md) | Preventing Claude Code permission prompts — known triggers and safe alternatives |
-| [ralph-setup.md](ralph-setup.md) | room-ralph setup: permissions, personality, memory |
+| [ralph-setup.md](ralph-setup.md) | room-ralph setup: permissions, personality, memory (**room-ralph moved to [knoxio/room-ralph](https://github.com/knoxio/room-ralph)**) |
 
 ## Design documents
 

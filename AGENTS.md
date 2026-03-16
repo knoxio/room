@@ -1,7 +1,7 @@
 # Agent Instructions
 
 > Shared instructions for all agents working in this project.
-> room-ralph includes this file in the prompt automatically.
+> room-ralph ([knoxio/room-ralph](https://github.com/knoxio/room-ralph)) includes this file in the prompt automatically.
 > These rules supplement CLAUDE.md — they do not replace it.
 
 ## Identity

@@ -20,11 +20,11 @@
 # The room CLI (broker, TUI, one-shot commands)
 cargo install room-cli
 
-# Autonomous agent wrapper (optional)
+# Autonomous agent wrapper (optional — separate repo)
 cargo install room-ralph
 ```
 
-The `room-cli` package installs the `room` binary. The `room-ralph` package installs the `room-ralph` binary.
+The `room-cli` package installs the `room` binary. The `room-ralph` package (now maintained in [knoxio/room-ralph](https://github.com/knoxio/room-ralph)) installs the `room-ralph` binary.
 
 For feature deep-dives, see the **[docs/](docs/)** folder.
 
@@ -513,6 +513,8 @@ Both commands use the existing `command` input type. Responses are delivered as 
 
 ## Autonomous agent wrapper (room-ralph)
 
+> **Note:** `room-ralph` has been moved to its own repository: [knoxio/room-ralph](https://github.com/knoxio/room-ralph).
+
 `room-ralph` runs `claude -p` in a loop with automatic restart on context exhaustion. It joins a room, builds a prompt from room context and progress files, and monitors token usage to restart before hitting the context limit.
 
 ```bash
@@ -526,7 +528,7 @@ room-ralph myroom agent1 --issue 42 --personality persona.txt
 room-ralph myroom agent1 --allow-tools Read,Grep,Glob,Bash
 ```
 
-See the [room-ralph README](crates/room-ralph/README.md) for all flags and options, and [docs/ralph-setup.md](docs/ralph-setup.md) for permissions, personality, and memory configuration.
+See the [knoxio/room-ralph](https://github.com/knoxio/room-ralph) repository for all flags, options, permissions, personality, and memory configuration.
 
 ## Direct messages
 
@@ -563,16 +565,21 @@ room send --token <uuid> myroom --to bob hey, can we sync?
 
 ## Workspace structure
 
-This is a Cargo workspace with three crates:
+This is a Cargo workspace. Core crates:
 
 | Crate | Package | Binary | Description |
 |-------|---------|--------|-------------|
 | [`crates/room-protocol`](crates/room-protocol/) | `room-protocol` | — | Wire format types (`Message` enum + serde). Library only. |
-| [`crates/room-cli`](crates/room-cli/) | `room-cli` | `room` | Broker, TUI, and one-shot subcommands. |
-| [`crates/room-ralph`](crates/room-ralph/) | `room-ralph` | `room-ralph` | Autonomous agent wrapper. |
+| [`crates/room-cli`](crates/room-cli/) | `room-cli` | `room` | CLI, TUI, and one-shot subcommands. |
+| [`crates/room-daemon`](crates/room-daemon/) | `room-daemon` | — | Broker, plugins, WS/REST. Library. |
+| [`crates/room-plugin-taskboard`](crates/room-plugin-taskboard/) | `room-plugin-taskboard` | — | Task lifecycle plugin. |
+| [`crates/room-plugin-hello`](crates/room-plugin-hello/) | `room-plugin-hello` | — | Sample external plugin. |
+
+> **Note:** `room-ralph` (agent wrapper) and `room-plugin-agent` (agent spawn plugin) have been
+> moved to [knoxio/room-ralph](https://github.com/knoxio/room-ralph).
 
 ## Further reading
 
 - [Agent coordination protocol](CLAUDE.md) — how agents announce intent, claim files, and coordinate
-- [Ralph setup guide](docs/ralph-setup.md) — permissions, personality, and memory for room-ralph
+- [knoxio/room-ralph](https://github.com/knoxio/room-ralph) — autonomous agent wrapper (permissions, personality, memory)
 - [docs/](docs/) — all documentation topics (authentication, commands, wire format, etc.)

@@ -1,8 +1,13 @@
 # Setting up room-ralph
 
-`room-ralph` is a Rust binary crate (`crates/room-ralph/`) that runs `claude -p` in an
-autonomous loop, restarting on context exhaustion. It communicates with a room broker via
-the `room` CLI (subprocess calls, not library imports).
+> **Note:** `room-ralph` has been moved to its own repository:
+> [knoxio/room-ralph](https://github.com/knoxio/room-ralph).
+> This document is kept for historical reference. See the new repository for up-to-date
+> documentation.
+
+`room-ralph` is a Rust binary that runs `claude -p` in an autonomous loop, restarting on
+context exhaustion. It communicates with a room broker via the `room` CLI (subprocess calls,
+not library imports).
 
 ## Installation
 

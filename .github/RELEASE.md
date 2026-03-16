@@ -19,7 +19,7 @@
 3. **Manual alternative** (if not using `cargo release`):
    ```bash
    # Update version in crates/room-cli/Cargo.toml, crates/room-protocol/Cargo.toml,
-   # crates/room-ralph/Cargo.toml
+   # crates/room-daemon/Cargo.toml, etc.
    git add -A && git commit -m "release vX.Y.Z"
    git tag vX.Y.Z
    git push origin master --tags
@@ -39,6 +39,9 @@
 
 ## Version authority
 
-All three workspace crates (`room-cli`, `room-protocol`, `room-ralph`) have
-independent versions in their respective `Cargo.toml` files. Tags follow
-the primary crate (`room-cli`) version.
+Workspace crates (`room-cli`, `room-protocol`, `room-daemon`, `room-plugin-taskboard`,
+`room-plugin-hello`) have independent versions in their respective `Cargo.toml` files.
+Tags follow the primary crate (`room-cli`) version.
+
+> **Note:** `room-ralph` has been moved to [knoxio/room-ralph](https://github.com/knoxio/room-ralph)
+> and is released independently from this workspace.
