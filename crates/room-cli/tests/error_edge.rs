@@ -9,10 +9,7 @@ mod common;
 use std::time::Duration;
 
 use common::{daemon_create, daemon_global_join, TestBroker, TestDaemon};
-use room_cli::{
-    history,
-    message::Message,
-};
+use room_cli::{history, message::Message};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 
@@ -307,9 +304,7 @@ async fn chat_file_deleted_mid_session() {
     // Send a first message — broker writes it to the chat file.
     alice.send_text("before delete").await;
     alice
-        .recv_until(
-            |m| matches!(m, Message::Message { content, .. } if content == "before delete"),
-        )
+        .recv_until(|m| matches!(m, Message::Message { content, .. } if content == "before delete"))
         .await;
 
     // Verify the chat file exists and has content.
