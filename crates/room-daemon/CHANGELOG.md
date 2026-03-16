@@ -7,6 +7,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- Remove static `room-plugin-agent` dependency — agent plugin now loaded dynamically
+  from `~/.room/plugins/` via the libloading system. Part of room-ralph extraction to
+  knoxio/room-ralph.
+
 ## [3.5.1] - 2026-03-16
 
 ## [3.5.0] - 2026-03-15

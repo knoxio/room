@@ -204,10 +204,11 @@ pub fn cmd_install(plugins_dir: &Path, name: &str, version: Option<&str>) -> any
 pub fn cmd_list(plugins_dir: &Path) -> anyhow::Result<()> {
     let externals = scan_installed(plugins_dir);
 
-    println!(
+    let header = format!(
         "{:<16} {:<12} {:<10} {}",
         "NAME", "VERSION", "SOURCE", "DESCRIPTION"
     );
+    println!("{header}");
 
     // Builtins — always shown
     let version = env!("CARGO_PKG_VERSION");

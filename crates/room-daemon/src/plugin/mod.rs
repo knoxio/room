@@ -80,16 +80,8 @@ impl PluginRegistry {
             None,
         )))?;
 
-        // Derive agent plugin paths from the chat path.
-        let agent_state_path = chat_path.with_extension("agents");
-        let agent_log_dir = chat_path.parent().unwrap_or(chat_path).join("agent-logs");
-        // All rooms run through the daemon — use the daemon socket.
-        let agent_socket_path = crate::paths::effective_socket_path(None);
-        registry.register(Box::new(room_plugin_agent::AgentPlugin::new(
-            agent_state_path,
-            agent_socket_path,
-            agent_log_dir,
-        )))?;
+        // Agent plugin is no longer statically linked — it lives in the
+        // knoxio/room-ralph repo and is loaded dynamically from ~/.room/plugins/.
 
         // Load external plugins from ~/.room/plugins/
         let plugins_dir = crate::paths::room_plugins_dir();

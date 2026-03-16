@@ -231,7 +231,8 @@ pub fn all_known_commands() -> Vec<CommandInfo> {
     cmds.extend(queue::QueuePlugin::default_commands());
     cmds.extend(stats::StatsPlugin.commands());
     cmds.extend(taskboard::TaskboardPlugin::default_commands());
-    cmds.extend(room_plugin_agent::AgentPlugin::default_commands());
+    // Agent plugin commands are no longer included statically — the agent
+    // plugin lives in knoxio/room-ralph and is loaded dynamically.
     cmds
 }
 

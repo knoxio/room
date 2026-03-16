@@ -13,7 +13,6 @@ path = "src/lib.rs"
 [dependencies]
 room-protocol = { path = "../room-protocol", version = "3.5.1" }
 room-plugin-taskboard = { path = "../room-plugin-taskboard", version = "3.5.1" }
-room-plugin-agent = { path = "../room-plugin-agent", version = "3.5.1" }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
