@@ -2022,6 +2022,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "room-plugin-hello"
+version = "3.5.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "room-protocol",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "room-plugin-taskboard"
 version = "3.5.0"
 dependencies = [
