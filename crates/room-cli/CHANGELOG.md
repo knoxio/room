@@ -10,6 +10,12 @@ For changes prior to the workspace restructure (v0.1.2 through v1.0.2), see the
 
 ## [Unreleased]
 
+### Added
+
+- 5 integration tests for Section 2 CLI workflows from manual test plan (#675):
+  send echo fields, interactive message delivery, multi-send visibility,
+  delayed foreign message receipt, multi-room isolation.
+
 ## [3.5.0] - 2026-03-15
 
 ### Added

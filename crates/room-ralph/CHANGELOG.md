@@ -7,6 +7,11 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- 6 integration tests for manual test plan coverage (#675): log file path, list
+  personalities, progress file with --issue, multi-iteration run, token join, send message.
+
 ## [3.5.0] - 2026-03-15
 
 ### Added
