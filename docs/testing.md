@@ -196,17 +196,22 @@ async fn my_feature_works() {
 
 ## Test baseline
 
-**Current: 1517 Rust tests + 107 shell tests** (as of v3.1.0)
+**Current: ~1700+ Rust tests + 107 shell tests** (as of v3.5.1)
 
 | Crate | Unit | Integration | Total |
 |-------|------|-------------|-------|
-| room-protocol | 116 | — | 116 |
-| room-daemon | — | — | (counted via room-cli) |
-| room-plugin-taskboard | — | — | (counted via room-cli) |
-| room-cli | 888 | 195 | 1083 |
-| room-ralph | 164 | 10 | 174 |
+| room-protocol | 136 | — | 136 |
+| room-daemon | (counted via room-cli integration tests) | — | — |
+| room-plugin-taskboard | 96 | — | 96 |
+| room-plugin-agent | 102 | — | 102 |
+| room-plugin-hello | 8 | — | 8 |
+| room-cli | ~530+ | ~300+ | ~830+ |
+| room-ralph | ~180 | 10 | ~190 |
 
 Shell tests: 48 (test-context-monitor.sh) + 59 (test-ralph-room.sh) = 107.
+
+Note: exact counts vary as integration tests are added across sprints. Run
+`cargo test` for the authoritative count.
 
 The test count must never decrease without explicit justification. Every PR
 that adds or changes functionality must include tests.

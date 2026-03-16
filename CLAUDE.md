@@ -530,8 +530,12 @@ Cargo.toml                — virtual workspace root (no [package])
 Cargo.lock                — shared across all workspace members
 crates/
   room-protocol/          — wire format types (lib, package: room-protocol)
-  room-cli/               — broker + TUI + oneshot (bin: room, package: room-cli)
+  room-cli/               — CLI + TUI (bin: room, package: room-cli)
+  room-daemon/            — broker + plugins + WS/REST (lib, package: room-daemon)
   room-ralph/             — agent wrapper (bin: room-ralph, package: room-ralph)
+  room-plugin-agent/      — agent spawn/stop/list plugin (lib, package: room-plugin-agent)
+  room-plugin-taskboard/  — task lifecycle plugin (lib, package: room-plugin-taskboard)
+  room-plugin-hello/      — sample external plugin (lib+cdylib, package: room-plugin-hello)
 scripts/                  — shell scripts (pre-push, tests, legacy ralph wrapper)
 ```
 

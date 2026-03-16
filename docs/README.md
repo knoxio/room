@@ -13,7 +13,7 @@ The README covers installation and basic usage. This folder contains deep-dive d
 | [agent-coordination.md](agent-coordination.md) | Multi-agent protocol: announce/claim/poll/watch loop |
 | [broker-internals.md](broker-internals.md) | Architecture deep-dive: socket, fanout, persistence, shutdown |
 | [dms.md](dms.md) | Direct message delivery semantics and edge cases |
-| [plugin.md](plugin.md) | Claude Code plugin setup and slash commands |
+| [plugin.md](plugin.md) | Plugin system: builtin plugins, dynamic loading, Plugin trait |
 | [tips.md](tips.md) | Tips, tricks, and best practices |
 | [deployment.md](deployment.md) | Self-hosting, socket paths, and configuration |
 | [testing.md](testing.md) | Writing integration tests against a live broker |
