@@ -1338,3 +1338,300 @@ async fn token_file_recreation_after_deletion() {
         "recreated file should contain bob's token"
     );
 }
+
+// ── Section 7: Subscription tier broker-level tests ──────────────────────────
+
+/// Subscribe command changes the tier via the broker and the change is
+/// reflected in the subscription persistence file.
+#[tokio::test]
+async fn subscribe_command_changes_tier_via_broker() {
+    let td = TestDaemon::start(&["t-sub-change"]).await;
+
+    let alice_token = common::daemon_join(&td.socket_path, "t-sub-change", "alice").await;
+
+    // Default tier after join is Full — change to MentionsOnly
+    let sub_cmd = serde_json::json!({
+        "type": "command",
+        "cmd": "subscribe",
+        "params": ["mentions_only"]
+    });
+    common::daemon_send(
+        &td.socket_path,
+        "t-sub-change",
+        &alice_token,
+        &sub_cmd.to_string(),
+    )
+    .await;
+
+    // Read the subscription file to verify the tier persisted
+    let sub_path = td._dir.path().join("t-sub-change.subscriptions");
+    // Give the broker time to persist (one-shot send may return before persist completes)
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let content = std::fs::read_to_string(&sub_path).unwrap_or_default();
+    let map: std::collections::HashMap<String, String> =
+        serde_json::from_str(&content).unwrap_or_default();
+    assert_eq!(
+        map.get("alice").map(|s| s.as_str()),
+        Some("mentions_only"),
+        "subscription tier should be MentionsOnly after subscribe command"
+    );
+
+    // Change to Unsubscribed — use interactive session for reliability
+    let (mut alice_r, mut alice_w) =
+        common::daemon_connect_session(&td.socket_path, "t-sub-change", &alice_token).await;
+    let unsub_wire = serde_json::json!({
+        "type": "command",
+        "cmd": "subscribe",
+        "params": ["unsubscribed"]
+    });
+    alice_w
+        .write_all(format!("{}\n", unsub_wire).as_bytes())
+        .await
+        .unwrap();
+    // Wait for the broker to echo back the subscribe system message
+    let mut line = String::new();
+    loop {
+        line.clear();
+        AsyncBufReadExt::read_line(&mut alice_r, &mut line).await.unwrap();
+        if line.to_lowercase().contains("unsubscribed") {
+            break;
+        }
+    }
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let content2 = std::fs::read_to_string(&sub_path).unwrap_or_default();
+    let map2: std::collections::HashMap<String, String> =
+        serde_json::from_str(&content2).unwrap_or_default();
+    assert_eq!(
+        map2.get("alice").map(|s| s.as_str()),
+        Some("unsubscribed"),
+        "subscription tier should be Unsubscribed after second subscribe command"
+    );
+}
+
+/// Full-tier subscriber sees all broadcast messages from other users.
+#[tokio::test]
+async fn full_tier_receives_all_broadcasts() {
+    let td = TestDaemon::start(&["t-full-tier"]).await;
+
+    // Alice joins interactively (host)
+    let (mut alice_r, mut alice_w) =
+        common::daemon_connect(&td.socket_path, "t-full-tier", "alice").await;
+    let mut line = String::new();
+    loop {
+        line.clear();
+        AsyncBufReadExt::read_line(&mut alice_r, &mut line).await.unwrap();
+        if let Ok(msg) = serde_json::from_str::<Message>(line.trim()) {
+            if matches!(&msg, Message::Join { user, .. } if user == "alice") {
+                break;
+            }
+        }
+    }
+
+    // Bob joins (defaults to Full subscription)
+    let _bob_token = common::daemon_join(&td.socket_path, "t-full-tier", "bob").await;
+    // Drain bob's join from alice's stream
+    loop {
+        line.clear();
+        AsyncBufReadExt::read_line(&mut alice_r, &mut line).await.unwrap();
+        if line.contains("bob") {
+            break;
+        }
+    }
+
+    // Alice sends 3 messages — none mention bob
+    for msg in &["message one", "message two", "message three"] {
+        alice_w
+            .write_all(format!("{msg}\n").as_bytes())
+            .await
+            .unwrap();
+        // Drain alice echo
+        loop {
+            line.clear();
+            AsyncBufReadExt::read_line(&mut alice_r, &mut line).await.unwrap();
+            if line.contains(msg) {
+                break;
+            }
+        }
+    }
+
+    // Poll as bob (Full tier) — should see all 3 messages
+    let chat_path = td._dir.path().join("t-full-tier.chat");
+    let cursor_path = tempfile::NamedTempFile::new().unwrap();
+    let msgs =
+        room_cli::oneshot::poll_messages(&chat_path, cursor_path.path(), Some("bob"), None, None)
+            .await
+            .unwrap();
+
+    let user_msgs: Vec<_> = msgs
+        .iter()
+        .filter(|m| matches!(m, Message::Message { user, .. } if user == "alice"))
+        .collect();
+    assert!(
+        user_msgs.len() >= 3,
+        "Full-tier bob should see all 3 messages from alice, got {}",
+        user_msgs.len()
+    );
+}
+
+/// Unsubscribed tier persists correctly after subscribe command and the
+/// subscription map file reflects the tier.
+#[tokio::test]
+async fn unsubscribed_tier_persists_via_broker() {
+    let td = TestDaemon::start(&["t-unsub-persist"]).await;
+
+    let bob_token = common::daemon_join(&td.socket_path, "t-unsub-persist", "bob").await;
+
+    // Subscribe as Unsubscribed
+    let unsub_cmd = serde_json::json!({
+        "type": "command",
+        "cmd": "subscribe",
+        "params": ["unsubscribed"]
+    });
+    common::daemon_send(
+        &td.socket_path,
+        "t-unsub-persist",
+        &bob_token,
+        &unsub_cmd.to_string(),
+    )
+    .await;
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Verify the subscription map file on disk
+    let sub_path = td._dir.path().join("t-unsub-persist.subscriptions");
+    let content = std::fs::read_to_string(&sub_path).unwrap_or_default();
+    let map: std::collections::HashMap<String, String> =
+        serde_json::from_str(&content).unwrap_or_default();
+    assert_eq!(
+        map.get("bob").map(|s| s.as_str()),
+        Some("unsubscribed"),
+        "bob's tier should be Unsubscribed in the persisted map"
+    );
+
+    // Re-subscribe as Full
+    let full_cmd = serde_json::json!({
+        "type": "command",
+        "cmd": "subscribe",
+        "params": ["full"]
+    });
+    common::daemon_send(
+        &td.socket_path,
+        "t-unsub-persist",
+        &bob_token,
+        &full_cmd.to_string(),
+    )
+    .await;
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let content2 = std::fs::read_to_string(&sub_path).unwrap_or_default();
+    let map2: std::collections::HashMap<String, String> =
+        serde_json::from_str(&content2).unwrap_or_default();
+    assert_eq!(
+        map2.get("bob").map(|s| s.as_str()),
+        Some("full"),
+        "bob's tier should be Full after re-subscribing"
+    );
+}
+
+/// MentionsOnly tier persists and the subscribe command broadcasts a system
+/// message confirming the tier change.
+#[tokio::test]
+async fn mentions_only_subscribe_broadcasts_confirmation() {
+    let td = TestDaemon::start(&["t-ment-bcast"]).await;
+
+    // Alice joins interactively to observe system messages
+    let (mut alice_r, _alice_w) =
+        common::daemon_connect(&td.socket_path, "t-ment-bcast", "alice").await;
+    let mut line = String::new();
+    loop {
+        line.clear();
+        AsyncBufReadExt::read_line(&mut alice_r, &mut line).await.unwrap();
+        if let Ok(msg) = serde_json::from_str::<Message>(line.trim()) {
+            if matches!(&msg, Message::Join { user, .. } if user == "alice") {
+                break;
+            }
+        }
+    }
+
+    // Bob joins and subscribes as MentionsOnly
+    let bob_token = common::daemon_join(&td.socket_path, "t-ment-bcast", "bob").await;
+    // Drain bob join
+    loop {
+        line.clear();
+        AsyncBufReadExt::read_line(&mut alice_r, &mut line).await.unwrap();
+        if line.contains("bob") { break; }
+    }
+
+    let sub_cmd = serde_json::json!({
+        "type": "command",
+        "cmd": "subscribe",
+        "params": ["mentions_only"]
+    });
+    common::daemon_send(
+        &td.socket_path,
+        "t-ment-bcast",
+        &bob_token,
+        &sub_cmd.to_string(),
+    )
+    .await;
+
+    // Alice should see a system message about bob's subscription change
+    let mut found_system_msg = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    while tokio::time::Instant::now() < deadline {
+        line.clear();
+        let read = tokio::time::timeout(
+            Duration::from_millis(500),
+            AsyncBufReadExt::read_line(&mut alice_r, &mut line),
+        )
+        .await;
+        if read.is_err() { break; }
+        if line.to_lowercase().contains("mentions") && line.contains("bob") {
+            found_system_msg = true;
+            break;
+        }
+    }
+    assert!(
+        found_system_msg,
+        "alice should see a system message about bob subscribing to mentions_only"
+    );
+}
+
+/// Event filter types: subscribe_events command sets per-user event type filters.
+#[tokio::test]
+async fn subscribe_events_sets_event_type_filter() {
+    let td = TestDaemon::start(&["t-evt-filter"]).await;
+
+    let alice_token = common::daemon_join(&td.socket_path, "t-evt-filter", "alice").await;
+
+    // Set event filter to only receive task_posted events
+    let filter_cmd = serde_json::json!({
+        "type": "command",
+        "cmd": "subscribe_events",
+        "params": ["task_posted"]
+    });
+    let response = common::daemon_send(
+        &td.socket_path,
+        "t-evt-filter",
+        &alice_token,
+        &filter_cmd.to_string(),
+    )
+    .await;
+
+    // The response should confirm the filter was set
+    let response_str = response.to_string();
+    assert!(
+        response_str.contains("event") || response_str.contains("filter") || response_str.contains("task_posted"),
+        "subscribe_events response should confirm the filter, got: {response_str}"
+    );
+
+    // Verify the event filter file was persisted
+    let filter_path = td._dir.path().join("t-evt-filter.event_filters");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let exists = filter_path.exists();
+    assert!(
+        exists,
+        "event filter file should be created after subscribe_events command"
+    );
+}
