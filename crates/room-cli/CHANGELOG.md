@@ -12,6 +12,8 @@ For changes prior to the workspace restructure (v0.1.2 through v1.0.2), see the
 
 ### Added
 
+- `room plugin list` now shows builtin plugins (agent, taskboard, queue, stats) as `[builtin]`
+  entries alongside external plugins (#774)
 - 5 integration tests for persistence and cross-transport visibility (Section 4+5 of #675 manual test plan)
 - 6 integration tests for auth/error edge cases from manual test plan (#675):
   bare username compat, path traversal rejection, JSON injection preservation,

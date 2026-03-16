@@ -8,6 +8,22 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+// ── Builtin plugin metadata ─────────────────────────────────────────────────
+
+/// Statically compiled plugins shipped with the room binary.
+///
+/// These are always available regardless of what is installed in
+/// `~/.room/plugins/`. Displayed as `[builtin]` in `room plugin list`.
+pub const BUILTIN_PLUGINS: &[(&str, &str)] = &[
+    ("agent", "Agent spawn/stop/list/logs, /spawn personalities"),
+    ("queue", "FIFO message queue (push/pop/peek/list/clear)"),
+    ("stats", "Room statistics (message counts, uptime)"),
+    (
+        "taskboard",
+        "Task lifecycle management (post/claim/plan/approve/finish)",
+    ),
+];
+
 // ── Plugin metadata ─────────────────────────────────────────────────────────
 
 /// Metadata written alongside each installed plugin shared library.
@@ -184,20 +200,32 @@ pub fn cmd_install(plugins_dir: &Path, name: &str, version: Option<&str>) -> any
     Ok(())
 }
 
-/// List installed plugins.
+/// List all plugins — builtins first, then installed external plugins.
 pub fn cmd_list(plugins_dir: &Path) -> anyhow::Result<()> {
-    let metas = scan_installed(plugins_dir);
-    if metas.is_empty() {
-        println!("no plugins installed");
-        return Ok(());
-    }
-    println!("{:<16} {:<12} {:<28} LIB", "NAME", "VERSION", "CRATE");
-    for m in &metas {
+    let externals = scan_installed(plugins_dir);
+
+    println!(
+        "{:<16} {:<12} {:<10} {}",
+        "NAME", "VERSION", "SOURCE", "DESCRIPTION"
+    );
+
+    // Builtins — always shown
+    let version = env!("CARGO_PKG_VERSION");
+    for (name, description) in BUILTIN_PLUGINS {
         println!(
-            "{:<16} {:<12} {:<28} {}",
-            m.name, m.version, m.crate_name, m.lib_file
+            "{:<16} {:<12} {:<10} {}",
+            name, version, "[builtin]", description
         );
     }
+
+    // External plugins from ~/.room/plugins/
+    for m in &externals {
+        println!(
+            "{:<16} {:<12} {:<10} {}",
+            m.name, m.version, "[external]", m.crate_name
+        );
+    }
+
     Ok(())
 }
 
@@ -547,5 +575,29 @@ mod tests {
         let result = cmd_update(dir.path(), "nonexistent", None);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not installed"));
+    }
+
+    // ── builtin plugins ─────────────────────────────────────────────────
+
+    #[test]
+    fn builtin_plugins_has_four_entries() {
+        assert_eq!(BUILTIN_PLUGINS.len(), 4);
+    }
+
+    #[test]
+    fn builtin_plugins_includes_expected_names() {
+        let names: Vec<&str> = BUILTIN_PLUGINS.iter().map(|(n, _)| *n).collect();
+        assert!(names.contains(&"agent"));
+        assert!(names.contains(&"taskboard"));
+        assert!(names.contains(&"queue"));
+        assert!(names.contains(&"stats"));
+    }
+
+    #[test]
+    fn builtin_plugins_sorted_alphabetically() {
+        let names: Vec<&str> = BUILTIN_PLUGINS.iter().map(|(n, _)| *n).collect();
+        let mut sorted = names.clone();
+        sorted.sort();
+        assert_eq!(names, sorted);
     }
 }
