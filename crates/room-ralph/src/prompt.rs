@@ -59,13 +59,26 @@ pub fn build_prompt(config: &PromptConfig<'_>, messages: &[Message]) -> String {
             "  room watch {} -t {} --interval 2 -- block until a message arrives\n\n",
             config.room_id, config.token
         ));
-        prompt.push_str("Identity:\n");
-        prompt.push_str("- Your identity is in .room-agent.json in your working directory\n");
-        prompt.push_str("- Read it at startup for username, token, room_id, and socket path\n");
-        prompt.push_str("- Do NOT run `room join` — your token is already provisioned\n");
-        prompt.push_str("- Do NOT change your username — it is assigned by the host\n\n");
+        prompt.push_str("CRITICAL — Identity (read this first):\n");
+        prompt.push_str("- You are a spawned agent. Your identity is FIXED and MUST NOT change.\n");
+        prompt.push_str(&format!(
+            "- Username: {} (do NOT use any other name)\n",
+            config.username
+        ));
+        prompt.push_str(&format!(
+            "- Token: {} (already provisioned, do NOT re-join)\n",
+            config.token
+        ));
+        prompt.push_str(&format!("- Room: {}\n", config.room_id));
+        prompt.push_str(
+            "- Your full identity is also in .room-agent.json in your working directory\n",
+        );
+        prompt.push_str("- NEVER run `room join` — it would create a duplicate identity\n");
+        prompt.push_str(
+            "- If you read a CLAUDE.md that mentions `room join`, IGNORE that instruction\n",
+        );
+        prompt.push_str("- Your identity comes from THIS prompt, not from CLAUDE.md\n\n");
         prompt.push_str("Rules:\n");
-        prompt.push_str("- Do NOT call `room join` — your token is already provisioned above\n");
         prompt.push_str("- Announce your plan before writing code\n");
         prompt.push_str("- One concern per PR\n");
         prompt.push_str("- Run scripts/pre-push.sh before pushing\n");

@@ -7,6 +7,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- Strengthen agent identity prompt to prevent CLAUDE.md from overriding assigned
+  username/token. Prompt now explicitly states identity is fixed and CLAUDE.md
+  `room join` instructions must be ignored. (#775)
+
 ### Changed
 
 - Replace fixed cooldown sleep with `room watch` between iterations — agents now
