@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
+use crate::agent_meta::{self, AgentMeta};
 use crate::claude::{self, ClaudeOutput};
 use crate::monitor;
 use crate::personalities::{self, ResolvedPersonality};
@@ -26,6 +27,20 @@ pub async fn run_loop(cli: &Cli, token: String, running: &Arc<AtomicBool>) -> Re
     // Resolve personality once: builtin prompt text or file contents.
     let personality_text = resolve_personality_text(cli);
     let personality_text_ref = personality_text.as_deref();
+
+    // Write agent metadata file so claude can read identity without re-joining.
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let meta = AgentMeta {
+        username: cli.username.clone(),
+        token: token.clone(),
+        room_id: cli.room_id.clone(),
+        ralph_pid: std::process::id(),
+        socket_path: socket_str.clone(),
+        personality: cli.personality.clone(),
+    };
+    if let Err(e) = agent_meta::write_meta(&cwd, &meta) {
+        tracing::warn!("failed to write agent metadata: {e}");
+    }
 
     while running.load(Ordering::SeqCst) {
         iteration += 1;
@@ -60,6 +75,10 @@ pub async fn run_loop(cli: &Cli, token: String, running: &Arc<AtomicBool>) -> Re
     }
 
     shutdown(cli, &token, socket_ref, iteration);
+
+    // Clean up agent metadata file on exit.
+    agent_meta::cleanup_meta(&cwd);
+
     Ok(())
 }
 

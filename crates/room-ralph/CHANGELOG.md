@@ -15,6 +15,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Agent metadata file (`.room-agent.json`) — written by ralph before spawning claude,
+  contains username, token, room_id, PID, socket path, and personality. Claude reads
+  this instead of running `room join`. Cleaned up on exit. 7 unit tests. (#779)
 - `watch_room()` function in room.rs for blocking until messages arrive
 - 6 integration tests for manual test plan coverage (#675): log file path, list
   personalities, progress file with --issue, multi-iteration run, token join, send message.

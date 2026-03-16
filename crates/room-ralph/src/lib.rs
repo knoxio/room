@@ -3,6 +3,7 @@ use std::str::FromStr;
 
 use clap::Parser;
 
+pub mod agent_meta;
 pub mod claude;
 
 /// Clap value parser for the Profile enum.

@@ -59,6 +59,11 @@ pub fn build_prompt(config: &PromptConfig<'_>, messages: &[Message]) -> String {
             "  room watch {} -t {} --interval 2 -- block until a message arrives\n\n",
             config.room_id, config.token
         ));
+        prompt.push_str("Identity:\n");
+        prompt.push_str("- Your identity is in .room-agent.json in your working directory\n");
+        prompt.push_str("- Read it at startup for username, token, room_id, and socket path\n");
+        prompt.push_str("- Do NOT run `room join` — your token is already provisioned\n");
+        prompt.push_str("- Do NOT change your username — it is assigned by the host\n\n");
         prompt.push_str("Rules:\n");
         prompt.push_str("- Do NOT call `room join` — your token is already provisioned above\n");
         prompt.push_str("- Announce your plan before writing code\n");
