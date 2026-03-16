@@ -1392,7 +1392,9 @@ async fn subscribe_command_changes_tier_via_broker() {
     let mut line = String::new();
     loop {
         line.clear();
-        AsyncBufReadExt::read_line(&mut alice_r, &mut line).await.unwrap();
+        AsyncBufReadExt::read_line(&mut alice_r, &mut line)
+            .await
+            .unwrap();
         if line.to_lowercase().contains("unsubscribed") {
             break;
         }
@@ -1420,7 +1422,9 @@ async fn full_tier_receives_all_broadcasts() {
     let mut line = String::new();
     loop {
         line.clear();
-        AsyncBufReadExt::read_line(&mut alice_r, &mut line).await.unwrap();
+        AsyncBufReadExt::read_line(&mut alice_r, &mut line)
+            .await
+            .unwrap();
         if let Ok(msg) = serde_json::from_str::<Message>(line.trim()) {
             if matches!(&msg, Message::Join { user, .. } if user == "alice") {
                 break;
@@ -1433,7 +1437,9 @@ async fn full_tier_receives_all_broadcasts() {
     // Drain bob's join from alice's stream
     loop {
         line.clear();
-        AsyncBufReadExt::read_line(&mut alice_r, &mut line).await.unwrap();
+        AsyncBufReadExt::read_line(&mut alice_r, &mut line)
+            .await
+            .unwrap();
         if line.contains("bob") {
             break;
         }
@@ -1448,7 +1454,9 @@ async fn full_tier_receives_all_broadcasts() {
         // Drain alice echo
         loop {
             line.clear();
-            AsyncBufReadExt::read_line(&mut alice_r, &mut line).await.unwrap();
+            AsyncBufReadExt::read_line(&mut alice_r, &mut line)
+                .await
+                .unwrap();
             if line.contains(msg) {
                 break;
             }
@@ -1546,7 +1554,9 @@ async fn mentions_only_subscribe_broadcasts_confirmation() {
     let mut line = String::new();
     loop {
         line.clear();
-        AsyncBufReadExt::read_line(&mut alice_r, &mut line).await.unwrap();
+        AsyncBufReadExt::read_line(&mut alice_r, &mut line)
+            .await
+            .unwrap();
         if let Ok(msg) = serde_json::from_str::<Message>(line.trim()) {
             if matches!(&msg, Message::Join { user, .. } if user == "alice") {
                 break;
@@ -1559,8 +1569,12 @@ async fn mentions_only_subscribe_broadcasts_confirmation() {
     // Drain bob join
     loop {
         line.clear();
-        AsyncBufReadExt::read_line(&mut alice_r, &mut line).await.unwrap();
-        if line.contains("bob") { break; }
+        AsyncBufReadExt::read_line(&mut alice_r, &mut line)
+            .await
+            .unwrap();
+        if line.contains("bob") {
+            break;
+        }
     }
 
     let sub_cmd = serde_json::json!({
@@ -1586,7 +1600,9 @@ async fn mentions_only_subscribe_broadcasts_confirmation() {
             AsyncBufReadExt::read_line(&mut alice_r, &mut line),
         )
         .await;
-        if read.is_err() { break; }
+        if read.is_err() {
+            break;
+        }
         if line.to_lowercase().contains("mentions") && line.contains("bob") {
             found_system_msg = true;
             break;
@@ -1622,7 +1638,9 @@ async fn subscribe_events_sets_event_type_filter() {
     // The response should confirm the filter was set
     let response_str = response.to_string();
     assert!(
-        response_str.contains("event") || response_str.contains("filter") || response_str.contains("task_posted"),
+        response_str.contains("event")
+            || response_str.contains("filter")
+            || response_str.contains("task_posted"),
         "subscribe_events response should confirm the filter, got: {response_str}"
     );
 
