@@ -30,8 +30,12 @@ pub fn build_prompt(config: &PromptConfig<'_>, messages: &[Message]) -> String {
 
     // System context
     if let Some(custom) = config.custom_prompt_file {
-        if let Ok(content) = std::fs::read_to_string(custom) {
-            prompt.push_str(&content);
+        match std::fs::read_to_string(custom) {
+            Ok(content) => prompt.push_str(&content),
+            Err(e) => eprintln!(
+                "[ralph] warning: cannot read custom prompt {}: {e}",
+                custom.display()
+            ),
         }
     } else {
         prompt.push_str(&format!(

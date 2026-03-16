@@ -6,6 +6,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- `/spawn` now passes `--personality` instead of `--prompt` to room-ralph, preserving
+  the default system context (room send/poll commands and token). Previously, the
+  personality template text was passed as `--prompt` (which expects a file path),
+  causing the agent to lose all room communication instructions. (#770)
+
 ## [3.5.0] - 2026-03-15
 
 ### Added
