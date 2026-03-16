@@ -21,6 +21,9 @@ For changes prior to the workspace restructure (v0.1.2 through v1.0.2), see the
 - 5 integration tests for Section 6+10 plugin/filesystem from manual test plan (#675):
   taskboard direct assign, lease TTL cycle, lazy sweep terminal states,
   queue NDJSON persistence, token file recreation after deletion.
+- 5 integration tests for subscription tier filtering (Section 7 of manual test plan #675):
+  subscribe command persistence, Full/MentionsOnly/Unsubscribed tier verification,
+  and event filter setup.
 
 ## [3.5.0] - 2026-03-15
 
