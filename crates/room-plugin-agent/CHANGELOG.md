@@ -8,6 +8,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- `/agent stop` now kills the entire process group (ralph + all child claude
+  processes) instead of only the direct child. Spawned agents use `setsid()` to
+  create their own process group, and stop uses `kill(-pgid, SIGTERM)` to
+  terminate all descendants. Prevents orphaned claude processes from continuing
+  to respond after stop. (#777)
 - `/spawn` now passes `--personality` instead of `--prompt` to room-ralph, preserving
   the default system context (room send/poll commands and token). Previously, the
   personality template text was passed as `--prompt` (which expects a file path),
