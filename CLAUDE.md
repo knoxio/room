@@ -429,6 +429,19 @@ justification. Types of tests expected:
   module under `tests/` (auth.rs, broker.rs, daemon.rs, oneshot.rs, rest_query.rs, etc.).
 - If your change is a bug fix, add a regression test that fails without the fix.
 
+### Docs accuracy rule
+
+Every PR description **must** include this checkbox:
+
+```
+- [ ] Verified docs/README are accurate after this change (no drift)
+```
+
+Before opening a PR, check that any docs, README, or CLAUDE.md sections affected by
+your change are still accurate. If your PR adds a new command, module, or feature,
+verify the relevant docs page reflects it. If you find drift, fix it in the same PR
+or file an issue. Do not merge PRs that introduce documentation drift.
+
 ### Agent memory convention
 
 Agents have three types of persistent state, each serving a different purpose:
