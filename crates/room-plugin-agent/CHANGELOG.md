@@ -6,6 +6,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- Per-agent workspace isolation: `/spawn` creates `~/.room/agents/<name>/` and sets it
+  as the working directory for the spawned process. Agents no longer share the host's
+  cwd. (#771)
+
 ### Fixed
 
 - `/agent stop` now kills the entire process group (ralph + all child claude

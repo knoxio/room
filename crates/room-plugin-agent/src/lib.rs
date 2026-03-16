@@ -14,6 +14,18 @@ use room_protocol::plugin::{
 };
 use room_protocol::Message;
 
+/// Returns the workspace directory for a spawned agent: `~/.room/agents/<name>/`.
+///
+/// Each agent gets its own isolated working directory to prevent cwd collisions
+/// between multiple spawned agents and the host process.
+fn agent_workspace_dir(agent_name: &str) -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_owned());
+    PathBuf::from(home)
+        .join(".room")
+        .join("agents")
+        .join(agent_name)
+}
+
 // ── C ABI entry points for cdylib loading ─────────────────────────────────
 
 /// JSON configuration for the agent plugin when loaded dynamically.
@@ -307,9 +319,19 @@ impl AgentPlugin {
             cmd.arg("--personality").arg(&personality);
         }
 
+        // Create per-agent workspace directory for isolation
+        let workspace = agent_workspace_dir(username);
+        fs::create_dir_all(&workspace).map_err(|e| {
+            format!(
+                "failed to create agent workspace {}: {e}",
+                workspace.display()
+            )
+        })?;
+
         cmd.stdin(Stdio::null())
             .stdout(Stdio::from(log_file))
-            .stderr(Stdio::from(stderr_file));
+            .stderr(Stdio::from(stderr_file))
+            .current_dir(&workspace);
         set_process_group(&mut cmd);
 
         let child = cmd
@@ -573,9 +595,19 @@ impl AgentPlugin {
             cmd.arg("--personality").arg(&template_path);
         }
 
+        // Create per-agent workspace directory for isolation
+        let workspace = agent_workspace_dir(&username);
+        fs::create_dir_all(&workspace).map_err(|e| {
+            format!(
+                "failed to create agent workspace {}: {e}",
+                workspace.display()
+            )
+        })?;
+
         cmd.stdin(Stdio::null())
             .stdout(Stdio::from(log_file))
-            .stderr(Stdio::from(stderr_file));
+            .stderr(Stdio::from(stderr_file))
+            .current_dir(&workspace);
         set_process_group(&mut cmd);
 
         let child = cmd
