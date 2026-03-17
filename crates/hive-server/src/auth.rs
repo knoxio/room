@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::error::HiveError;
+use crate::util::unix_secs;
 use crate::AppState;
 
 // JWT_SECRET will be used when we switch to HMAC-SHA256 signed tokens.
@@ -50,10 +51,7 @@ pub(crate) async fn issue_token(
         return Err(HiveError::BadRequest("username is required".into()));
     }
 
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
+    let now = unix_secs();
     let expires_in = 86400; // 24 hours
 
     let claims = Claims {
@@ -112,10 +110,7 @@ fn validate_token(token: &str) -> Result<Claims, String> {
     let claims: Claims =
         serde_json::from_str(&decoded).map_err(|_| "invalid token format".to_string())?;
 
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
+    let now = unix_secs();
 
     if claims.exp < now {
         return Err("token expired".to_string());
@@ -154,10 +149,7 @@ mod tests {
 
     #[test]
     fn validate_valid_token() {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let now = crate::util::unix_secs();
         let claims = Claims {
             sub: "test-user".into(),
             exp: now + 3600,

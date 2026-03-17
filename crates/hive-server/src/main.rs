@@ -4,6 +4,7 @@ pub mod daemon;
 pub mod db;
 pub mod error;
 mod rest_proxy;
+pub mod util;
 mod ws_relay;
 
 use std::path::PathBuf;
