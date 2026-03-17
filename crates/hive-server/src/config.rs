@@ -27,6 +27,9 @@ pub struct ServerConfig {
     pub port: u16,
     /// Directory for persistent data (SQLite database, etc.).
     pub data_dir: String,
+    /// Allowed CORS origins. Overridden by `HIVE_CORS_ORIGINS` (comma-separated).
+    /// Defaults to `["http://localhost:5173"]`.
+    pub cors_origins: Vec<String>,
 }
 
 /// Room daemon connection configuration.
@@ -50,12 +53,23 @@ impl Default for ServerConfig {
             let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_owned());
             format!("{home}/.hive/data")
         });
+        let cors_origins = std::env::var("HIVE_CORS_ORIGINS")
+            .map(|s| s.split(',').map(|o| o.trim().to_owned()).collect())
+            .unwrap_or_else(|_| vec!["http://localhost:5173".to_owned()]);
         Self {
             host,
             port,
             data_dir,
+            cors_origins,
         }
     }
+}
+
+/// Returns `true` when `HIVE_ENV=production` is set.
+pub fn is_production() -> bool {
+    std::env::var("HIVE_ENV")
+        .map(|v| v == "production")
+        .unwrap_or(false)
 }
 
 impl Default for DaemonConfig {
