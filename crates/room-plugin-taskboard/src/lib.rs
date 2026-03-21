@@ -84,7 +84,7 @@ impl TaskboardPlugin {
         vec![CommandInfo {
             name: "taskboard".to_owned(),
             description:
-                "Manage task lifecycle — post, list, show, claim, assign, plan, approve, update, review, release, finish, cancel"
+                "Manage task lifecycle — post, list, mine, show, claim, assign, plan, approve, update, review, release, finish, cancel"
                     .to_owned(),
             usage: "/taskboard <action> [args...]".to_owned(),
             params: vec![
@@ -93,6 +93,7 @@ impl TaskboardPlugin {
                     param_type: ParamType::Choice(vec![
                         "post".to_owned(),
                         "list".to_owned(),
+                        "mine".to_owned(),
                         "show".to_owned(),
                         "claim".to_owned(),
                         "assign".to_owned(),
@@ -164,6 +165,7 @@ impl Plugin for TaskboardPlugin {
                     let show_all = ctx.params.get(1).map(|s| s.as_str()) == Some("all");
                     (self.handle_list(show_all), false)
                 }
+                "mine" => (self.handle_mine(&ctx.sender), false),
                 "claim" => self.handle_claim(&ctx),
                 "assign" => self.handle_assign(&ctx),
                 "plan" => self.handle_plan(&ctx),
@@ -174,8 +176,8 @@ impl Plugin for TaskboardPlugin {
                 "review" => self.handle_review(&ctx),
                 "finish" => self.handle_finish(&ctx),
                 "cancel" => self.handle_cancel(&ctx),
-                "" => ("usage: /taskboard <post|list|show|claim|assign|plan|approve|update|review|release|finish|cancel> [args...]".to_owned(), false),
-                other => (format!("unknown action: {other}. use: post, list, show, claim, assign, plan, approve, update, review, release, finish, cancel"), false),
+                "" => ("usage: /taskboard <post|list|mine|show|claim|assign|plan|approve|update|review|release|finish|cancel> [args...]".to_owned(), false),
+                other => (format!("unknown action: {other}. use: post, list, mine, show, claim, assign, plan, approve, update, review, release, finish, cancel"), false),
             };
             if broadcast {
                 // Emit a typed event alongside the system broadcast.
@@ -252,7 +254,7 @@ mod tests {
             assert!(choices.contains(&"post".to_owned()));
             assert!(choices.contains(&"approve".to_owned()));
             assert!(choices.contains(&"assign".to_owned()));
-            assert_eq!(choices.len(), 12);
+            assert_eq!(choices.len(), 13);
         } else {
             panic!("expected Choice param type");
         }
@@ -479,5 +481,79 @@ mod tests {
                 assert!(lt.lease_start.is_none());
             }
         }
+    }
+
+    // ── handle_mine tests ────────────────────────────────────────────────
+
+    #[test]
+    fn handle_mine_returns_only_assigned_tasks() {
+        let (plugin, _tmp) = make_plugin();
+        seed_task(&plugin, "tb-001", TaskStatus::Open);
+        seed_task(&plugin, "tb-002", TaskStatus::Claimed); // assigned to "bob"
+        seed_task(&plugin, "tb-003", TaskStatus::Approved); // assigned to "bob"
+
+        // Seed one task assigned to "alice".
+        {
+            let mut board = plugin.board.lock().unwrap();
+            let t = task::Task {
+                id: "tb-004".to_owned(),
+                description: "alice task".to_owned(),
+                status: TaskStatus::Claimed,
+                posted_by: "manager".to_owned(),
+                assigned_to: Some("alice".to_owned()),
+                posted_at: chrono::Utc::now(),
+                claimed_at: None,
+                plan: None,
+                approved_by: None,
+                approved_at: None,
+                updated_at: None,
+                notes: None,
+                team: None,
+            };
+            board.push(LiveTask::new(t));
+        }
+
+        let output = plugin.handle_mine("bob");
+        assert!(
+            output.contains("tb-002"),
+            "bob's claimed task should appear"
+        );
+        assert!(
+            output.contains("tb-003"),
+            "bob's approved task should appear"
+        );
+        assert!(
+            !output.contains("tb-001"),
+            "unassigned task should not appear"
+        );
+        assert!(
+            !output.contains("tb-004"),
+            "alice's task should not appear for bob"
+        );
+    }
+
+    #[test]
+    fn handle_mine_empty_when_no_tasks_assigned() {
+        let (plugin, _tmp) = make_plugin();
+        seed_task(&plugin, "tb-001", TaskStatus::Open);
+        seed_task(&plugin, "tb-002", TaskStatus::Claimed); // assigned to "bob"
+
+        let output = plugin.handle_mine("alice");
+        assert!(
+            output.contains("no tasks assigned to alice"),
+            "should show empty message, got: {output}"
+        );
+    }
+
+    #[test]
+    fn handle_mine_includes_finished_tasks() {
+        let (plugin, _tmp) = make_plugin();
+        seed_task(&plugin, "tb-001", TaskStatus::Finished); // assigned to "bob"
+
+        let output = plugin.handle_mine("bob");
+        assert!(
+            output.contains("tb-001"),
+            "finished tasks should appear in mine"
+        );
     }
 }

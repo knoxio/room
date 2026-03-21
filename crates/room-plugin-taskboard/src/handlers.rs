@@ -146,6 +146,47 @@ impl TaskboardPlugin {
         lines.join("\n")
     }
 
+    pub(super) fn handle_mine(&self, sender: &str) -> String {
+        self.sweep_expired();
+        let board = self.board.lock().unwrap();
+        let mine: Vec<&LiveTask> = board
+            .iter()
+            .filter(|lt| lt.task.assigned_to.as_deref() == Some(sender))
+            .collect();
+        if mine.is_empty() {
+            return format!("no tasks assigned to {sender}");
+        }
+        let mut lines = Vec::new();
+        lines.push(format!(
+            "{:<8} {:<10} {:<12} {}",
+            "ID", "STATUS", "ELAPSED", "DESCRIPTION"
+        ));
+        for lt in &mine {
+            let elapsed = match lt.lease_start {
+                Some(start) => {
+                    let secs = start.elapsed().as_secs();
+                    if secs < 60 {
+                        format!("{secs}s")
+                    } else {
+                        format!("{}m", secs / 60)
+                    }
+                }
+                None => "-".to_owned(),
+            };
+            let desc = if lt.task.description.chars().count() > 40 {
+                let truncated: String = lt.task.description.chars().take(37).collect();
+                format!("{truncated}...")
+            } else {
+                lt.task.description.clone()
+            };
+            lines.push(format!(
+                "{:<8} {:<10} {:<12} {}",
+                lt.task.id, lt.task.status, elapsed, desc
+            ));
+        }
+        lines.join("\n")
+    }
+
     pub(super) fn handle_claim(&self, ctx: &CommandContext) -> (String, bool) {
         let task_id = match ctx.params.get(1) {
             Some(id) => id,
