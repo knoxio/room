@@ -219,6 +219,48 @@ impl TaskboardPlugin {
         lines.join("\n")
     }
 
+    pub(super) fn handle_qa_queue(&self) -> String {
+        self.sweep_expired();
+        let board = self.board.lock().unwrap();
+        let awaiting: Vec<&LiveTask> = board
+            .iter()
+            .filter(|lt| matches!(lt.task.status, TaskStatus::AwaitingReview))
+            .collect();
+        if awaiting.is_empty() {
+            return "no tasks awaiting review".to_owned();
+        }
+        let mut lines = Vec::new();
+        lines.push(format!(
+            "{:<8} {:<12} {:<12} {}",
+            "ID", "ASSIGNEE", "ELAPSED", "DESCRIPTION"
+        ));
+        for lt in awaiting.iter() {
+            let assignee = lt.task.assigned_to.as_deref().unwrap_or("-").to_owned();
+            let elapsed = match lt.lease_start {
+                Some(start) => {
+                    let secs = start.elapsed().as_secs();
+                    if secs < 60 {
+                        format!("{secs}s")
+                    } else {
+                        format!("{}m", secs / 60)
+                    }
+                }
+                None => "-".to_owned(),
+            };
+            let desc = if lt.task.description.chars().count() > 40 {
+                let truncated: String = lt.task.description.chars().take(37).collect();
+                format!("{truncated}...")
+            } else {
+                lt.task.description.clone()
+            };
+            lines.push(format!(
+                "{:<8} {:<12} {:<12} {}",
+                lt.task.id, assignee, elapsed, desc
+            ));
+        }
+        lines.join("\n")
+    }
+
     pub(super) fn handle_claim(&self, ctx: &CommandContext) -> (String, bool) {
         let task_id = match ctx.params.get(1) {
             Some(id) => id,
