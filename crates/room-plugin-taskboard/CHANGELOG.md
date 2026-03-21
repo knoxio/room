@@ -7,6 +7,12 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- `/taskboard approve` is now context-aware — approves plan (Planned → InProgress) when task
+  is planned, or approves review (ReviewClaimed → Finished) when task has a claimed reviewer.
+  For review approval, only the reviewer or host can approve. (#843)
+
 ### Added
 
 - `/taskboard reject <task-id> [reason]` subcommand — reviewer sends task back to implementer.
