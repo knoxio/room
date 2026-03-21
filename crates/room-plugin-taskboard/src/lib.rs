@@ -84,7 +84,7 @@ impl TaskboardPlugin {
         vec![CommandInfo {
             name: "taskboard".to_owned(),
             description:
-                "Manage task lifecycle — post, list, history, mine, show, claim, assign, plan, approve, update, request_review, review_claim, release, finish, cancel"
+                "Manage task lifecycle — post, list, history, mine, qa-queue, show, claim, assign, plan, approve, update, request_review, review_claim, release, finish, cancel"
                     .to_owned(),
             usage: "/taskboard <action> [args...]".to_owned(),
             params: vec![
@@ -95,6 +95,7 @@ impl TaskboardPlugin {
                         "list".to_owned(),
                         "history".to_owned(),
                         "mine".to_owned(),
+                        "qa-queue".to_owned(),
                         "show".to_owned(),
                         "claim".to_owned(),
                         "assign".to_owned(),
@@ -172,6 +173,7 @@ impl Plugin for TaskboardPlugin {
                 }
                 "history" => (self.handle_history(), false),
                 "mine" => (self.handle_mine(&ctx.sender), false),
+                "qa-queue" => (self.handle_qa_queue(), false),
                 "claim" => self.handle_claim(&ctx),
                 "assign" => self.handle_assign(&ctx),
                 "plan" => self.handle_plan(&ctx),
@@ -183,8 +185,8 @@ impl Plugin for TaskboardPlugin {
                 "review_claim" => self.handle_review_claim(&ctx),
                 "finish" => self.handle_finish(&ctx),
                 "cancel" => self.handle_cancel(&ctx),
-                "" => ("usage: /taskboard <post|list|history|mine|show|claim|assign|plan|approve|update|request_review|review_claim|release|finish|cancel> [args...]".to_owned(), false),
-                other => (format!("unknown action: {other}. use: post, list, history, mine, show, claim, assign, plan, approve, update, request_review, review_claim, release, finish, cancel"), false),
+                "" => ("usage: /taskboard <post|list|history|mine|qa-queue|show|claim|assign|plan|approve|update|request_review|review_claim|release|finish|cancel> [args...]".to_owned(), false),
+                other => (format!("unknown action: {other}. use: post, list, history, mine, qa-queue, show, claim, assign, plan, approve, update, request_review, review_claim, release, finish, cancel"), false),
             };
             if broadcast {
                 // Emit a typed event alongside the system broadcast.
@@ -262,7 +264,7 @@ mod tests {
             assert!(choices.contains(&"post".to_owned()));
             assert!(choices.contains(&"approve".to_owned()));
             assert!(choices.contains(&"assign".to_owned()));
-            assert_eq!(choices.len(), 15);
+            assert_eq!(choices.len(), 16);
         } else {
             panic!("expected Choice param type");
         }
@@ -607,5 +609,53 @@ mod tests {
             output.contains("tb-001"),
             "finished tasks should appear in mine"
         );
+    }
+
+    // ── qa-queue tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn handle_qa_queue_returns_only_awaiting_review() {
+        let (plugin, _tmp) = make_plugin();
+        seed_task(&plugin, "tb-001", TaskStatus::Open);
+        seed_task(&plugin, "tb-002", TaskStatus::Claimed);
+        seed_task(&plugin, "tb-003", TaskStatus::AwaitingReview);
+        seed_task(&plugin, "tb-004", TaskStatus::Finished);
+
+        let output = plugin.handle_qa_queue();
+        assert!(
+            output.contains("tb-003"),
+            "AwaitingReview task should appear"
+        );
+        assert!(!output.contains("tb-001"), "open task should not appear");
+        assert!(!output.contains("tb-002"), "claimed task should not appear");
+        assert!(
+            !output.contains("tb-004"),
+            "finished task should not appear"
+        );
+    }
+
+    #[test]
+    fn handle_qa_queue_empty_when_none_awaiting() {
+        let (plugin, _tmp) = make_plugin();
+        seed_task(&plugin, "tb-001", TaskStatus::Open);
+        seed_task(&plugin, "tb-002", TaskStatus::Claimed);
+        seed_task(&plugin, "tb-003", TaskStatus::Finished);
+
+        let output = plugin.handle_qa_queue();
+        assert!(
+            output.contains("no tasks awaiting review"),
+            "should show empty message, got: {output}"
+        );
+    }
+
+    #[test]
+    fn handle_qa_queue_shows_assignee_and_header() {
+        let (plugin, _tmp) = make_plugin();
+        seed_task(&plugin, "tb-001", TaskStatus::AwaitingReview);
+
+        let output = plugin.handle_qa_queue();
+        assert!(output.contains("bob"), "should show assignee");
+        assert!(output.contains("ASSIGNEE"), "should have header");
+        assert!(output.contains("ID"), "should have ID header");
     }
 }
