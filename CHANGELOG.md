@@ -42,6 +42,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **scripts:** `pre-push.sh` now detects changed crates and runs scoped `cargo test -p`
+  instead of full suite. Falls back to full suite on master or cross-crate changes. (#863)
 - **taskboard:** Renamed `review` subcommand to `request_review` for clarity — distinguishes
   the author action (requesting review) from reviewer actions (claiming, approving). All
   status labels, event types, and tests updated. (#842)
