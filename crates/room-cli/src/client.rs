@@ -206,13 +206,14 @@ mod tests {
 
     #[test]
     fn default_username_returns_user_env_var() {
-        // $USER should be set on macOS/Linux test environments.
+        let prev = std::env::var("USER").ok();
+        std::env::set_var("USER", "testuser");
         let result = default_username();
-        assert!(
-            result.is_some(),
-            "$USER should be set in the test environment"
-        );
-        assert!(!result.unwrap().is_empty(), "$USER should not be empty");
+        assert_eq!(result.as_deref(), Some("testuser"));
+        match prev {
+            Some(v) => std::env::set_var("USER", v),
+            None => std::env::remove_var("USER"),
+        }
     }
 
     /// has_valid_token_file returns false for empty file.
