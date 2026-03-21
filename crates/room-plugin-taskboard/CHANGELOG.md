@@ -10,6 +10,7 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Added
 
 - `/taskboard mine` subcommand — filter tasks to show only those assigned to the calling user (#827)
+- `/taskboard history` subcommand — shows finished and cancelled tasks (#824)
 
 ## [3.5.1] - 2026-03-16
 
