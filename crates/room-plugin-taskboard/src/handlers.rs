@@ -375,40 +375,72 @@ impl TaskboardPlugin {
             Some(lt) => lt,
             None => return (format!("task {task_id} not found"), false),
         };
-        if lt.task.status != TaskStatus::Planned {
-            return (
+        match lt.task.status {
+            TaskStatus::Planned => {
+                // Plan approval: poster or host can approve.
+                let is_poster = lt.task.posted_by == ctx.sender;
+                let is_host = ctx.metadata.host.as_deref() == Some(&ctx.sender);
+                if !is_poster && !is_host {
+                    return ("only the task poster or host can approve".to_owned(), false);
+                }
+                lt.task.status = TaskStatus::InProgress;
+                lt.task.approved_by = Some(ctx.sender.clone());
+                lt.task.approved_at = Some(chrono::Utc::now());
+                lt.renew_lease();
+                let assignee = lt
+                    .task
+                    .assigned_to
+                    .as_deref()
+                    .unwrap_or("unknown")
+                    .to_owned();
+                let tasks: Vec<Task> = board.iter().map(|lt| lt.task.clone()).collect();
+                let _ = task::save_tasks(&self.storage_path, &tasks);
+                (
+                    format!(
+                        "task {task_id} approved by {} — @{assignee} proceed with implementation",
+                        ctx.sender
+                    ),
+                    true,
+                )
+            }
+            TaskStatus::ReviewClaimed => {
+                // Review approval: reviewer or host can approve.
+                let is_reviewer = lt.task.reviewer.as_deref() == Some(&ctx.sender);
+                let is_host = ctx.metadata.host.as_deref() == Some(&ctx.sender);
+                if !is_reviewer && !is_host {
+                    return (
+                        "only the reviewer or host can approve a review".to_owned(),
+                        false,
+                    );
+                }
+                let assignee = lt
+                    .task
+                    .assigned_to
+                    .as_deref()
+                    .unwrap_or("unknown")
+                    .to_owned();
+                lt.task.status = TaskStatus::Finished;
+                lt.task.approved_by = Some(ctx.sender.clone());
+                lt.task.approved_at = Some(chrono::Utc::now());
+                lt.lease_start = None;
+                let tasks: Vec<Task> = board.iter().map(|lt| lt.task.clone()).collect();
+                let _ = task::save_tasks(&self.storage_path, &tasks);
+                (
+                    format!(
+                        "task {task_id} review approved by {} — @{assignee} task complete",
+                        ctx.sender
+                    ),
+                    true,
+                )
+            }
+            _ => (
                 format!(
-                    "task {task_id} is {} (must be planned to approve)",
+                    "task {task_id} is {} (must be planned or review_claimed to approve)",
                     lt.task.status
                 ),
                 false,
-            );
-        }
-        // Poster or host can approve.
-        let is_poster = lt.task.posted_by == ctx.sender;
-        let is_host = ctx.metadata.host.as_deref() == Some(&ctx.sender);
-        if !is_poster && !is_host {
-            return ("only the task poster or host can approve".to_owned(), false);
-        }
-        lt.task.status = TaskStatus::InProgress;
-        lt.task.approved_by = Some(ctx.sender.clone());
-        lt.task.approved_at = Some(chrono::Utc::now());
-        lt.renew_lease();
-        let assignee = lt
-            .task
-            .assigned_to
-            .as_deref()
-            .unwrap_or("unknown")
-            .to_owned();
-        let tasks: Vec<Task> = board.iter().map(|lt| lt.task.clone()).collect();
-        let _ = task::save_tasks(&self.storage_path, &tasks);
-        (
-            format!(
-                "task {task_id} approved by {} — @{assignee} proceed with implementation",
-                ctx.sender
             ),
-            true,
-        )
+        }
     }
 
     pub(super) fn handle_update(&self, ctx: &CommandContext) -> (String, bool) {
@@ -976,6 +1008,75 @@ mod tests {
             Some("joao"),
         ));
         assert!(result.contains("only the task poster or host"));
+        assert!(!broadcast);
+    }
+
+    #[test]
+    fn handle_approve_review_claimed_by_reviewer() {
+        let (plugin, _tmp) = make_plugin();
+        plugin.handle_post(&test_ctx("ba", &["post", "implement feature"]));
+        plugin.handle_claim(&test_ctx("agent", &["claim", "tb-001"]));
+        plugin.handle_plan(&test_ctx("agent", &["plan", "tb-001", "my plan"]));
+        plugin.handle_approve(&test_ctx("ba", &["approve", "tb-001"]));
+        plugin.handle_request_review(&test_ctx("agent", &["request_review", "tb-001"]));
+        plugin.handle_review_claim(&test_ctx("reviewer", &["review_claim", "tb-001"]));
+        let (result, broadcast) = plugin.handle_approve(&test_ctx_with_host(
+            "reviewer",
+            &["approve", "tb-001"],
+            None,
+        ));
+        assert!(result.contains("review approved"));
+        assert!(broadcast);
+        let board = plugin.board.lock().unwrap();
+        assert_eq!(board[0].task.status, TaskStatus::Finished);
+    }
+
+    #[test]
+    fn handle_approve_review_claimed_by_host() {
+        let (plugin, _tmp) = make_plugin();
+        plugin.handle_post(&test_ctx("ba", &["post", "implement feature"]));
+        plugin.handle_claim(&test_ctx("agent", &["claim", "tb-001"]));
+        plugin.handle_plan(&test_ctx("agent", &["plan", "tb-001", "my plan"]));
+        plugin.handle_approve(&test_ctx("ba", &["approve", "tb-001"]));
+        plugin.handle_request_review(&test_ctx("agent", &["request_review", "tb-001"]));
+        plugin.handle_review_claim(&test_ctx("reviewer", &["review_claim", "tb-001"]));
+        let (result, broadcast) = plugin.handle_approve(&test_ctx_with_host(
+            "joao",
+            &["approve", "tb-001"],
+            Some("joao"),
+        ));
+        assert!(result.contains("review approved"));
+        assert!(broadcast);
+        let board = plugin.board.lock().unwrap();
+        assert_eq!(board[0].task.status, TaskStatus::Finished);
+    }
+
+    #[test]
+    fn handle_approve_review_claimed_rejected_non_reviewer() {
+        let (plugin, _tmp) = make_plugin();
+        plugin.handle_post(&test_ctx("ba", &["post", "implement feature"]));
+        plugin.handle_claim(&test_ctx("agent", &["claim", "tb-001"]));
+        plugin.handle_plan(&test_ctx("agent", &["plan", "tb-001", "my plan"]));
+        plugin.handle_approve(&test_ctx("ba", &["approve", "tb-001"]));
+        plugin.handle_request_review(&test_ctx("agent", &["request_review", "tb-001"]));
+        plugin.handle_review_claim(&test_ctx("reviewer", &["review_claim", "tb-001"]));
+        let (result, broadcast) = plugin.handle_approve(&test_ctx_with_host(
+            "random",
+            &["approve", "tb-001"],
+            Some("someone_else"),
+        ));
+        assert!(result.contains("only the reviewer or host"));
+        assert!(!broadcast);
+    }
+
+    #[test]
+    fn handle_approve_wrong_status() {
+        let (plugin, _tmp) = make_plugin();
+        plugin.handle_post(&test_ctx("ba", &["post", "task"]));
+        plugin.handle_claim(&test_ctx("agent", &["claim", "tb-001"]));
+        // Task is Claimed, not Planned or ReviewClaimed.
+        let (result, broadcast) = plugin.handle_approve(&test_ctx("ba", &["approve", "tb-001"]));
+        assert!(result.contains("must be planned or review_claimed"));
         assert!(!broadcast);
     }
 
