@@ -592,7 +592,7 @@ crates/room-cli/src/
                           (emit_event for typed events), ParamSchema, ParamType,
                           builtin_command_infos, all_known_commands
     stats.rs           — Built-in /stats plugin
-    queue.rs           — Built-in /queue plugin (push, pop, peek, list, clear) with NDJSON persistence
+    queue.rs           — Built-in /queue plugin (add, list, remove, pop) with NDJSON persistence
     taskboard/
       mod.rs           — Built-in /taskboard plugin (post, list, claim, assign, plan, approve, update,
                           finish, release, cancel, show) with lease-based TTL and plan/approve gates
