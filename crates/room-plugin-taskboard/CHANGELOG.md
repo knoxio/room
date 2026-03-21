@@ -9,6 +9,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `/taskboard review_claim` subcommand — claim reviewer role on tasks in AwaitingReview status.
+  Sets reviewer field and restarts lease timer. Emits `ReviewClaimed` event. (#844)
 - `/taskboard mine` subcommand — filter tasks to show only those assigned to the calling user (#827)
 - `/taskboard history` subcommand — shows finished and cancelled tasks (#824)
 
