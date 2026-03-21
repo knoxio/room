@@ -29,10 +29,3 @@ The README covers installation and basic usage. This folder contains deep-dive d
 | [design-253-room-visibility.md](design-253-room-visibility.md) | Design doc for room visibility and ACLs |
 | [design-agent-spawn.md](design-agent-spawn.md) | Design doc for `/agent` and `/spawn` commands (#434) |
 | [design-shared-knowledge.md](design-shared-knowledge.md) | Design doc for shared knowledge system (#480) |
-
-## PRDs
-
-| Folder | Description |
-|--------|-------------|
-| [prd/hive/](prd/hive/) | PRDs for the Hive orchestration layer — workspaces, teams, agent discovery |
-| [prd/agent/](prd/agent/) | PRDs for agent autonomy — personality system, `/agent` plugin, agent health |
