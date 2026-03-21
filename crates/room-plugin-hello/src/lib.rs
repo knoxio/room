@@ -50,6 +50,7 @@ impl Plugin for HelloPlugin {
                 required: false,
                 description: "Name to greet (defaults to sender)".to_owned(),
             }],
+            subcommands: vec![],
         }]
     }
 

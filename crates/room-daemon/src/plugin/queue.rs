@@ -82,6 +82,49 @@ impl QueuePlugin {
                     description: "Task description (add) or index (remove)".to_owned(),
                 },
             ],
+            subcommands: vec![
+                CommandInfo {
+                    name: "add".to_owned(),
+                    description: "Add an item to the queue".to_owned(),
+                    usage: "/queue add <description>".to_owned(),
+                    params: vec![ParamSchema {
+                        name: "description".to_owned(),
+                        param_type: ParamType::Text,
+                        required: true,
+                        description: "Item description".to_owned(),
+                    }],
+                    subcommands: vec![],
+                },
+                CommandInfo {
+                    name: "list".to_owned(),
+                    description: "List all items in the queue".to_owned(),
+                    usage: "/queue list".to_owned(),
+                    params: vec![],
+                    subcommands: vec![],
+                },
+                CommandInfo {
+                    name: "remove".to_owned(),
+                    description: "Remove an item by index".to_owned(),
+                    usage: "/queue remove <index>".to_owned(),
+                    params: vec![ParamSchema {
+                        name: "index".to_owned(),
+                        param_type: ParamType::Number {
+                            min: Some(1),
+                            max: None,
+                        },
+                        required: true,
+                        description: "1-based index of the item to remove".to_owned(),
+                    }],
+                    subcommands: vec![],
+                },
+                CommandInfo {
+                    name: "pop".to_owned(),
+                    description: "Remove and return the first item".to_owned(),
+                    usage: "/queue pop".to_owned(),
+                    params: vec![],
+                    subcommands: vec![],
+                },
+            ],
         }]
     }
 }

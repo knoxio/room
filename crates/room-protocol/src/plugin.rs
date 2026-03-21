@@ -361,6 +361,10 @@ pub struct CommandInfo {
     pub usage: String,
     /// Typed parameter schemas for validation and autocomplete.
     pub params: Vec<ParamSchema>,
+    /// Sub-command schemas for multi-action commands (e.g. `/taskboard plan`).
+    /// Empty for simple commands. Used by `/help <cmd> <sub>` to show
+    /// per-subcommand help.
+    pub subcommands: Vec<CommandInfo>,
 }
 
 // ── Typed parameter schema ─────────────────────────────────────────────────

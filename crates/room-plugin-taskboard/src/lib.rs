@@ -119,6 +119,7 @@ impl TaskboardPlugin {
                     description: "Task ID or description".to_owned(),
                 },
             ],
+            subcommands: taskboard_subcommands(),
         }]
     }
 
@@ -148,6 +149,195 @@ impl TaskboardPlugin {
         }
         expired_ids
     }
+}
+
+/// Build the per-subcommand help schemas for `/help taskboard <sub>`.
+fn taskboard_subcommands() -> Vec<CommandInfo> {
+    vec![
+        CommandInfo {
+            name: "post".to_owned(),
+            description: "Create a new task on the board. Anyone can post.".to_owned(),
+            usage: "/taskboard post <description>".to_owned(),
+            params: vec![ParamSchema {
+                name: "description".to_owned(),
+                param_type: ParamType::Text,
+                required: true,
+                description: "Task description".to_owned(),
+            }],
+            subcommands: vec![],
+        },
+        CommandInfo {
+            name: "list".to_owned(),
+            description: "Show all active tasks. Use 'list all' to include finished/cancelled.".to_owned(),
+            usage: "/taskboard list [all]".to_owned(),
+            params: vec![ParamSchema {
+                name: "all".to_owned(),
+                param_type: ParamType::Choice(vec!["all".to_owned()]),
+                required: false,
+                description: "Include finished and cancelled tasks".to_owned(),
+            }],
+            subcommands: vec![],
+        },
+        CommandInfo {
+            name: "show".to_owned(),
+            description: "Show full detail for a single task.".to_owned(),
+            usage: "/taskboard show <task-id>".to_owned(),
+            params: vec![ParamSchema {
+                name: "task-id".to_owned(),
+                param_type: ParamType::Text,
+                required: true,
+                description: "Task ID (e.g. tb-001)".to_owned(),
+            }],
+            subcommands: vec![],
+        },
+        CommandInfo {
+            name: "claim".to_owned(),
+            description: "Claim an open task. Starts the lease timer. Task must be in Open status.".to_owned(),
+            usage: "/taskboard claim <task-id>".to_owned(),
+            params: vec![ParamSchema {
+                name: "task-id".to_owned(),
+                param_type: ParamType::Text,
+                required: true,
+                description: "Task ID (e.g. tb-001)".to_owned(),
+            }],
+            subcommands: vec![],
+        },
+        CommandInfo {
+            name: "assign".to_owned(),
+            description: "Assign an open task to a specific user. Only the poster or host can assign.".to_owned(),
+            usage: "/taskboard assign <task-id> <username>".to_owned(),
+            params: vec![
+                ParamSchema {
+                    name: "task-id".to_owned(),
+                    param_type: ParamType::Text,
+                    required: true,
+                    description: "Task ID (e.g. tb-001)".to_owned(),
+                },
+                ParamSchema {
+                    name: "username".to_owned(),
+                    param_type: ParamType::Username,
+                    required: true,
+                    description: "User to assign the task to".to_owned(),
+                },
+            ],
+            subcommands: vec![],
+        },
+        CommandInfo {
+            name: "plan".to_owned(),
+            description: "Submit an implementation plan. Task must be in Claimed status and you must be the assignee. Wait for approval before implementing.".to_owned(),
+            usage: "/taskboard plan <task-id> <plan-text>".to_owned(),
+            params: vec![
+                ParamSchema {
+                    name: "task-id".to_owned(),
+                    param_type: ParamType::Text,
+                    required: true,
+                    description: "Task ID (e.g. tb-001)".to_owned(),
+                },
+                ParamSchema {
+                    name: "plan-text".to_owned(),
+                    param_type: ParamType::Text,
+                    required: true,
+                    description: "Your implementation plan".to_owned(),
+                },
+            ],
+            subcommands: vec![],
+        },
+        CommandInfo {
+            name: "approve".to_owned(),
+            description: "Approve a planned task so the assignee can proceed. Only the poster or host can approve.".to_owned(),
+            usage: "/taskboard approve <task-id>".to_owned(),
+            params: vec![ParamSchema {
+                name: "task-id".to_owned(),
+                param_type: ParamType::Text,
+                required: true,
+                description: "Task ID (e.g. tb-001)".to_owned(),
+            }],
+            subcommands: vec![],
+        },
+        CommandInfo {
+            name: "update".to_owned(),
+            description: "Renew the lease timer and optionally add progress notes. Only the assignee can update.".to_owned(),
+            usage: "/taskboard update <task-id> [notes]".to_owned(),
+            params: vec![
+                ParamSchema {
+                    name: "task-id".to_owned(),
+                    param_type: ParamType::Text,
+                    required: true,
+                    description: "Task ID (e.g. tb-001)".to_owned(),
+                },
+                ParamSchema {
+                    name: "notes".to_owned(),
+                    param_type: ParamType::Text,
+                    required: false,
+                    description: "Progress notes".to_owned(),
+                },
+            ],
+            subcommands: vec![],
+        },
+        CommandInfo {
+            name: "review".to_owned(),
+            description: "Mark a task as ready for review. Only the assignee can request review.".to_owned(),
+            usage: "/taskboard review <task-id>".to_owned(),
+            params: vec![ParamSchema {
+                name: "task-id".to_owned(),
+                param_type: ParamType::Text,
+                required: true,
+                description: "Task ID (e.g. tb-001)".to_owned(),
+            }],
+            subcommands: vec![],
+        },
+        CommandInfo {
+            name: "release".to_owned(),
+            description: "Release a task back to Open status. The assignee or host can release.".to_owned(),
+            usage: "/taskboard release <task-id>".to_owned(),
+            params: vec![ParamSchema {
+                name: "task-id".to_owned(),
+                param_type: ParamType::Text,
+                required: true,
+                description: "Task ID (e.g. tb-001)".to_owned(),
+            }],
+            subcommands: vec![],
+        },
+        CommandInfo {
+            name: "finish".to_owned(),
+            description: "Mark a task as finished. Only the assignee can finish.".to_owned(),
+            usage: "/taskboard finish <task-id>".to_owned(),
+            params: vec![ParamSchema {
+                name: "task-id".to_owned(),
+                param_type: ParamType::Text,
+                required: true,
+                description: "Task ID (e.g. tb-001)".to_owned(),
+            }],
+            subcommands: vec![],
+        },
+        CommandInfo {
+            name: "cancel".to_owned(),
+            description: "Cancel a task with an optional reason. The poster, assignee, or host can cancel.".to_owned(),
+            usage: "/taskboard cancel <task-id> [reason]".to_owned(),
+            params: vec![
+                ParamSchema {
+                    name: "task-id".to_owned(),
+                    param_type: ParamType::Text,
+                    required: true,
+                    description: "Task ID (e.g. tb-001)".to_owned(),
+                },
+                ParamSchema {
+                    name: "reason".to_owned(),
+                    param_type: ParamType::Text,
+                    required: false,
+                    description: "Cancellation reason".to_owned(),
+                },
+            ],
+            subcommands: vec![],
+        },
+        CommandInfo {
+            name: "mine".to_owned(),
+            description: "Show only tasks assigned to you.".to_owned(),
+            usage: "/taskboard mine".to_owned(),
+            params: vec![],
+            subcommands: vec![],
+        },
+    ]
 }
 
 impl Plugin for TaskboardPlugin {
@@ -271,6 +461,22 @@ mod tests {
         } else {
             panic!("expected Choice param type");
         }
+    }
+
+    #[test]
+    fn plugin_commands_has_subcommands() {
+        let (plugin, _tmp) = make_plugin();
+        let cmds = plugin.commands();
+        assert_eq!(cmds[0].subcommands.len(), 13, "should have 13 subcommands");
+        let names: Vec<&str> = cmds[0]
+            .subcommands
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect();
+        assert!(names.contains(&"post"));
+        assert!(names.contains(&"plan"));
+        assert!(names.contains(&"claim"));
+        assert!(names.contains(&"cancel"));
     }
 
     #[test]

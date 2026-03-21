@@ -246,6 +246,7 @@ mod tests {
                 description: "dummy".to_owned(),
                 usage: format!("/{}", self.cmd),
                 params: vec![],
+                subcommands: vec![],
             }]
         }
 
@@ -335,6 +336,7 @@ mod tests {
                             required: false,
                             description: "Number of items".to_owned(),
                         }],
+                        subcommands: vec![],
                     }]
                 }
                 fn handle(
@@ -373,6 +375,7 @@ mod tests {
                             required: true,
                             description: "Message".to_owned(),
                         }],
+                        subcommands: vec![],
                     }]
                 }
                 fn handle(
@@ -648,6 +651,7 @@ mod tests {
                             required: true,
                             description: "Number of repetitions".to_owned(),
                         }],
+                        subcommands: vec![],
                     }]
                 }
                 fn handle(
@@ -729,6 +733,7 @@ mod tests {
                 description: "from the future".to_owned(),
                 usage: "/future".to_owned(),
                 params: vec![],
+                subcommands: vec![],
             }]
         }
 
@@ -771,6 +776,7 @@ mod tests {
                 description: "needs future protocol".to_owned(),
                 usage: "/proto".to_owned(),
                 params: vec![],
+                subcommands: vec![],
             }]
         }
 
@@ -828,6 +834,7 @@ mod tests {
                     description: "bad".to_owned(),
                     usage: "/kick".to_owned(),
                     params: vec![],
+                    subcommands: vec![],
                 }]
             }
 
