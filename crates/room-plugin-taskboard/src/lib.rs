@@ -330,6 +330,13 @@ fn taskboard_subcommands() -> Vec<CommandInfo> {
             ],
             subcommands: vec![],
         },
+        CommandInfo {
+            name: "mine".to_owned(),
+            description: "Show only tasks assigned to you.".to_owned(),
+            usage: "/taskboard mine".to_owned(),
+            params: vec![],
+            subcommands: vec![],
+        },
     ]
 }
 
@@ -460,8 +467,12 @@ mod tests {
     fn plugin_commands_has_subcommands() {
         let (plugin, _tmp) = make_plugin();
         let cmds = plugin.commands();
-        assert_eq!(cmds[0].subcommands.len(), 12, "should have 12 subcommands");
-        let names: Vec<&str> = cmds[0].subcommands.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(cmds[0].subcommands.len(), 13, "should have 13 subcommands");
+        let names: Vec<&str> = cmds[0]
+            .subcommands
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect();
         assert!(names.contains(&"post"));
         assert!(names.contains(&"plan"));
         assert!(names.contains(&"claim"));
