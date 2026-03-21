@@ -188,6 +188,37 @@ impl TaskboardPlugin {
         lines.join("\n")
     }
 
+    pub(super) fn handle_history(&self) -> String {
+        self.sweep_expired();
+        let board = self.board.lock().unwrap();
+        let completed: Vec<&LiveTask> = board
+            .iter()
+            .filter(|lt| matches!(lt.task.status, TaskStatus::Finished | TaskStatus::Cancelled))
+            .collect();
+        if completed.is_empty() {
+            return "no completed tasks".to_owned();
+        }
+        let mut lines = Vec::new();
+        lines.push(format!(
+            "{:<8} {:<10} {:<12} {}",
+            "ID", "STATUS", "ASSIGNEE", "DESCRIPTION"
+        ));
+        for lt in completed.iter() {
+            let assignee = lt.task.assigned_to.as_deref().unwrap_or("-").to_owned();
+            let desc = if lt.task.description.chars().count() > 40 {
+                let truncated: String = lt.task.description.chars().take(37).collect();
+                format!("{truncated}...")
+            } else {
+                lt.task.description.clone()
+            };
+            lines.push(format!(
+                "{:<8} {:<10} {:<12} {}",
+                lt.task.id, lt.task.status, assignee, desc
+            ));
+        }
+        lines.join("\n")
+    }
+
     pub(super) fn handle_claim(&self, ctx: &CommandContext) -> (String, bool) {
         let task_id = match ctx.params.get(1) {
             Some(id) => id,
