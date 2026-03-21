@@ -1390,11 +1390,19 @@ async fn subscribe_command_changes_tier_via_broker() {
         .unwrap();
     // Wait for the broker to echo back the subscribe system message
     let mut line = String::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
         line.clear();
-        AsyncBufReadExt::read_line(&mut alice_r, &mut line)
-            .await
-            .unwrap();
+        let read = tokio::time::timeout(
+            deadline.saturating_duration_since(tokio::time::Instant::now()),
+            AsyncBufReadExt::read_line(&mut alice_r, &mut line),
+        )
+        .await;
+        assert!(
+            read.is_ok(),
+            "timed out waiting for unsubscribed confirmation"
+        );
+        read.unwrap().unwrap();
         if line.to_lowercase().contains("unsubscribed") {
             break;
         }
@@ -1420,11 +1428,16 @@ async fn full_tier_receives_all_broadcasts() {
     let (mut alice_r, mut alice_w) =
         common::daemon_connect(&td.socket_path, "t-full-tier", "alice").await;
     let mut line = String::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
         line.clear();
-        AsyncBufReadExt::read_line(&mut alice_r, &mut line)
-            .await
-            .unwrap();
+        let read = tokio::time::timeout(
+            deadline.saturating_duration_since(tokio::time::Instant::now()),
+            AsyncBufReadExt::read_line(&mut alice_r, &mut line),
+        )
+        .await;
+        assert!(read.is_ok(), "timed out waiting for alice join");
+        read.unwrap().unwrap();
         if let Ok(msg) = serde_json::from_str::<Message>(line.trim()) {
             if matches!(&msg, Message::Join { user, .. } if user == "alice") {
                 break;
@@ -1435,11 +1448,16 @@ async fn full_tier_receives_all_broadcasts() {
     // Bob joins (defaults to Full subscription)
     let _bob_token = common::daemon_join(&td.socket_path, "t-full-tier", "bob").await;
     // Drain bob's join from alice's stream
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
         line.clear();
-        AsyncBufReadExt::read_line(&mut alice_r, &mut line)
-            .await
-            .unwrap();
+        let read = tokio::time::timeout(
+            deadline.saturating_duration_since(tokio::time::Instant::now()),
+            AsyncBufReadExt::read_line(&mut alice_r, &mut line),
+        )
+        .await;
+        assert!(read.is_ok(), "timed out waiting for bob join");
+        read.unwrap().unwrap();
         if line.contains("bob") {
             break;
         }
@@ -1452,11 +1470,16 @@ async fn full_tier_receives_all_broadcasts() {
             .await
             .unwrap();
         // Drain alice echo
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         loop {
             line.clear();
-            AsyncBufReadExt::read_line(&mut alice_r, &mut line)
-                .await
-                .unwrap();
+            let read = tokio::time::timeout(
+                deadline.saturating_duration_since(tokio::time::Instant::now()),
+                AsyncBufReadExt::read_line(&mut alice_r, &mut line),
+            )
+            .await;
+            assert!(read.is_ok(), "timed out waiting for echo of '{msg}'");
+            read.unwrap().unwrap();
             if line.contains(msg) {
                 break;
             }
@@ -1552,11 +1575,16 @@ async fn mentions_only_subscribe_broadcasts_confirmation() {
     let (mut alice_r, _alice_w) =
         common::daemon_connect(&td.socket_path, "t-ment-bcast", "alice").await;
     let mut line = String::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
         line.clear();
-        AsyncBufReadExt::read_line(&mut alice_r, &mut line)
-            .await
-            .unwrap();
+        let read = tokio::time::timeout(
+            deadline.saturating_duration_since(tokio::time::Instant::now()),
+            AsyncBufReadExt::read_line(&mut alice_r, &mut line),
+        )
+        .await;
+        assert!(read.is_ok(), "timed out waiting for alice join");
+        read.unwrap().unwrap();
         if let Ok(msg) = serde_json::from_str::<Message>(line.trim()) {
             if matches!(&msg, Message::Join { user, .. } if user == "alice") {
                 break;
@@ -1567,11 +1595,16 @@ async fn mentions_only_subscribe_broadcasts_confirmation() {
     // Bob joins and subscribes as MentionsOnly
     let bob_token = common::daemon_join(&td.socket_path, "t-ment-bcast", "bob").await;
     // Drain bob join
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     loop {
         line.clear();
-        AsyncBufReadExt::read_line(&mut alice_r, &mut line)
-            .await
-            .unwrap();
+        let read = tokio::time::timeout(
+            deadline.saturating_duration_since(tokio::time::Instant::now()),
+            AsyncBufReadExt::read_line(&mut alice_r, &mut line),
+        )
+        .await;
+        assert!(read.is_ok(), "timed out waiting for bob join");
+        read.unwrap().unwrap();
         if line.contains("bob") {
             break;
         }
