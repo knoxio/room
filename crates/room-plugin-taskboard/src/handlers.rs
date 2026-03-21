@@ -350,7 +350,7 @@ impl TaskboardPlugin {
         let _ = task::save_tasks(&self.storage_path, &tasks);
         (
             format!("task {task_id} updated, lease renewed{warning}"),
-            true,
+            false,
         )
     }
 
@@ -766,7 +766,10 @@ mod tests {
             plugin.handle_update(&test_ctx("agent", &["update", "tb-001", "progress note"]));
         assert!(result.contains("lease renewed"));
         assert!(result.contains("warning")); // not approved yet
-        assert!(broadcast);
+        assert!(
+            !broadcast,
+            "update should not broadcast — lease renewals are reply-only"
+        );
         let board = plugin.board.lock().unwrap();
         assert_eq!(board[0].task.notes.as_deref(), Some("progress note"));
     }
@@ -785,7 +788,10 @@ mod tests {
         let (result, broadcast) = plugin.handle_update(&test_ctx("agent", &["update", "tb-001"]));
         assert!(result.contains("lease renewed"));
         assert!(!result.contains("warning"));
-        assert!(broadcast);
+        assert!(
+            !broadcast,
+            "update should not broadcast — lease renewals are reply-only"
+        );
     }
 
     #[test]
@@ -1423,7 +1429,10 @@ mod tests {
             plugin.handle_update(&test_ctx("agent", &["update", "tb-001", "review notes"]));
         assert!(result.contains("lease renewed"));
         assert!(!result.contains("warning"));
-        assert!(broadcast);
+        assert!(
+            !broadcast,
+            "update should not broadcast — lease renewals are reply-only"
+        );
     }
 
     #[test]
