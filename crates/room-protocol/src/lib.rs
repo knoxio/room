@@ -167,6 +167,8 @@ pub enum EventType {
     TaskCancelled,
     StatusChanged,
     ReviewRequested,
+    ReviewClaimed,
+    TaskRejected,
 }
 
 impl fmt::Display for EventType {
@@ -183,6 +185,8 @@ impl fmt::Display for EventType {
             Self::TaskCancelled => write!(f, "task_cancelled"),
             Self::StatusChanged => write!(f, "status_changed"),
             Self::ReviewRequested => write!(f, "review_requested"),
+            Self::ReviewClaimed => write!(f, "review_claimed"),
+            Self::TaskRejected => write!(f, "task_rejected"),
         }
     }
 }
@@ -203,10 +207,13 @@ impl std::str::FromStr for EventType {
             "task_cancelled" => Ok(Self::TaskCancelled),
             "status_changed" => Ok(Self::StatusChanged),
             "review_requested" => Ok(Self::ReviewRequested),
+            "review_claimed" => Ok(Self::ReviewClaimed),
+            "task_rejected" => Ok(Self::TaskRejected),
             other => Err(format!(
                 "unknown event type '{other}'; expected one of: task_posted, task_assigned, \
                  task_claimed, task_planned, task_approved, task_updated, task_released, \
-                 task_finished, task_cancelled, status_changed, review_requested"
+                 task_finished, task_cancelled, status_changed, review_requested, \
+                 review_claimed, task_rejected"
             )),
         }
     }
@@ -1598,6 +1605,8 @@ mod tests {
             EventType::TaskCancelled,
             EventType::StatusChanged,
             EventType::ReviewRequested,
+            EventType::ReviewClaimed,
+            EventType::TaskRejected,
         ] {
             let json = serde_json::to_string(&et).unwrap();
             let back: EventType = serde_json::from_str(&json).unwrap();
@@ -1649,6 +1658,8 @@ mod tests {
             ("task_cancelled", EventType::TaskCancelled),
             ("status_changed", EventType::StatusChanged),
             ("review_requested", EventType::ReviewRequested),
+            ("review_claimed", EventType::ReviewClaimed),
+            ("task_rejected", EventType::TaskRejected),
         ];
         for (s, expected) in cases {
             assert_eq!(s.parse::<EventType>().unwrap(), expected, "failed for {s}");
@@ -1676,6 +1687,8 @@ mod tests {
             EventType::TaskCancelled,
             EventType::StatusChanged,
             EventType::ReviewRequested,
+            EventType::ReviewClaimed,
+            EventType::TaskRejected,
         ] {
             let s = et.to_string();
             let back: EventType = s.parse().unwrap();
