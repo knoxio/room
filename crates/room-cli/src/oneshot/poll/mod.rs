@@ -33,6 +33,10 @@ pub struct QueryOptions {
     /// Override the cursor with this legacy message UUID (used by the `poll`
     /// alias `--since` flag, which predates the `room:seq` format).
     pub since_uuid: Option<String>,
+    /// Maximum time to wait in seconds. When set, the watch loop returns
+    /// (possibly with no messages) after this duration instead of blocking
+    /// indefinitely.
+    pub timeout_secs: Option<u64>,
 }
 
 /// Return all messages from `chat_path` after the message with ID `since` (exclusive).

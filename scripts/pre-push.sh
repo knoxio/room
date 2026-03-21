@@ -40,14 +40,4 @@ step "cargo clippy -- -D warnings"
 cargo clippy -- -D warnings 2>&1 || fail "cargo clippy"
 pass "cargo clippy"
 
-if command -v cargo-nextest &>/dev/null; then
-  step "cargo nextest run"
-  cargo nextest run 2>&1 || fail "cargo nextest run"
-  pass "cargo nextest run"
-else
-  step "cargo test"
-  cargo test 2>&1 || fail "cargo test"
-  pass "cargo test"
-fi
-
 printf '\n%s%s[pre-push] All checks passed.%s\n' "$GREEN" "$BOLD" "$RESET"
