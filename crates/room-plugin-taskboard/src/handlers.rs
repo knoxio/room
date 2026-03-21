@@ -586,10 +586,15 @@ impl TaskboardPlugin {
         )
     }
 
-    pub(super) fn handle_review(&self, ctx: &CommandContext) -> (String, bool) {
+    pub(super) fn handle_request_review(&self, ctx: &CommandContext) -> (String, bool) {
         let task_id = match ctx.params.get(1) {
             Some(id) => id,
-            None => return ("usage: /taskboard review <task-id>".to_owned(), false),
+            None => {
+                return (
+                    "usage: /taskboard request_review <task-id>".to_owned(),
+                    false,
+                )
+            }
         };
         self.sweep_expired();
         let mut board = self.board.lock().unwrap();
@@ -1320,7 +1325,7 @@ mod tests {
     // -- Review status tests ---------------------------------------------------
 
     #[test]
-    fn handle_review_moves_to_awaiting_review() {
+    fn handle_request_review_moves_to_awaiting_review() {
         let (plugin, _tmp) = make_plugin();
         plugin.handle_post(&test_ctx("ba", &["post", "implement feature"]));
         plugin.handle_claim(&test_ctx("agent", &["claim", "tb-001"]));
@@ -1330,7 +1335,8 @@ mod tests {
             &["approve", "tb-001"],
             Some("ba"),
         ));
-        let (result, broadcast) = plugin.handle_review(&test_ctx("agent", &["review", "tb-001"]));
+        let (result, broadcast) =
+            plugin.handle_request_review(&test_ctx("agent", &["request_review", "tb-001"]));
         assert!(result.contains("moved to review"));
         assert!(result.contains("lease paused"));
         assert!(broadcast);
@@ -1340,7 +1346,7 @@ mod tests {
     }
 
     #[test]
-    fn handle_review_wrong_user() {
+    fn handle_request_review_wrong_user() {
         let (plugin, _tmp) = make_plugin();
         plugin.handle_post(&test_ctx("ba", &["post", "task"]));
         plugin.handle_claim(&test_ctx("agent-a", &["claim", "tb-001"]));
@@ -1350,7 +1356,8 @@ mod tests {
             &["approve", "tb-001"],
             Some("ba"),
         ));
-        let (result, broadcast) = plugin.handle_review(&test_ctx("agent-b", &["review", "tb-001"]));
+        let (result, broadcast) =
+            plugin.handle_request_review(&test_ctx("agent-b", &["request_review", "tb-001"]));
         assert!(result.contains("only be moved to review by the assignee"));
         assert!(!broadcast);
     }
@@ -1366,11 +1373,12 @@ mod tests {
     }
 
     #[test]
-    fn handle_review_wrong_status() {
+    fn handle_request_review_wrong_status() {
         let (plugin, _tmp) = make_plugin();
         plugin.handle_post(&test_ctx("ba", &["post", "task"]));
         // Task is Open — cannot move to review.
-        let (result, broadcast) = plugin.handle_review(&test_ctx("ba", &["review", "tb-001"]));
+        let (result, broadcast) =
+            plugin.handle_request_review(&test_ctx("ba", &["request_review", "tb-001"]));
         assert!(result.contains("must be in_progress"));
         assert!(!broadcast);
     }
@@ -1391,23 +1399,25 @@ mod tests {
     }
 
     #[test]
-    fn handle_review_not_found() {
+    fn handle_request_review_not_found() {
         let (plugin, _tmp) = make_plugin();
-        let (result, broadcast) = plugin.handle_review(&test_ctx("agent", &["review", "tb-999"]));
+        let (result, broadcast) =
+            plugin.handle_request_review(&test_ctx("agent", &["request_review", "tb-999"]));
         assert!(result.contains("not found"));
         assert!(!broadcast);
     }
 
     #[test]
-    fn handle_review_no_args() {
+    fn handle_request_review_no_args() {
         let (plugin, _tmp) = make_plugin();
-        let (result, broadcast) = plugin.handle_review(&test_ctx("agent", &["review"]));
+        let (result, broadcast) =
+            plugin.handle_request_review(&test_ctx("agent", &["request_review"]));
         assert!(result.contains("usage"));
         assert!(!broadcast);
     }
 
     #[test]
-    fn handle_review_then_finish() {
+    fn handle_request_review_then_finish() {
         let (plugin, _tmp) = make_plugin();
         plugin.handle_post(&test_ctx("ba", &["post", "task"]));
         plugin.handle_claim(&test_ctx("agent", &["claim", "tb-001"]));
@@ -1417,7 +1427,7 @@ mod tests {
             &["approve", "tb-001"],
             Some("ba"),
         ));
-        plugin.handle_review(&test_ctx("agent", &["review", "tb-001"]));
+        plugin.handle_request_review(&test_ctx("agent", &["request_review", "tb-001"]));
         let (result, broadcast) = plugin.handle_finish(&test_ctx("agent", &["finish", "tb-001"]));
         assert!(result.contains("finished"));
         assert!(broadcast);
@@ -1426,7 +1436,7 @@ mod tests {
     }
 
     #[test]
-    fn handle_review_then_release() {
+    fn handle_request_review_then_release() {
         let (plugin, _tmp) = make_plugin();
         plugin.handle_post(&test_ctx("ba", &["post", "task"]));
         plugin.handle_claim(&test_ctx("agent", &["claim", "tb-001"]));
@@ -1436,7 +1446,7 @@ mod tests {
             &["approve", "tb-001"],
             Some("ba"),
         ));
-        plugin.handle_review(&test_ctx("agent", &["review", "tb-001"]));
+        plugin.handle_request_review(&test_ctx("agent", &["request_review", "tb-001"]));
         let (result, broadcast) = plugin.handle_release(&test_ctx("agent", &["release", "tb-001"]));
         assert!(result.contains("released"));
         assert!(broadcast);
@@ -1445,7 +1455,7 @@ mod tests {
     }
 
     #[test]
-    fn handle_review_then_cancel() {
+    fn handle_request_review_then_cancel() {
         let (plugin, _tmp) = make_plugin();
         plugin.handle_post(&test_ctx("ba", &["post", "task"]));
         plugin.handle_claim(&test_ctx("agent", &["claim", "tb-001"]));
@@ -1455,7 +1465,7 @@ mod tests {
             &["approve", "tb-001"],
             Some("ba"),
         ));
-        plugin.handle_review(&test_ctx("agent", &["review", "tb-001"]));
+        plugin.handle_request_review(&test_ctx("agent", &["request_review", "tb-001"]));
         let (result, broadcast) =
             plugin.handle_cancel(&test_ctx("ba", &["cancel", "tb-001", "scope changed"]));
         assert!(result.contains("cancelled"));
@@ -1506,7 +1516,7 @@ mod tests {
     }
 
     #[test]
-    fn handle_review_not_swept_by_expiry() {
+    fn handle_request_review_not_swept_by_expiry() {
         let (plugin, _tmp) = make_plugin();
         plugin.handle_post(&test_ctx("ba", &["post", "task"]));
         plugin.handle_claim(&test_ctx("agent", &["claim", "tb-001"]));
@@ -1516,7 +1526,7 @@ mod tests {
             &["approve", "tb-001"],
             Some("ba"),
         ));
-        plugin.handle_review(&test_ctx("agent", &["review", "tb-001"]));
+        plugin.handle_request_review(&test_ctx("agent", &["request_review", "tb-001"]));
         // sweep_expired should NOT touch AwaitingReview tasks.
         let expired = plugin.sweep_expired();
         assert!(expired.is_empty());
@@ -1535,7 +1545,7 @@ mod tests {
             &["approve", "tb-001"],
             Some("ba"),
         ));
-        plugin.handle_review(&test_ctx("agent", &["review", "tb-001"]));
+        plugin.handle_request_review(&test_ctx("agent", &["request_review", "tb-001"]));
         let (result, broadcast) =
             plugin.handle_update(&test_ctx("agent", &["update", "tb-001", "review notes"]));
         assert!(result.contains("lease renewed"));
@@ -1673,7 +1683,7 @@ mod tests {
     #[test]
     fn full_lifecycle_with_review() {
         let (plugin, _tmp) = make_plugin();
-        // post -> claim -> plan -> approve -> review -> finish
+        // post -> claim -> plan -> approve -> request_review -> finish
         plugin.handle_post(&test_ctx("ba", &["post", "implement #636"]));
         plugin.handle_claim(&test_ctx("agent", &["claim", "tb-001"]));
         plugin.handle_plan(&test_ctx("agent", &["plan", "tb-001", "add review status"]));
@@ -1682,7 +1692,7 @@ mod tests {
             &["approve", "tb-001"],
             Some("ba"),
         ));
-        plugin.handle_review(&test_ctx("agent", &["review", "tb-001"]));
+        plugin.handle_request_review(&test_ctx("agent", &["request_review", "tb-001"]));
         plugin.handle_finish(&test_ctx("agent", &["finish", "tb-001"]));
         let board = plugin.board.lock().unwrap();
         assert_eq!(board[0].task.status, TaskStatus::Finished);
