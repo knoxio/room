@@ -163,6 +163,9 @@ pub enum Cmd {
         /// Poll interval in seconds (default: 5)
         #[arg(long, default_value_t = 5)]
         interval: u64,
+        /// Maximum time to wait in seconds. Returns (possibly empty) after this duration.
+        #[arg(long)]
+        timeout: Option<u64>,
     },
     /// Set your subscription tier for a room.
     ///

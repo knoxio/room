@@ -201,6 +201,10 @@ async fn cmd_query_new(
     filter: QueryFilter,
     opts: QueryOptions,
 ) -> anyhow::Result<()> {
+    let deadline = opts
+        .timeout_secs
+        .map(|s| tokio::time::Instant::now() + tokio::time::Duration::from_secs(s));
+
     loop {
         let messages: Vec<Message> = if room_ids.len() == 1 {
             let room_id = &room_ids[0];
@@ -261,6 +265,13 @@ async fn cmd_query_new(
                     println!("{}", serde_json::to_string(msg)?);
                 }
                 return Ok(());
+            }
+
+            // Check timeout before sleeping again.
+            if let Some(dl) = deadline {
+                if tokio::time::Instant::now() >= dl {
+                    return Ok(());
+                }
             }
         } else {
             for msg in &filtered {
@@ -496,6 +507,7 @@ mod tests {
             interval_secs: 5,
             mentions_only: false,
             since_uuid: None,
+            timeout_secs: None,
         };
 
         // cursor should NOT advance (historical mode)
@@ -542,6 +554,7 @@ mod tests {
             interval_secs: 5,
             mentions_only: false,
             since_uuid: None,
+            timeout_secs: None,
         };
 
         // First query — should return the message and write cursor.
@@ -600,6 +613,7 @@ mod tests {
             interval_secs: 5,
             mentions_only: false,
             since_uuid: None,
+            timeout_secs: None,
         };
 
         let result =
@@ -643,6 +657,7 @@ mod tests {
             interval_secs: 5,
             mentions_only: false,
             since_uuid: None,
+            timeout_secs: None,
         };
 
         let result =
@@ -688,6 +703,7 @@ mod tests {
             interval_secs: 5,
             mentions_only: false,
             since_uuid: None,
+            timeout_secs: None,
         };
 
         let result =
@@ -740,6 +756,7 @@ mod tests {
             interval_secs: 5,
             mentions_only: false,
             since_uuid: None,
+            timeout_secs: None,
         };
 
         let result = oneshot_cmd_query_to_vec(
@@ -760,5 +777,59 @@ mod tests {
         let _ = std::fs::remove_file(&sub_path);
         let _ = std::fs::remove_file(crate::paths::room_meta_path(&room_id));
         let _ = std::fs::remove_file(&global_token_path("alice-pub"));
+    }
+
+    /// cmd_query with --wait and --timeout returns within the timeout even if no messages arrive.
+    #[tokio::test]
+    async fn cmd_query_wait_timeout_returns_empty() {
+        let chat = NamedTempFile::new().unwrap();
+        let cursor_dir = TempDir::new().unwrap();
+        let token_dir = TempDir::new().unwrap();
+
+        let room_id = format!("test-timeout-{}", std::process::id());
+        write_token_file(&token_dir, &room_id, "alice-timeout", "tok-timeout");
+        write_meta_file(&room_id, chat.path());
+
+        // Write one message from the caller so cursor advances past it.
+        crate::history::append(
+            chat.path(),
+            &make_message(&room_id, "alice-timeout", "my own msg"),
+        )
+        .await
+        .unwrap();
+
+        let filter = QueryFilter {
+            rooms: vec![room_id.clone()],
+            ascending: true,
+            ..Default::default()
+        };
+        let opts = QueryOptions {
+            new_only: true,
+            wait: true,
+            interval_secs: 1,
+            mentions_only: false,
+            since_uuid: None,
+            timeout_secs: Some(2),
+        };
+
+        // This should return within ~2 seconds (the timeout), not block forever.
+        // Call cmd_query directly — we only care that it returns within the deadline.
+        let start = std::time::Instant::now();
+        cmd_query(&[room_id.clone()], "tok-timeout", filter, opts)
+            .await
+            .unwrap();
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed < std::time::Duration::from_secs(10),
+            "should return within timeout, not block forever (elapsed: {elapsed:?})"
+        );
+        assert!(
+            elapsed >= std::time::Duration::from_secs(1),
+            "should wait at least one interval before timing out (elapsed: {elapsed:?})"
+        );
+
+        let _ = std::fs::remove_file(crate::paths::room_meta_path(&room_id));
+        let _ = std::fs::remove_file(&global_token_path("alice-timeout"));
     }
 }

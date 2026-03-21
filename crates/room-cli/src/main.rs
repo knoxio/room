@@ -187,6 +187,7 @@ async fn main() -> anyhow::Result<()> {
                 interval_secs: interval,
                 mentions_only,
                 since_uuid: None,
+                timeout_secs: None,
             };
 
             oneshot::cmd_query(&effective_rooms, &token, filter, opts).await?;
@@ -228,6 +229,7 @@ async fn main() -> anyhow::Result<()> {
                 interval_secs: 5,
                 mentions_only,
                 since_uuid: since,
+                timeout_secs: None,
             };
             oneshot::cmd_query(&effective_rooms, &token, filter, opts).await?;
         }
@@ -243,6 +245,7 @@ async fn main() -> anyhow::Result<()> {
             token,
             rooms,
             interval,
+            timeout,
         }) => {
             // Alias for `room query --new --wait`. Delegates to cmd_query.
             let effective_rooms: Vec<String> = if !rooms.is_empty() {
@@ -271,6 +274,7 @@ async fn main() -> anyhow::Result<()> {
                 interval_secs: interval,
                 mentions_only: false,
                 since_uuid: None,
+                timeout_secs: timeout,
             };
             oneshot::cmd_query(&effective_rooms, &token, filter, opts).await?;
         }
