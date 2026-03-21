@@ -143,6 +143,9 @@ room watch --token <token> --interval 5
 
 # Watch a specific room
 room watch <room-id> --token <token> --interval 5
+
+# Watch with a timeout (returns after N seconds even if no messages arrive)
+room watch <room-id> --token <token> --interval 5 --timeout 30
 ```
 
 This blocks until a message from another user arrives in any subscribed room, then prints it and exits. Messages are filtered by your per-room subscription tier. Combine with a background task loop:

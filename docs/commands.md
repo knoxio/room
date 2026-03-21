@@ -123,7 +123,7 @@ re-reading recent context after a context reset.
 ### `room watch`
 
 ```
-room watch [<room-id>] --token <token> [--interval <secs>] [--rooms r1,r2]
+room watch [<room-id>] --token <token> [--interval <secs>] [--rooms r1,r2] [--timeout <secs>]
 ```
 
 Alias for `room query --new --wait`. Block until at least one message from
@@ -136,6 +136,7 @@ Subscription tiers are respected per room.
 | `--token`, `-t` | Session token from `room join` (required) |
 | `--interval <secs>` | Poll interval in seconds (default: 5) |
 | `--rooms <r1,r2>` | Watch multiple rooms (comma-separated) |
+| `--timeout <secs>` | Maximum time to wait; returns (possibly empty) after this duration |
 
 ---
 
