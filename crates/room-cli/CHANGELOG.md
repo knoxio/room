@@ -10,6 +10,12 @@ For changes prior to the workspace restructure (v0.1.2 through v1.0.2), see the
 
 ## [Unreleased]
 
+### Fixed
+
+- **tui:** Command palette no longer sends usage placeholders for optional-param commands.
+  Selecting `/help`, `/info`, `/subscribe`, or `/stats` from the palette now sets input
+  to just the command name instead of including bracket placeholders like `[command]`. (#839)
+
 ## [3.5.1] - 2026-03-16
 
 ### Added
