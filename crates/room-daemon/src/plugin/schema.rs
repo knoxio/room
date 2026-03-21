@@ -343,8 +343,8 @@ mod tests {
         assert!(names.contains(&"help"));
         // Plugins
         assert!(names.contains(&"stats"));
-        assert!(names.contains(&"agent"));
-        assert!(names.contains(&"spawn"));
+        assert!(names.contains(&"queue"));
+        assert!(names.contains(&"taskboard"));
     }
 
     #[test]
