@@ -116,21 +116,22 @@ pub(super) async fn handle_user_info(target: &str, state: &RoomState) -> String 
     parts.join(" | ")
 }
 
-/// Handle `/help [command]` — lists all commands or shows detail for one.
+/// Handle `/help [command] [subcommand]` — lists commands or shows detail.
 pub(super) fn handle_help(params: &[String], state: &RoomState) -> String {
     let builtins = builtin_command_infos();
     let plugin_cmds = state.plugin_registry.all_commands();
 
     if let Some(target) = params.first() {
         let target = target.strip_prefix('/').unwrap_or(target);
+        let sub_target = params.get(1).map(|s| s.as_str());
 
         // Check plugin commands first (matches original behaviour)
         if let Some(cmd) = plugin_cmds.iter().find(|c| c.name == target) {
-            return format_command_help(cmd);
+            return resolve_help(cmd, sub_target);
         }
         // Then builtins
         if let Some(cmd) = builtins.iter().find(|c| c.name == target) {
-            return format_command_help(cmd);
+            return resolve_help(cmd, sub_target);
         }
         return format!("unknown command: /{target}");
     }
@@ -144,6 +145,37 @@ pub(super) fn handle_help(params: &[String], state: &RoomState) -> String {
         lines.push(format!("  {} — {}", cmd.usage, cmd.description));
     }
     lines.join("\n")
+}
+
+/// Resolve help for a command, optionally drilling into a subcommand.
+fn resolve_help(cmd: &CommandInfo, sub_target: Option<&str>) -> String {
+    if let Some(sub) = sub_target {
+        if !cmd.subcommands.is_empty() {
+            if let Some(subcmd) = cmd.subcommands.iter().find(|s| s.name == sub) {
+                return format_command_help(subcmd);
+            }
+            let names: Vec<&str> = cmd.subcommands.iter().map(|s| s.name.as_str()).collect();
+            return format!(
+                "unknown subcommand: /{} {sub}. available: {}",
+                cmd.name,
+                names.join(", ")
+            );
+        }
+        // No subcommands defined — show the main command help
+    }
+
+    // If command has subcommands, list them alongside the main help
+    if cmd.subcommands.is_empty() {
+        format_command_help(cmd)
+    } else {
+        let mut lines = vec![format_command_help(cmd)];
+        lines.push("  subcommands:".to_owned());
+        for sub in &cmd.subcommands {
+            lines.push(format!("    {} — {}", sub.name, sub.description));
+        }
+        lines.push(format!("  use /help {} <subcommand> for details", cmd.name));
+        lines.join("\n")
+    }
 }
 
 /// Format detailed help for a single command, including typed parameter info.

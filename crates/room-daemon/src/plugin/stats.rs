@@ -36,6 +36,7 @@ impl Plugin for StatsPlugin {
                 required: false,
                 description: "Number of recent messages to analyze".to_owned(),
             }],
+            subcommands: vec![],
         }]
     }
 

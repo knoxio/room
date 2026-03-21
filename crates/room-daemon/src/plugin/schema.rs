@@ -27,6 +27,7 @@ pub fn builtin_command_infos() -> Vec<CommandInfo> {
                     description: "Message content".to_owned(),
                 },
             ],
+            subcommands: vec![],
         },
         CommandInfo {
             name: "reply".to_owned(),
@@ -46,6 +47,7 @@ pub fn builtin_command_infos() -> Vec<CommandInfo> {
                     description: "Reply content".to_owned(),
                 },
             ],
+            subcommands: vec![],
         },
         CommandInfo {
             name: "who".to_owned(),
@@ -57,12 +59,14 @@ pub fn builtin_command_infos() -> Vec<CommandInfo> {
                 required: false,
                 description: "Show detailed status duration and last message time".to_owned(),
             }],
+            subcommands: vec![],
         },
         CommandInfo {
             name: "who_all".to_owned(),
             description: "List all daemon users (cross-room)".to_owned(),
             usage: "/who_all".to_owned(),
             params: vec![],
+            subcommands: vec![],
         },
         CommandInfo {
             name: "kick".to_owned(),
@@ -74,6 +78,7 @@ pub fn builtin_command_infos() -> Vec<CommandInfo> {
                 required: true,
                 description: "User to kick (host only)".to_owned(),
             }],
+            subcommands: vec![],
         },
         CommandInfo {
             name: "reauth".to_owned(),
@@ -85,24 +90,28 @@ pub fn builtin_command_infos() -> Vec<CommandInfo> {
                 required: true,
                 description: "User to reauth (host only)".to_owned(),
             }],
+            subcommands: vec![],
         },
         CommandInfo {
             name: "clear-tokens".to_owned(),
             description: "Revoke all session tokens".to_owned(),
             usage: "/clear-tokens".to_owned(),
             params: vec![],
+            subcommands: vec![],
         },
         CommandInfo {
             name: "exit".to_owned(),
             description: "Shut down the broker".to_owned(),
             usage: "/exit".to_owned(),
             params: vec![],
+            subcommands: vec![],
         },
         CommandInfo {
             name: "clear".to_owned(),
             description: "Clear the room history".to_owned(),
             usage: "/clear".to_owned(),
             params: vec![],
+            subcommands: vec![],
         },
         CommandInfo {
             name: "info".to_owned(),
@@ -114,6 +123,7 @@ pub fn builtin_command_infos() -> Vec<CommandInfo> {
                 required: false,
                 description: "User to inspect (omit for room info)".to_owned(),
             }],
+            subcommands: vec![],
         },
         CommandInfo {
             name: "room-info".to_owned(),
@@ -121,6 +131,7 @@ pub fn builtin_command_infos() -> Vec<CommandInfo> {
                 .to_owned(),
             usage: "/room-info".to_owned(),
             params: vec![],
+            subcommands: vec![],
         },
         CommandInfo {
             name: "subscribe".to_owned(),
@@ -132,6 +143,7 @@ pub fn builtin_command_infos() -> Vec<CommandInfo> {
                 required: false,
                 description: "Subscription tier (default: full)".to_owned(),
             }],
+            subcommands: vec![],
         },
         CommandInfo {
             name: "set_subscription".to_owned(),
@@ -143,12 +155,14 @@ pub fn builtin_command_infos() -> Vec<CommandInfo> {
                 required: false,
                 description: "Subscription tier (default: full)".to_owned(),
             }],
+            subcommands: vec![],
         },
         CommandInfo {
             name: "unsubscribe".to_owned(),
             description: "Unsubscribe from this room".to_owned(),
             usage: "/unsubscribe".to_owned(),
             params: vec![],
+            subcommands: vec![],
         },
         CommandInfo {
             name: "subscribe_events".to_owned(),
@@ -160,6 +174,7 @@ pub fn builtin_command_infos() -> Vec<CommandInfo> {
                 required: false,
                 description: "all, none, or comma-separated event types (default: all)".to_owned(),
             }],
+            subcommands: vec![],
         },
         CommandInfo {
             name: "set_event_filter".to_owned(),
@@ -171,6 +186,7 @@ pub fn builtin_command_infos() -> Vec<CommandInfo> {
                 required: false,
                 description: "all, none, or comma-separated event types (default: all)".to_owned(),
             }],
+            subcommands: vec![],
         },
         CommandInfo {
             name: "set_status".to_owned(),
@@ -182,12 +198,14 @@ pub fn builtin_command_infos() -> Vec<CommandInfo> {
                 required: false,
                 description: "Status text (omit to clear)".to_owned(),
             }],
+            subcommands: vec![],
         },
         CommandInfo {
             name: "subscriptions".to_owned(),
             description: "List subscription tiers and event filters for this room".to_owned(),
             usage: "/subscriptions".to_owned(),
             params: vec![],
+            subcommands: vec![],
         },
         CommandInfo {
             name: "team".to_owned(),
@@ -212,6 +230,7 @@ pub fn builtin_command_infos() -> Vec<CommandInfo> {
                     description: "Team name and optional username".to_owned(),
                 },
             ],
+            subcommands: vec![],
         },
         CommandInfo {
             name: "help".to_owned(),
@@ -223,6 +242,7 @@ pub fn builtin_command_infos() -> Vec<CommandInfo> {
                 required: false,
                 description: "Command name to get help for".to_owned(),
             }],
+            subcommands: vec![],
         },
     ]
 }

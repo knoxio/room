@@ -428,6 +428,7 @@ mod tests {
                 description: "test".to_owned(),
                 usage: "/test".to_owned(),
                 params,
+                subcommands: vec![],
             }
         }
 
@@ -1613,6 +1614,104 @@ mod tests {
         assert!(!json.contains("plugin:help"));
     }
 
+    // ── help subcommand dispatch (#840) ─────────────────────────────────
+
+    #[tokio::test]
+    async fn help_taskboard_shows_subcommands_list() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+        let msg = make_command("test-room", "alice", "help", vec!["taskboard".to_owned()]);
+        let result = route_command(msg, "alice", &state).await.unwrap();
+        let CommandResult::Reply(json) = result else {
+            panic!("expected Reply for /help taskboard");
+        };
+        assert!(json.contains("subcommands:"), "should list subcommands");
+        assert!(json.contains("post"), "should include post subcommand");
+        assert!(json.contains("claim"), "should include claim subcommand");
+        assert!(
+            json.contains("/help taskboard"),
+            "should hint at per-subcommand help"
+        );
+    }
+
+    #[tokio::test]
+    async fn help_taskboard_plan_shows_subcommand_detail() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+        let msg = make_command(
+            "test-room",
+            "alice",
+            "help",
+            vec!["taskboard".to_owned(), "plan".to_owned()],
+        );
+        let result = route_command(msg, "alice", &state).await.unwrap();
+        let CommandResult::Reply(json) = result else {
+            panic!("expected Reply for /help taskboard plan");
+        };
+        assert!(
+            json.contains("plan"),
+            "should show plan subcommand detail"
+        );
+        assert!(
+            json.contains("task-id"),
+            "should show task-id parameter"
+        );
+        assert!(
+            json.contains("plan-text"),
+            "should show plan-text parameter"
+        );
+    }
+
+    #[tokio::test]
+    async fn help_taskboard_unknown_subcommand() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+        let msg = make_command(
+            "test-room",
+            "alice",
+            "help",
+            vec!["taskboard".to_owned(), "nonexistent".to_owned()],
+        );
+        let result = route_command(msg, "alice", &state).await.unwrap();
+        let CommandResult::Reply(json) = result else {
+            panic!("expected Reply for /help taskboard nonexistent");
+        };
+        assert!(json.contains("unknown subcommand"));
+    }
+
+    #[tokio::test]
+    async fn help_queue_shows_subcommands() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+        let msg = make_command("test-room", "alice", "help", vec!["queue".to_owned()]);
+        let result = route_command(msg, "alice", &state).await.unwrap();
+        let CommandResult::Reply(json) = result else {
+            panic!("expected Reply for /help queue");
+        };
+        assert!(json.contains("subcommands:"), "should list subcommands");
+        assert!(json.contains("add"), "should include add subcommand");
+        assert!(json.contains("pop"), "should include pop subcommand");
+    }
+
+    #[tokio::test]
+    async fn help_who_ignores_extra_arg_no_subcommands() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+        let msg = make_command(
+            "test-room",
+            "alice",
+            "help",
+            vec!["who".to_owned(), "extra".to_owned()],
+        );
+        let result = route_command(msg, "alice", &state).await.unwrap();
+        let CommandResult::Reply(json) = result else {
+            panic!("expected Reply for /help who extra");
+        };
+        // who has no subcommands — should show normal help, not error
+        assert!(json.contains("/who"));
+        assert!(!json.contains("unknown subcommand"));
+    }
+
     // ── who_all ───────────────────────────────────────────────────────────
 
     #[tokio::test]
@@ -1861,6 +1960,7 @@ mod tests {
                     description: "panics on purpose".to_owned(),
                     usage: "/boom".to_owned(),
                     params: vec![],
+                    subcommands: vec![],
                 }]
             }
 
@@ -1913,6 +2013,7 @@ mod tests {
                     description: "panics with String".to_owned(),
                     usage: "/kaboom".to_owned(),
                     params: vec![],
+                    subcommands: vec![],
                 }]
             }
 
@@ -1961,6 +2062,7 @@ mod tests {
                     description: "says hello".to_owned(),
                     usage: "/greet".to_owned(),
                     params: vec![],
+                    subcommands: vec![],
                 }]
             }
 
@@ -2010,6 +2112,7 @@ mod tests {
                     description: "hangs forever".to_owned(),
                     usage: "/slow".to_owned(),
                     params: vec![],
+                    subcommands: vec![],
                 }]
             }
 
