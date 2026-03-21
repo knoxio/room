@@ -1543,7 +1543,7 @@ async fn taskboard_claim_finish_oneshot_returns_response() {
     let td = common::TestDaemon::start(&["tb-os-fin"]).await;
     let token = common::daemon_join(&td.socket_path, "tb-os-fin", "bot").await;
 
-    // Post → claim → finish.
+    // Post → claim → plan → approve → finish.
     let post_wire = taskboard_cmd_wire("post", &["finish-test"]);
     common::daemon_send(&td.socket_path, "tb-os-fin", &token, &post_wire).await;
 
@@ -1555,6 +1555,12 @@ async fn taskboard_claim_finish_oneshot_returns_response() {
         content.contains("claimed by bot"),
         "claim response: {content}"
     );
+
+    let plan_wire = taskboard_cmd_wire("plan", &["tb-001", "my", "plan"]);
+    common::daemon_send(&td.socket_path, "tb-os-fin", &token, &plan_wire).await;
+
+    let approve_wire = taskboard_cmd_wire("approve", &["tb-001"]);
+    common::daemon_send(&td.socket_path, "tb-os-fin", &token, &approve_wire).await;
 
     let finish_wire = taskboard_cmd_wire("finish", &["tb-001"]);
     let resp = common::daemon_send(&td.socket_path, "tb-os-fin", &token, &finish_wire).await;
