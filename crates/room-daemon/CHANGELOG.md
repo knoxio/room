@@ -7,6 +7,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `/who --verbose` (`-v`) flag — shows per-user status duration and last message time (#837)
+
 ### Changed
 
 - Remove static `room-plugin-agent` dependency — agent plugin now loaded dynamically
