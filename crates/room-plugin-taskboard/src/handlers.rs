@@ -717,6 +717,68 @@ impl TaskboardPlugin {
         )
     }
 
+    pub(super) fn handle_reject(&self, ctx: &CommandContext) -> (String, bool) {
+        let task_id = match ctx.params.get(1) {
+            Some(id) => id,
+            None => {
+                return (
+                    "usage: /taskboard reject <task-id> [reason]".to_owned(),
+                    false,
+                )
+            }
+        };
+        self.sweep_expired();
+        let mut board = self.board.lock().unwrap();
+        let lt = match board.iter_mut().find(|lt| lt.task.id == *task_id) {
+            Some(lt) => lt,
+            None => return (format!("task {task_id} not found"), false),
+        };
+        if lt.task.status != TaskStatus::ReviewClaimed {
+            return (
+                format!(
+                    "task {task_id} is {} (must be review_claimed to reject)",
+                    lt.task.status
+                ),
+                false,
+            );
+        }
+        let is_reviewer = lt.task.reviewer.as_deref() == Some(&ctx.sender);
+        let is_host = ctx.metadata.host.as_deref() == Some(&ctx.sender);
+        if !is_reviewer && !is_host {
+            return (
+                format!("task {task_id} can only be rejected by the reviewer or host"),
+                false,
+            );
+        }
+        let reason = if ctx.params.len() > 2 {
+            Some(ctx.params[2..].join(" "))
+        } else {
+            None
+        };
+        lt.task.status = TaskStatus::InProgress;
+        lt.task.reviewer = None;
+        lt.task.approved_by = None;
+        lt.task.approved_at = None;
+        if let Some(ref reason) = reason {
+            lt.task.notes = Some(reason.clone());
+        }
+        lt.lease_start = Some(std::time::Instant::now());
+        lt.task.updated_at = Some(chrono::Utc::now());
+        let tasks: Vec<Task> = board.iter().map(|lt| lt.task.clone()).collect();
+        let _ = task::save_tasks(&self.storage_path, &tasks);
+        let reason_suffix = reason
+            .as_deref()
+            .map(|r| format!(" — reason: {r}"))
+            .unwrap_or_default();
+        (
+            format!(
+                "task {task_id} rejected by {} — returned to in_progress{reason_suffix}",
+                ctx.sender
+            ),
+            true,
+        )
+    }
+
     pub(super) fn handle_finish(&self, ctx: &CommandContext) -> (String, bool) {
         let task_id = match ctx.params.get(1) {
             Some(id) => id,
@@ -1848,6 +1910,105 @@ mod tests {
         let (plugin, _tmp) = make_plugin();
         let (result, broadcast) =
             plugin.handle_review_claim(&test_ctx("reviewer", &["review_claim"]));
+        assert!(result.contains("usage"));
+        assert!(!broadcast);
+    }
+
+    // -- reject tests -----------------------------------------------------------
+
+    #[test]
+    fn handle_reject_success() {
+        let (plugin, _tmp) = make_plugin();
+        plugin.handle_post(&test_ctx("ba", &["post", "implement feature"]));
+        plugin.handle_claim(&test_ctx("agent", &["claim", "tb-001"]));
+        plugin.handle_plan(&test_ctx("agent", &["plan", "tb-001", "my plan"]));
+        plugin.handle_approve(&test_ctx_with_host(
+            "ba",
+            &["approve", "tb-001"],
+            Some("ba"),
+        ));
+        plugin.handle_request_review(&test_ctx("agent", &["request_review", "tb-001"]));
+        plugin.handle_review_claim(&test_ctx("reviewer", &["review_claim", "tb-001"]));
+        let (result, broadcast) = plugin.handle_reject(&test_ctx_with_host(
+            "reviewer",
+            &["reject", "tb-001", "needs", "tests"],
+            Some("ba"),
+        ));
+        assert!(result.contains("rejected by reviewer"));
+        assert!(result.contains("reason: needs tests"));
+        assert!(broadcast);
+        let board = plugin.board.lock().unwrap();
+        assert_eq!(board[0].task.status, TaskStatus::InProgress);
+        assert!(board[0].task.reviewer.is_none());
+        assert!(board[0].task.approved_by.is_none());
+        assert!(board[0].task.approved_at.is_none());
+        assert_eq!(board[0].task.notes.as_deref(), Some("needs tests"));
+    }
+
+    #[test]
+    fn handle_reject_wrong_status() {
+        let (plugin, _tmp) = make_plugin();
+        plugin.handle_post(&test_ctx("ba", &["post", "implement feature"]));
+        plugin.handle_claim(&test_ctx("agent", &["claim", "tb-001"]));
+        let (result, broadcast) = plugin.handle_reject(&test_ctx_with_host(
+            "agent",
+            &["reject", "tb-001"],
+            Some("ba"),
+        ));
+        assert!(result.contains("must be review_claimed to reject"));
+        assert!(!broadcast);
+    }
+
+    #[test]
+    fn handle_reject_wrong_user() {
+        let (plugin, _tmp) = make_plugin();
+        plugin.handle_post(&test_ctx("ba", &["post", "implement feature"]));
+        plugin.handle_claim(&test_ctx("agent", &["claim", "tb-001"]));
+        plugin.handle_plan(&test_ctx("agent", &["plan", "tb-001", "my plan"]));
+        plugin.handle_approve(&test_ctx_with_host(
+            "ba",
+            &["approve", "tb-001"],
+            Some("ba"),
+        ));
+        plugin.handle_request_review(&test_ctx("agent", &["request_review", "tb-001"]));
+        plugin.handle_review_claim(&test_ctx("reviewer", &["review_claim", "tb-001"]));
+        let (result, broadcast) = plugin.handle_reject(&test_ctx_with_host(
+            "random",
+            &["reject", "tb-001", "bad"],
+            Some("ba"),
+        ));
+        assert!(result.contains("can only be rejected by the reviewer or host"));
+        assert!(!broadcast);
+    }
+
+    #[test]
+    fn handle_reject_by_host() {
+        let (plugin, _tmp) = make_plugin();
+        plugin.handle_post(&test_ctx("ba", &["post", "implement feature"]));
+        plugin.handle_claim(&test_ctx("agent", &["claim", "tb-001"]));
+        plugin.handle_plan(&test_ctx("agent", &["plan", "tb-001", "my plan"]));
+        plugin.handle_approve(&test_ctx_with_host(
+            "ba",
+            &["approve", "tb-001"],
+            Some("ba"),
+        ));
+        plugin.handle_request_review(&test_ctx("agent", &["request_review", "tb-001"]));
+        plugin.handle_review_claim(&test_ctx("reviewer", &["review_claim", "tb-001"]));
+        let (result, broadcast) = plugin.handle_reject(&test_ctx_with_host(
+            "ba",
+            &["reject", "tb-001", "not ready"],
+            Some("ba"),
+        ));
+        assert!(result.contains("rejected by ba"));
+        assert!(broadcast);
+        let board = plugin.board.lock().unwrap();
+        assert_eq!(board[0].task.status, TaskStatus::InProgress);
+    }
+
+    #[test]
+    fn handle_reject_missing_id() {
+        let (plugin, _tmp) = make_plugin();
+        let (result, broadcast) = plugin.handle_reject(&test_ctx("reviewer", &["reject"]));
         assert!(result.contains("usage"));
         assert!(!broadcast);
     }

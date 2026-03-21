@@ -15,6 +15,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **taskboard:** `/taskboard reject <task-id> [reason]` — reviewer sends task back to
+  implementer (ReviewClaimed → InProgress). Clears reviewer/approved fields. (#845)
 - **taskboard:** Team-restricted task claims — `/taskboard post --team <name>` restricts
   claiming and assignment to team members. Backward-compatible NDJSON persistence. (#516)
 
