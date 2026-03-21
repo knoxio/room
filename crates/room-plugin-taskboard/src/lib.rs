@@ -84,7 +84,7 @@ impl TaskboardPlugin {
         vec![CommandInfo {
             name: "taskboard".to_owned(),
             description:
-                "Manage task lifecycle — post, list, show, claim, assign, plan, approve, update, review, release, finish, cancel"
+                "Manage task lifecycle — post, list, history, show, claim, assign, plan, approve, update, review, release, finish, cancel"
                     .to_owned(),
             usage: "/taskboard <action> [args...]".to_owned(),
             params: vec![
@@ -93,6 +93,7 @@ impl TaskboardPlugin {
                     param_type: ParamType::Choice(vec![
                         "post".to_owned(),
                         "list".to_owned(),
+                        "history".to_owned(),
                         "show".to_owned(),
                         "claim".to_owned(),
                         "assign".to_owned(),
@@ -164,6 +165,7 @@ impl Plugin for TaskboardPlugin {
                     let show_all = ctx.params.get(1).map(|s| s.as_str()) == Some("all");
                     (self.handle_list(show_all), false)
                 }
+                "history" => (self.handle_history(), false),
                 "claim" => self.handle_claim(&ctx),
                 "assign" => self.handle_assign(&ctx),
                 "plan" => self.handle_plan(&ctx),
@@ -174,8 +176,8 @@ impl Plugin for TaskboardPlugin {
                 "review" => self.handle_review(&ctx),
                 "finish" => self.handle_finish(&ctx),
                 "cancel" => self.handle_cancel(&ctx),
-                "" => ("usage: /taskboard <post|list|show|claim|assign|plan|approve|update|review|release|finish|cancel> [args...]".to_owned(), false),
-                other => (format!("unknown action: {other}. use: post, list, show, claim, assign, plan, approve, update, review, release, finish, cancel"), false),
+                "" => ("usage: /taskboard <post|list|history|show|claim|assign|plan|approve|update|review|release|finish|cancel> [args...]".to_owned(), false),
+                other => (format!("unknown action: {other}. use: post, list, history, show, claim, assign, plan, approve, update, review, release, finish, cancel"), false),
             };
             if broadcast {
                 // Emit a typed event alongside the system broadcast.
@@ -252,7 +254,7 @@ mod tests {
             assert!(choices.contains(&"post".to_owned()));
             assert!(choices.contains(&"approve".to_owned()));
             assert!(choices.contains(&"assign".to_owned()));
-            assert_eq!(choices.len(), 12);
+            assert_eq!(choices.len(), 13);
         } else {
             panic!("expected Choice param type");
         }
@@ -351,6 +353,46 @@ mod tests {
             output.contains("/taskboard list all"),
             "should hint at 'list all' command"
         );
+    }
+
+    // ── history tests ────────────────────────────────────────────────────
+
+    #[test]
+    fn handle_history_shows_finished_and_cancelled() {
+        let (plugin, _tmp) = make_plugin();
+        seed_task(&plugin, "tb-001", TaskStatus::Open);
+        seed_task(&plugin, "tb-002", TaskStatus::Claimed);
+        seed_task(&plugin, "tb-003", TaskStatus::Finished);
+        seed_task(&plugin, "tb-004", TaskStatus::Cancelled);
+
+        let output = plugin.handle_history();
+        assert!(!output.contains("tb-001"), "open task should not appear");
+        assert!(!output.contains("tb-002"), "claimed task should not appear");
+        assert!(output.contains("tb-003"), "finished task should appear");
+        assert!(output.contains("tb-004"), "cancelled task should appear");
+    }
+
+    #[test]
+    fn handle_history_empty_when_no_completed() {
+        let (plugin, _tmp) = make_plugin();
+        seed_task(&plugin, "tb-001", TaskStatus::Open);
+        seed_task(&plugin, "tb-002", TaskStatus::Claimed);
+
+        let output = plugin.handle_history();
+        assert!(
+            output.contains("no completed tasks"),
+            "should show empty message, got: {output}"
+        );
+    }
+
+    #[test]
+    fn handle_history_shows_assignee() {
+        let (plugin, _tmp) = make_plugin();
+        seed_task(&plugin, "tb-001", TaskStatus::Finished);
+
+        let output = plugin.handle_history();
+        assert!(output.contains("bob"), "should show assignee");
+        assert!(output.contains("ASSIGNEE"), "should have header");
     }
 
     // ── ABI entry point tests ────────────────────────────────────────────
