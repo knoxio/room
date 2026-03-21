@@ -1,6 +1,6 @@
 [package]
 name = "room-daemon"
-version = "3.5.1"
+version = "3.6.0"
 edition = "2021"
 description = "Broker, plugin registry, and daemon runtime for the room multi-user chat system"
 license = "MIT"
@@ -11,8 +11,8 @@ name = "room_daemon"
 path = "src/lib.rs"
 
 [dependencies]
-room-protocol = { path = "../room-protocol", version = "3.5.1" }
-room-plugin-taskboard = { path = "../room-plugin-taskboard", version = "3.5.1" }
+room-protocol = { path = "../room-protocol", version = "3.6.0" }
+room-plugin-taskboard = { path = "../room-plugin-taskboard", version = "3.6.0" }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
