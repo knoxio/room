@@ -538,7 +538,7 @@ mod tests {
         let (plugin, _tmp) = make_plugin();
         seed_task(&plugin, "tb-001", TaskStatus::Open);
         seed_task(&plugin, "tb-002", TaskStatus::Claimed); // assigned to "bob"
-        seed_task(&plugin, "tb-003", TaskStatus::Approved); // assigned to "bob"
+        seed_task(&plugin, "tb-003", TaskStatus::InProgress); // assigned to "bob"
 
         // Seed one task assigned to "alice".
         {
@@ -557,6 +557,7 @@ mod tests {
                 updated_at: None,
                 notes: None,
                 team: None,
+                reviewer: None,
             };
             board.push(LiveTask::new(t));
         }

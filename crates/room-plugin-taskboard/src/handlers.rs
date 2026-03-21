@@ -1192,6 +1192,11 @@ mod tests {
         let (plugin, _tmp) = make_plugin();
         plugin.handle_post(&test_ctx("ba", &["post", "task"]));
         plugin.handle_claim(&test_ctx("agent", &["claim", "tb-001"]));
+        plugin.handle_plan(&test_ctx(
+            "agent",
+            &["plan", "tb-001", "do", "the", "thing"],
+        ));
+        plugin.handle_approve(&test_ctx("ba", &["approve", "tb-001"]));
         plugin.handle_finish(&test_ctx("agent", &["finish", "tb-001"]));
         let (result, broadcast) = plugin.handle_cancel(&test_ctx("ba", &["cancel", "tb-001"]));
         assert!(result.contains("cannot cancel"));
