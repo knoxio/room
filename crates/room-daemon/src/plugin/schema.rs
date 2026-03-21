@@ -53,10 +53,7 @@ pub fn builtin_command_infos() -> Vec<CommandInfo> {
             usage: "/who [--verbose|-v]".to_owned(),
             params: vec![ParamSchema {
                 name: "flag".to_owned(),
-                param_type: ParamType::Choice(vec![
-                    "--verbose".to_owned(),
-                    "-v".to_owned(),
-                ]),
+                param_type: ParamType::Choice(vec!["--verbose".to_owned(), "-v".to_owned()]),
                 required: false,
                 description: "Show detailed status duration and last message time".to_owned(),
             }],
