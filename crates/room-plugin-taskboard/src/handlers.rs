@@ -631,6 +631,50 @@ impl TaskboardPlugin {
         )
     }
 
+    pub(super) fn handle_review_claim(&self, ctx: &CommandContext) -> (String, bool) {
+        let task_id = match ctx.params.get(1) {
+            Some(id) => id,
+            None => return ("usage: /taskboard review_claim <task-id>".to_owned(), false),
+        };
+        self.sweep_expired();
+        let mut board = self.board.lock().unwrap();
+        let lt = match board.iter_mut().find(|lt| lt.task.id == *task_id) {
+            Some(lt) => lt,
+            None => return (format!("task {task_id} not found"), false),
+        };
+        if lt.task.status != TaskStatus::AwaitingReview {
+            return (
+                format!(
+                    "task {task_id} is {} (must be in_review to claim for review)",
+                    lt.task.status
+                ),
+                false,
+            );
+        }
+        if lt.task.reviewer.is_some() {
+            return (
+                format!(
+                    "task {task_id} already claimed for review by {}",
+                    lt.task.reviewer.as_deref().unwrap_or("unknown")
+                ),
+                false,
+            );
+        }
+        lt.task.status = TaskStatus::ReviewClaimed;
+        lt.task.reviewer = Some(ctx.sender.clone());
+        lt.lease_start = Some(std::time::Instant::now());
+        lt.task.updated_at = Some(chrono::Utc::now());
+        let tasks: Vec<Task> = board.iter().map(|lt| lt.task.clone()).collect();
+        let _ = task::save_tasks(&self.storage_path, &tasks);
+        (
+            format!(
+                "task {task_id} review claimed by {} — lease started",
+                ctx.sender
+            ),
+            true,
+        )
+    }
+
     pub(super) fn handle_finish(&self, ctx: &CommandContext) -> (String, bool) {
         let task_id = match ctx.params.get(1) {
             Some(id) => id,
@@ -1701,6 +1745,69 @@ mod tests {
         plugin.handle_finish(&test_ctx("agent", &["finish", "tb-001"]));
         let board = plugin.board.lock().unwrap();
         assert_eq!(board[0].task.status, TaskStatus::Finished);
+    }
+
+    // -- review_claim tests -----------------------------------------------------
+
+    #[test]
+    fn handle_review_claim_success() {
+        let (plugin, _tmp) = make_plugin();
+        plugin.handle_post(&test_ctx("ba", &["post", "implement feature"]));
+        plugin.handle_claim(&test_ctx("agent", &["claim", "tb-001"]));
+        plugin.handle_plan(&test_ctx("agent", &["plan", "tb-001", "my plan"]));
+        plugin.handle_approve(&test_ctx_with_host(
+            "ba",
+            &["approve", "tb-001"],
+            Some("ba"),
+        ));
+        plugin.handle_request_review(&test_ctx("agent", &["request_review", "tb-001"]));
+        let (result, broadcast) =
+            plugin.handle_review_claim(&test_ctx("reviewer", &["review_claim", "tb-001"]));
+        assert!(result.contains("review claimed by reviewer"));
+        assert!(broadcast);
+        let board = plugin.board.lock().unwrap();
+        assert_eq!(board[0].task.status, TaskStatus::ReviewClaimed);
+        assert_eq!(board[0].task.reviewer.as_deref(), Some("reviewer"));
+    }
+
+    #[test]
+    fn handle_review_claim_wrong_status() {
+        let (plugin, _tmp) = make_plugin();
+        plugin.handle_post(&test_ctx("ba", &["post", "task"]));
+        plugin.handle_claim(&test_ctx("agent", &["claim", "tb-001"]));
+        let (result, broadcast) =
+            plugin.handle_review_claim(&test_ctx("reviewer", &["review_claim", "tb-001"]));
+        assert!(result.contains("must be in_review"));
+        assert!(!broadcast);
+    }
+
+    #[test]
+    fn handle_review_claim_already_claimed() {
+        let (plugin, _tmp) = make_plugin();
+        plugin.handle_post(&test_ctx("ba", &["post", "task"]));
+        plugin.handle_claim(&test_ctx("agent", &["claim", "tb-001"]));
+        plugin.handle_plan(&test_ctx("agent", &["plan", "tb-001", "plan"]));
+        plugin.handle_approve(&test_ctx_with_host(
+            "ba",
+            &["approve", "tb-001"],
+            Some("ba"),
+        ));
+        plugin.handle_request_review(&test_ctx("agent", &["request_review", "tb-001"]));
+        plugin.handle_review_claim(&test_ctx("reviewer1", &["review_claim", "tb-001"]));
+        // Second claim attempt — status is now ReviewClaimed, not AwaitingReview.
+        let (result, broadcast) =
+            plugin.handle_review_claim(&test_ctx("reviewer2", &["review_claim", "tb-001"]));
+        assert!(result.contains("must be in_review"));
+        assert!(!broadcast);
+    }
+
+    #[test]
+    fn handle_review_claim_missing_id() {
+        let (plugin, _tmp) = make_plugin();
+        let (result, broadcast) =
+            plugin.handle_review_claim(&test_ctx("reviewer", &["review_claim"]));
+        assert!(result.contains("usage"));
+        assert!(!broadcast);
     }
 
     // -- Test helpers -----------------------------------------------------------
