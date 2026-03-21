@@ -1,0 +1,39 @@
+[project]
+repo = "git@github-personal:knoxio/room.git"
+container_name = "sandbox-room"
+
+[[agent]]
+name = "r2d2"
+role = "coder"
+
+[[agent]]
+name = "c3po"
+role = "coder"
+
+[[agent]]
+name = "wall-e"
+role = "coder"
+
+[[agent]]
+name = "qa"
+role = "reviewer"
+
+[[agent]]
+name = "manager"
+role = "manager"
+
+[room]
+default = "dev"
+
+[auth]
+method = "gh-cli"
+mount_ssh = false
+gh_account = "knoxio"
+
+[environment]
+languages = ["rust"]
+utilities = [
+    "glow",
+    "just",
+    "yq",
+]
