@@ -474,10 +474,11 @@ fn complete_palette_selection(
     let selected_idx = state.palette.filtered.get(state.palette.selected).copied();
     if let Some(idx) = selected_idx {
         let cmd_name = state.palette.commands[idx].cmd.clone();
+        let is_required = state.palette.is_param_required(&cmd_name, 0);
         let is_username = state.palette.is_username_param(&cmd_name, 0);
         let has_choices = !state.palette.completions_at(&cmd_name, 0).is_empty();
 
-        if is_username {
+        if is_username && is_required {
             // Set input to "/<cmd> " and activate mention picker at the space.
             let prefix = format!("/{cmd_name} ");
             let at_byte = prefix.len();
@@ -491,7 +492,7 @@ fn complete_palette_selection(
             if state.mention.filtered.is_empty() {
                 state.mention.deactivate();
             }
-        } else if has_choices {
+        } else if has_choices && is_required {
             // Set input to "/<cmd> " and activate choice picker.
             let choices = state.palette.completions_at(&cmd_name, 0);
             let prefix = format!("/{cmd_name} ");
@@ -504,12 +505,12 @@ fn complete_palette_selection(
             if state.choice.filtered.is_empty() {
                 state.choice.deactivate();
             }
-        } else if let Some(usage) = state.palette.selected_usage() {
-            state.input = usage.to_owned();
+        } else {
+            // Command has no params, or only optional params.
+            // Set input to just "/<cmd>" (no placeholder suffixes) and send.
+            state.input = format!("/{cmd_name}");
             state.cursor_pos = state.input.len();
             state.input_row_scroll = 0;
-            state.palette.deactivate();
-        } else {
             state.palette.deactivate();
         }
     } else {
@@ -1324,7 +1325,8 @@ mod tests {
     }
 
     #[test]
-    fn tab_on_stats_sets_short_prefix_for_choices() {
+    fn tab_on_stats_does_not_activate_choice_picker() {
+        // /stats has an optional Choice param — should NOT auto-activate choice picker
         let mut state = InputState::new();
         let users: Vec<String> = vec![];
         for c in "/stats".chars() {
@@ -1332,18 +1334,13 @@ mod tests {
         }
         assert!(state.palette.active);
         handle_key(make_key(KeyCode::Tab), &mut state, &users, &[], 10, 80);
-        // stats has Choice param — should set "/stats " and activate choice picker
-        assert_eq!(state.input, "/stats ");
-        assert!(!state.palette.active);
-        assert!(!state.mention.active);
+        assert!(!state.palette.active, "palette should deactivate");
         assert!(
-            state.choice.active,
-            "choice picker should activate for Choice params"
+            !state.choice.active,
+            "choice picker should NOT activate for optional Choice param"
         );
-        assert!(
-            !state.choice.filtered.is_empty(),
-            "choice picker should have filtered values"
-        );
+        // Should set input to just the command name, no placeholder
+        assert_eq!(state.input, "/stats");
     }
 
     #[test]
@@ -1370,6 +1367,46 @@ mod tests {
         handle_key(make_key(KeyCode::Enter), &mut state, &users, &[], 10, 80);
         assert_eq!(state.input, "/dm ");
         assert!(state.mention.active);
+    }
+
+    // ── optional-param palette selection tests (#839) ─────────────────────────
+
+    #[test]
+    fn tab_on_info_does_not_activate_mention_picker() {
+        // /info has an optional Username param — should NOT auto-activate mention picker
+        let mut state = InputState::new();
+        let users = vec!["alice".to_owned()];
+        for c in "/info".chars() {
+            handle_key(make_key(KeyCode::Char(c)), &mut state, &users, &[], 10, 80);
+        }
+        assert!(state.palette.active);
+        handle_key(make_key(KeyCode::Tab), &mut state, &users, &[], 10, 80);
+        assert!(!state.palette.active, "palette should deactivate");
+        assert!(
+            !state.mention.active,
+            "mention picker should NOT activate for optional Username param"
+        );
+        // Should set input to just the command name, no placeholder
+        assert_eq!(state.input, "/info");
+    }
+
+    #[test]
+    fn tab_on_subscribe_does_not_activate_choice_picker() {
+        // /subscribe has an optional Choice param — should NOT auto-activate choice picker
+        let mut state = InputState::new();
+        let users: Vec<String> = vec![];
+        for c in "/subscribe".chars() {
+            handle_key(make_key(KeyCode::Char(c)), &mut state, &users, &[], 10, 80);
+        }
+        assert!(state.palette.active);
+        handle_key(make_key(KeyCode::Tab), &mut state, &users, &[], 10, 80);
+        assert!(!state.palette.active, "palette should deactivate");
+        assert!(
+            !state.choice.active,
+            "choice picker should NOT activate for optional Choice param"
+        );
+        // Should set input to just the command name, no placeholder
+        assert_eq!(state.input, "/subscribe");
     }
 
     // ── Tab switching keybinding tests ──────────────────────────────────────
@@ -1422,20 +1459,23 @@ mod tests {
 
     // ── ChoicePicker integration tests ──────────────────────────────────────
 
-    /// Helper: type a command and Tab to activate the choice picker.
+    /// Helper: set up input with "/<cmd> " and directly activate the choice picker.
+    /// This bypasses palette selection (which only auto-activates for required params)
+    /// so we can test choice picker mechanics in isolation.
     fn activate_choice_picker(cmd: &str) -> InputState {
         let mut state = InputState::new();
-        let users: Vec<String> = vec![];
-        for c in cmd.chars() {
-            handle_key(make_key(KeyCode::Char(c)), &mut state, &users, &[], 10, 80);
-        }
-        handle_key(make_key(KeyCode::Tab), &mut state, &users, &[], 10, 80);
+        let prefix = format!("/{cmd} ");
+        let value_start = prefix.len();
+        state.input = prefix;
+        state.cursor_pos = value_start;
+        let choices = state.palette.completions_at(cmd, 0);
+        state.choice.activate(cmd, choices, value_start, "");
         state
     }
 
     #[test]
-    fn choice_picker_activates_on_subscribe_tab() {
-        let state = activate_choice_picker("/subscribe");
+    fn choice_picker_activates_on_subscribe() {
+        let state = activate_choice_picker("subscribe");
         assert!(state.choice.active);
         assert_eq!(state.input, "/subscribe ");
         assert!(state.choice.filtered.contains(&"full".to_owned()));
@@ -1444,7 +1484,7 @@ mod tests {
 
     #[test]
     fn choice_picker_tab_completes_selection() {
-        let mut state = activate_choice_picker("/subscribe");
+        let mut state = activate_choice_picker("subscribe");
         assert!(state.choice.active);
         // Default selection is first item
         handle_key(make_key(KeyCode::Tab), &mut state, &[], &[], 10, 80);
@@ -1462,7 +1502,7 @@ mod tests {
 
     #[test]
     fn choice_picker_enter_completes_selection() {
-        let mut state = activate_choice_picker("/subscribe");
+        let mut state = activate_choice_picker("subscribe");
         assert!(state.choice.active);
         handle_key(make_key(KeyCode::Enter), &mut state, &[], &[], 10, 80);
         assert!(!state.choice.active);
@@ -1471,7 +1511,7 @@ mod tests {
 
     #[test]
     fn choice_picker_up_down_navigates() {
-        let mut state = activate_choice_picker("/subscribe");
+        let mut state = activate_choice_picker("subscribe");
         assert!(state.choice.active);
         assert_eq!(state.choice.selected, 0);
         handle_key(make_key(KeyCode::Down), &mut state, &[], &[], 10, 80);
@@ -1482,7 +1522,7 @@ mod tests {
 
     #[test]
     fn choice_picker_esc_dismisses() {
-        let mut state = activate_choice_picker("/subscribe");
+        let mut state = activate_choice_picker("subscribe");
         assert!(state.choice.active);
         handle_key(make_key(KeyCode::Esc), &mut state, &[], &[], 10, 80);
         assert!(!state.choice.active);
@@ -1490,7 +1530,7 @@ mod tests {
 
     #[test]
     fn choice_picker_typing_filters() {
-        let mut state = activate_choice_picker("/subscribe");
+        let mut state = activate_choice_picker("subscribe");
         assert!(state.choice.active);
         let initial_count = state.choice.filtered.len();
         // Type 'f' to filter to "full"
@@ -1502,7 +1542,7 @@ mod tests {
 
     #[test]
     fn choice_picker_typing_no_match_deactivates() {
-        let mut state = activate_choice_picker("/subscribe");
+        let mut state = activate_choice_picker("subscribe");
         assert!(state.choice.active);
         for c in "zzz".chars() {
             handle_key(make_key(KeyCode::Char(c)), &mut state, &[], &[], 10, 80);
@@ -1515,7 +1555,7 @@ mod tests {
 
     #[test]
     fn choice_picker_backspace_updates_filter() {
-        let mut state = activate_choice_picker("/subscribe");
+        let mut state = activate_choice_picker("subscribe");
         assert!(state.choice.active);
         // Type 'f' to filter
         handle_key(make_key(KeyCode::Char('f')), &mut state, &[], &[], 10, 80);
@@ -1528,7 +1568,7 @@ mod tests {
 
     #[test]
     fn choice_picker_backspace_past_value_start_deactivates() {
-        let mut state = activate_choice_picker("/subscribe");
+        let mut state = activate_choice_picker("subscribe");
         assert!(state.choice.active);
         // Backspace into the command prefix should deactivate
         handle_key(make_key(KeyCode::Backspace), &mut state, &[], &[], 10, 80);
@@ -1539,8 +1579,14 @@ mod tests {
     }
 
     #[test]
-    fn choice_picker_not_active_for_who() {
-        let state = activate_choice_picker("/who");
+    fn tab_on_who_does_not_activate_choice_picker() {
+        // /who has no Choice params — palette Tab should not activate choice picker
+        let mut state = InputState::new();
+        let users: Vec<String> = vec![];
+        for c in "/who".chars() {
+            handle_key(make_key(KeyCode::Char(c)), &mut state, &users, &[], 10, 80);
+        }
+        handle_key(make_key(KeyCode::Tab), &mut state, &users, &[], 10, 80);
         assert!(
             !state.choice.active,
             "who has no Choice params — picker should not activate"

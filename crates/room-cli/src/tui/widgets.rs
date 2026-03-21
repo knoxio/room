@@ -118,6 +118,18 @@ impl CommandPalette {
             .map(|p| matches!(p.param_type, ParamType::Username))
             .unwrap_or(false)
     }
+
+    /// Check if the parameter at `arg_pos` for `cmd_name` is required.
+    /// Returns `true` when the parameter exists and is marked `required`,
+    /// or `false` when the parameter is optional or doesn't exist.
+    pub(super) fn is_param_required(&self, cmd_name: &str, arg_pos: usize) -> bool {
+        self.commands
+            .iter()
+            .find(|c| c.cmd == cmd_name)
+            .and_then(|c| c.params.get(arg_pos))
+            .map(|p| p.required)
+            .unwrap_or(false)
+    }
 }
 
 // ── Shared picker state ──────────────────────────────────────────────────────
@@ -635,6 +647,35 @@ mod tests {
     fn is_username_param_false_for_unknown_command() {
         let p = make_palette();
         assert!(!p.is_username_param("nonexistent", 0));
+    }
+
+    // ── is_param_required tests (#839) ────────────────────────────────────────
+
+    #[test]
+    fn is_param_required_true_for_dm_first_arg() {
+        let p = make_palette();
+        // /dm <user> — first param is required
+        assert!(p.is_param_required("dm", 0));
+    }
+
+    #[test]
+    fn is_param_required_false_for_info_first_arg() {
+        let p = make_palette();
+        // /info [username] — first param is optional
+        assert!(!p.is_param_required("info", 0));
+    }
+
+    #[test]
+    fn is_param_required_false_for_subscribe_first_arg() {
+        let p = make_palette();
+        // /subscribe [tier] — first param is optional
+        assert!(!p.is_param_required("subscribe", 0));
+    }
+
+    #[test]
+    fn is_param_required_false_for_unknown_command() {
+        let p = make_palette();
+        assert!(!p.is_param_required("nonexistent", 0));
     }
 
     // ── MentionPicker tests ───────────────────────────────────────────────────
