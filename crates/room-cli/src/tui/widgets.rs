@@ -87,13 +87,6 @@ impl CommandPalette {
         }
     }
 
-    /// The full usage string (e.g. `/dm <user>`) of the selected entry.
-    pub(super) fn selected_usage(&self) -> Option<&str> {
-        self.filtered
-            .get(self.selected)
-            .map(|&i| self.commands[i].usage.as_str())
-    }
-
     /// Look up a command by name and return completions for the given argument
     /// position. Returns `Choice` values or an empty vec.
     pub(super) fn completions_at(&self, cmd_name: &str, arg_pos: usize) -> Vec<String> {
@@ -447,21 +440,6 @@ mod tests {
     }
 
     #[test]
-    fn palette_selected_usage_returns_usage_string() {
-        let mut p = make_palette();
-        p.activate();
-        let usage = p.selected_usage().unwrap();
-        assert!(usage.starts_with('/'));
-    }
-
-    #[test]
-    fn palette_selected_usage_empty_when_no_filtered() {
-        let mut p = make_palette();
-        p.filtered.clear();
-        assert!(p.selected_usage().is_none());
-    }
-
-    #[test]
     fn palette_selected_clamps_after_filter_narrows() {
         let mut p = make_palette();
         p.activate();
@@ -529,14 +507,6 @@ mod tests {
         p.update_filter("ki");
         assert_eq!(p.filtered.len(), 1);
         assert_eq!(p.commands[p.filtered[0]].cmd, "kick");
-    }
-
-    #[test]
-    fn admin_selected_usage_slash() {
-        let mut p = make_palette();
-        p.activate();
-        let usage = p.selected_usage().unwrap();
-        assert!(usage.starts_with('/'));
     }
 
     // ── Filter ranking tests (#172) ────────────────────────────────────────────
