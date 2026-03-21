@@ -4,6 +4,8 @@ use std::{
     sync::{atomic::AtomicU64, Arc},
 };
 
+use chrono::{DateTime, Utc};
+
 use room_protocol::{EventFilter, RoomConfig, SubscriptionTier};
 use tokio::sync::{broadcast, watch, Mutex};
 
@@ -18,6 +20,9 @@ pub(crate) type ClientMap = Arc<Mutex<HashMap<u64, (String, broadcast::Sender<St
 
 /// Maps username → status string. Status is ephemeral; cleared on disconnect.
 pub(crate) type StatusMap = Arc<Mutex<HashMap<String, String>>>;
+
+/// Maps username → timestamp of when their status was last set.
+pub(crate) type TimestampMap = Arc<Mutex<HashMap<String, DateTime<Utc>>>>;
 
 /// The username of the first client to complete the handshake.
 /// The host receives all DMs regardless of sender/recipient.
@@ -72,6 +77,10 @@ pub(crate) struct FilterState {
 pub(crate) struct RoomState {
     pub(crate) clients: ClientMap,
     pub(crate) status_map: StatusMap,
+    /// Tracks when each user's status was last set (for `/who --verbose`).
+    pub(crate) status_timestamps: TimestampMap,
+    /// Tracks when each user last sent a message (for `/who --verbose`).
+    pub(crate) last_message_times: TimestampMap,
     pub(crate) host_user: HostUser,
     pub(crate) auth: AuthState,
     pub(crate) filters: FilterState,
@@ -132,6 +141,8 @@ impl RoomState {
         Ok(Arc::new(Self {
             clients: Arc::new(Mutex::new(HashMap::new())),
             status_map: Arc::new(Mutex::new(HashMap::new())),
+            status_timestamps: Arc::new(Mutex::new(HashMap::new())),
+            last_message_times: Arc::new(Mutex::new(HashMap::new())),
             host_user: Arc::new(Mutex::new(None)),
             auth: AuthState {
                 token_map,
@@ -229,14 +240,50 @@ impl RoomState {
 
     // ── status_map accessors ──────────────────────────────────────────────────
 
-    /// Set (or clear) a user's status string.
+    /// Set (or clear) a user's status string and record the timestamp.
     pub(crate) async fn set_status(&self, user: &str, status: String) {
         self.status_map.lock().await.insert(user.to_owned(), status);
+        self.status_timestamps
+            .lock()
+            .await
+            .insert(user.to_owned(), Utc::now());
     }
 
     /// Remove a user's status entry (e.g. on kick or disconnect).
     pub(crate) async fn remove_status(&self, user: &str) {
         self.status_map.lock().await.remove(user);
+        self.status_timestamps.lock().await.remove(user);
+        self.last_message_times.lock().await.remove(user);
+    }
+
+    /// Record the current time as a user's last message time.
+    pub(crate) async fn record_last_message(&self, user: &str) {
+        self.last_message_times
+            .lock()
+            .await
+            .insert(user.to_owned(), Utc::now());
+    }
+
+    /// Return verbose entries: (username, status, status_since, last_message_time).
+    pub(crate) async fn status_entries_verbose(
+        &self,
+    ) -> Vec<(String, String, Option<DateTime<Utc>>, Option<DateTime<Utc>>)> {
+        let status = self.status_map.lock().await;
+        let timestamps = self.status_timestamps.lock().await;
+        let last_msgs = self.last_message_times.lock().await;
+        let mut entries: Vec<_> = status
+            .iter()
+            .map(|(u, s)| {
+                (
+                    u.clone(),
+                    s.clone(),
+                    timestamps.get(u).copied(),
+                    last_msgs.get(u).copied(),
+                )
+            })
+            .collect();
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        entries
     }
 
     /// Return all (username, status) pairs, sorted by username.

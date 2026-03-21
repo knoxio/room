@@ -50,8 +50,13 @@ pub fn builtin_command_infos() -> Vec<CommandInfo> {
         CommandInfo {
             name: "who".to_owned(),
             description: "List users in the room".to_owned(),
-            usage: "/who".to_owned(),
-            params: vec![],
+            usage: "/who [--verbose|-v]".to_owned(),
+            params: vec![ParamSchema {
+                name: "flag".to_owned(),
+                param_type: ParamType::Choice(vec!["--verbose".to_owned(), "-v".to_owned()]),
+                required: false,
+                description: "Show detailed status duration and last message time".to_owned(),
+            }],
         },
         CommandInfo {
             name: "who_all".to_owned(),
@@ -297,10 +302,12 @@ mod tests {
     }
 
     #[test]
-    fn builtin_command_infos_who_has_no_params() {
+    fn builtin_command_infos_who_has_verbose_flag() {
         let cmds = builtin_command_infos();
         let who = cmds.iter().find(|c| c.name == "who").unwrap();
-        assert!(who.params.is_empty());
+        assert_eq!(who.params.len(), 1);
+        assert_eq!(who.params[0].name, "flag");
+        assert!(!who.params[0].required);
     }
 
     // ── all_known_commands tests ──────────────────────────────────────────

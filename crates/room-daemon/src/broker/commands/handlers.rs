@@ -1,3 +1,4 @@
+use chrono::Utc;
 use room_protocol::{make_system, EventFilter, SubscriptionTier};
 
 use crate::broker::{
@@ -9,8 +10,33 @@ use crate::broker::{
 
 use super::CommandResult;
 
+/// Format a duration in seconds into a human-readable string like "5m", "2h", "3d".
+fn format_duration_short(secs: i64) -> String {
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m", secs / 60)
+    } else if secs < 86400 {
+        format!("{}h", secs / 3600)
+    } else {
+        format!("{}d", secs / 86400)
+    }
+}
+
 /// Handle `/who` — list online users with their statuses.
-pub(super) async fn handle_who(state: &RoomState) -> anyhow::Result<CommandResult> {
+///
+/// With `--verbose` param, shows one user per line with status duration and last
+/// message time.
+pub(super) async fn handle_who(
+    params: &[String],
+    state: &RoomState,
+) -> anyhow::Result<CommandResult> {
+    let verbose = params.iter().any(|p| p == "--verbose" || p == "-v");
+
+    if verbose {
+        return handle_who_verbose(state).await;
+    }
+
     let entries: Vec<String> = state
         .status_entries()
         .await
@@ -31,6 +57,44 @@ pub(super) async fn handle_who(state: &RoomState) -> anyhow::Result<CommandResul
         "no users online".to_owned()
     } else {
         format!("online — {}", entries.join(", "))
+    };
+    let sys = make_system(&state.room_id, "broker", content);
+    let json = serde_json::to_string(&sys)?;
+    Ok(CommandResult::Reply(json))
+}
+
+/// Verbose `/who` output — one user per line with status duration and last message time.
+async fn handle_who_verbose(state: &RoomState) -> anyhow::Result<CommandResult> {
+    let entries = state.status_entries_verbose().await;
+    let now = Utc::now();
+
+    let content = if entries.is_empty() {
+        "no users online".to_owned()
+    } else {
+        let mut lines = Vec::new();
+        for (user, status, status_since, last_msg) in &entries {
+            let status_display = if status.is_empty() {
+                "idle".to_owned()
+            } else {
+                status.replace(", ", "; ")
+            };
+
+            let duration = status_since
+                .map(|ts| {
+                    let secs = (now - ts).num_seconds().max(0);
+                    format_duration_short(secs)
+                })
+                .unwrap_or_else(|| "?".to_owned());
+
+            let last_msg_display = last_msg
+                .map(|ts| ts.format("%H:%M").to_string())
+                .unwrap_or_else(|| "-".to_owned());
+
+            lines.push(format!(
+                "{user:<14} {status_display} ({duration})  last msg: {last_msg_display}"
+            ));
+        }
+        lines.join("\n")
     };
     let sys = make_system(&state.room_id, "broker", content);
     let json = serde_json::to_string(&sys)?;

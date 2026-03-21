@@ -234,9 +234,16 @@ statuses.
 
 ```
 /who
+/who --verbose
+/who -v
 ```
 
-Example response: `online — alice, bob: away, charlie`
+The default output is a compact one-liner: `online — alice, bob: away, charlie`
+
+With `--verbose` (or `-v`), output shows one user per line with additional detail:
+- Current status text
+- How long the status has been set (e.g. "5m", "2h")
+- When the user last sent a message (e.g. "3m ago")
 
 ---
 

@@ -139,6 +139,8 @@ impl Broker {
         let state = Arc::new(RoomState {
             clients: Arc::new(Mutex::new(HashMap::new())),
             status_map: Arc::new(Mutex::new(HashMap::new())),
+            status_timestamps: Arc::new(Mutex::new(HashMap::new())),
+            last_message_times: Arc::new(Mutex::new(HashMap::new())),
             host_user: Arc::new(Mutex::new(None)),
             auth: state::AuthState {
                 token_map: Arc::new(Mutex::new(persisted_tokens)),
