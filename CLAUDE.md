@@ -645,16 +645,6 @@ docs/
   design-253-room-visibility.md — Design doc for room visibility and ACLs
   design-agent-spawn.md        — Design doc for /agent and /spawn commands (#434)
   design-shared-knowledge.md   — Design doc for shared knowledge system (#480)
-  prd/
-    hive/                      — PRDs for Hive orchestration layer
-      README.md                — Hive overview (standalone web/native app architecture)
-      prd-workspace.md         — Workspace management PRD
-      prd-team-provisioning.md — Team provisioning PRD
-      prd-agent-discovery.md   — Agent discovery PRD
-    agent/                     — PRDs for agent autonomy features
-      prd-personality.md       — Personality system PRD
-      prd-agent-plugin.md      — /agent plugin PRD
-      prd-agent-health.md      — Agent health monitoring PRD
 
 scripts/
   pre-push.sh          — Git hook: check + fmt + clippy + test
@@ -764,15 +754,22 @@ All tests must remain green. Add tests for any new behaviour.
 
 ## Baseline test count
 
-**Current baseline: ~1199 Rust tests + 107 shell tests** (room-ralph tests now in knoxio/room-ralph)
+**Current baseline: ~1631 Rust tests + 107 shell tests** (room-ralph tests now in knoxio/room-ralph)
 
 Rust breakdown:
-- room-protocol: 116 unit tests
-- room-cli: 888 unit + 195 integration (33 auth + 37 broker + 25 daemon + 10 events + 22 oneshot + 11 rest_query + 29 room_lifecycle + 8 scripted + 20 ws + 7 ws_smoke ignored) = 1083 tests
+- room-protocol: 136 unit tests
+- room-cli: 529 unit + 269 integration = 798 tests
+  - Integration: 38 daemon + 37 manual_agent + 37 broker + 33 auth + 29 room_lifecycle +
+    22 oneshot + 20 ws + 11 rest_query + 11 events + 8 scripted + 7 ws_smoke (ignored) +
+    6 error_edge + 5 persistence_transport + 5 cli_workflows
+- room-daemon: 566 unit tests
+- room-plugin-taskboard: 123 unit tests
+- room-plugin-hello: 8 unit tests
 
 Note: room-ralph (174 tests) has been moved to [knoxio/room-ralph](https://github.com/knoxio/room-ralph).
 Integration tests are split into focused modules under `tests/` (auth, broker, daemon,
-events, oneshot, rest_query, room_lifecycle, scripted, ws, ws_smoke). No single `integration.rs` file.
+events, oneshot, rest_query, room_lifecycle, scripted, ws, ws_smoke, error_edge,
+cli_workflows, manual_agent, persistence_transport). No single `integration.rs` file.
 
 Shell breakdown:
 - test-context-monitor.sh: 48 tests
