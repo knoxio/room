@@ -1348,6 +1348,9 @@ async fn subscribe_command_changes_tier_via_broker() {
     let td = TestDaemon::start(&["t-sub-change"]).await;
 
     let alice_token = common::daemon_join(&td.socket_path, "t-sub-change", "alice").await;
+    // Allow the JOIN handler's persist_subscriptions to complete before sending
+    // a subscribe command, avoiding a TOCTOU race on the subscription file.
+    tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Default tier after join is Full — change to MentionsOnly
     let sub_cmd = serde_json::json!({
@@ -1489,6 +1492,9 @@ async fn unsubscribed_tier_persists_via_broker() {
     let td = TestDaemon::start(&["t-unsub-persist"]).await;
 
     let bob_token = common::daemon_join(&td.socket_path, "t-unsub-persist", "bob").await;
+    // Allow the JOIN handler's persist_subscriptions to complete before sending
+    // a subscribe command, avoiding a TOCTOU race on the subscription file.
+    tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Subscribe as Unsubscribed
     let unsub_cmd = serde_json::json!({
