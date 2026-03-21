@@ -126,7 +126,10 @@ impl TaskboardPlugin {
             if lt.is_expired(ttl)
                 && matches!(
                     lt.task.status,
-                    TaskStatus::Claimed | TaskStatus::Planned | TaskStatus::Approved
+                    TaskStatus::Claimed
+                        | TaskStatus::Planned
+                        | TaskStatus::InProgress
+                        | TaskStatus::ReviewClaimed
                 )
             {
                 let prev_assignee = lt.task.assigned_to.clone().unwrap_or_default();
@@ -295,6 +298,7 @@ mod tests {
             updated_at: None,
             notes: None,
             team: None,
+            reviewer: None,
         };
         board.push(LiveTask::new(t));
     }
@@ -427,6 +431,7 @@ mod tests {
                     updated_at: None,
                     notes: None,
                     team: None,
+                    reviewer: None,
                 };
                 let mut lt = LiveTask::new(t);
                 lt.lease_start = Some(stale);
@@ -447,6 +452,7 @@ mod tests {
                 updated_at: None,
                 notes: None,
                 team: None,
+                reviewer: None,
             };
             let mut lt_finished = LiveTask::new(finished);
             // Manually inject stale lease to simulate edge case.

@@ -11,8 +11,11 @@ pub enum TaskStatus {
     Open,
     Claimed,
     Planned,
-    Approved,
+    #[serde(alias = "approved")]
+    InProgress,
     AwaitingReview,
+    #[serde(alias = "review_claimed")]
+    ReviewClaimed,
     Finished,
     Cancelled,
 }
@@ -23,8 +26,9 @@ impl std::fmt::Display for TaskStatus {
             TaskStatus::Open => write!(f, "open"),
             TaskStatus::Claimed => write!(f, "claimed"),
             TaskStatus::Planned => write!(f, "planned"),
-            TaskStatus::Approved => write!(f, "approved"),
+            TaskStatus::InProgress => write!(f, "in_progress"),
             TaskStatus::AwaitingReview => write!(f, "in_review"),
+            TaskStatus::ReviewClaimed => write!(f, "review_claimed"),
             TaskStatus::Finished => write!(f, "finished"),
             TaskStatus::Cancelled => write!(f, "cancelled"),
         }
@@ -50,6 +54,9 @@ pub struct Task {
     /// assigned to the task. `None` means unrestricted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub team: Option<String>,
+    /// The user who claimed the review (ReviewClaimed state).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reviewer: Option<String>,
 }
 
 /// In-memory task with a lease timestamp for TTL tracking.
@@ -65,9 +72,10 @@ pub struct LiveTask {
 impl LiveTask {
     pub fn new(task: Task) -> Self {
         let lease_start = match task.status {
-            TaskStatus::Claimed | TaskStatus::Planned | TaskStatus::Approved => {
-                Some(Instant::now())
-            }
+            TaskStatus::Claimed
+            | TaskStatus::Planned
+            | TaskStatus::InProgress
+            | TaskStatus::ReviewClaimed => Some(Instant::now()),
             // AwaitingReview has no lease (indefinite — paused during review).
             _ => None,
         };
@@ -163,6 +171,7 @@ mod tests {
             updated_at: None,
             notes: None,
             team: None,
+            reviewer: None,
         }
     }
 
@@ -171,18 +180,19 @@ mod tests {
         assert_eq!(TaskStatus::Open.to_string(), "open");
         assert_eq!(TaskStatus::Claimed.to_string(), "claimed");
         assert_eq!(TaskStatus::Planned.to_string(), "planned");
-        assert_eq!(TaskStatus::Approved.to_string(), "approved");
+        assert_eq!(TaskStatus::InProgress.to_string(), "in_progress");
         assert_eq!(TaskStatus::AwaitingReview.to_string(), "in_review");
+        assert_eq!(TaskStatus::ReviewClaimed.to_string(), "review_claimed");
         assert_eq!(TaskStatus::Finished.to_string(), "finished");
         assert_eq!(TaskStatus::Cancelled.to_string(), "cancelled");
     }
 
     #[test]
     fn task_status_serde_round_trip() {
-        let task = make_task("tb-001", TaskStatus::Approved);
+        let task = make_task("tb-001", TaskStatus::InProgress);
         let json = serde_json::to_string(&task).unwrap();
         let parsed: Task = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.status, TaskStatus::Approved);
+        assert_eq!(parsed.status, TaskStatus::InProgress);
         assert_eq!(parsed.id, "tb-001");
     }
 
@@ -236,7 +246,7 @@ mod tests {
 
     #[test]
     fn live_task_expire_resets() {
-        let mut task = make_task("tb-001", TaskStatus::Approved);
+        let mut task = make_task("tb-001", TaskStatus::InProgress);
         task.assigned_to = Some("bob".to_owned());
         task.plan = Some("do the thing".to_owned());
         let mut live = LiveTask::new(task);
@@ -306,8 +316,9 @@ mod tests {
             TaskStatus::Open,
             TaskStatus::Claimed,
             TaskStatus::Planned,
-            TaskStatus::Approved,
+            TaskStatus::InProgress,
             TaskStatus::AwaitingReview,
+            TaskStatus::ReviewClaimed,
             TaskStatus::Finished,
             TaskStatus::Cancelled,
         ] {
@@ -355,5 +366,35 @@ mod tests {
         // sweep_expired's status filter. Verify that Finished status is
         // preserved if we DON'T call expire():
         assert_eq!(live.task.status, TaskStatus::Finished);
+    }
+
+    #[test]
+    fn live_task_lease_for_in_progress() {
+        let task = make_task("tb-001", TaskStatus::InProgress);
+        let live = LiveTask::new(task);
+        assert!(live.lease_start.is_some());
+    }
+
+    #[test]
+    fn live_task_lease_for_review_claimed() {
+        let task = make_task("tb-001", TaskStatus::ReviewClaimed);
+        let live = LiveTask::new(task);
+        assert!(live.lease_start.is_some());
+    }
+
+    /// Backwards compat: "approved" in NDJSON deserializes as InProgress.
+    #[test]
+    fn approved_alias_deserializes_as_in_progress() {
+        let json = r#"{"id":"tb-001","description":"test","status":"approved","posted_by":"alice","assigned_to":null,"posted_at":"2026-03-13T00:00:00Z","claimed_at":null,"plan":null,"approved_by":null,"approved_at":null,"updated_at":null,"notes":null}"#;
+        let task: Task = serde_json::from_str(json).unwrap();
+        assert_eq!(task.status, TaskStatus::InProgress);
+    }
+
+    /// Tasks without the reviewer field deserialize correctly (backwards compat).
+    #[test]
+    fn missing_reviewer_field_defaults_to_none() {
+        let json = r#"{"id":"tb-001","description":"test","status":"open","posted_by":"alice","assigned_to":null,"posted_at":"2026-03-13T00:00:00Z","claimed_at":null,"plan":null,"approved_by":null,"approved_at":null,"updated_at":null,"notes":null}"#;
+        let task: Task = serde_json::from_str(json).unwrap();
+        assert!(task.reviewer.is_none());
     }
 }

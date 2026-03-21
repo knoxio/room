@@ -62,6 +62,7 @@ impl TaskboardPlugin {
             updated_at: None,
             notes: None,
             team: team.clone(),
+            reviewer: None,
         };
         board.push(LiveTask::new(task.clone()));
         let all_tasks: Vec<Task> = board.iter().map(|lt| lt.task.clone()).collect();
@@ -275,7 +276,7 @@ impl TaskboardPlugin {
         if !is_poster && !is_host {
             return ("only the task poster or host can approve".to_owned(), false);
         }
-        lt.task.status = TaskStatus::Approved;
+        lt.task.status = TaskStatus::InProgress;
         lt.task.approved_by = Some(ctx.sender.clone());
         lt.task.approved_at = Some(chrono::Utc::now());
         lt.renew_lease();
@@ -321,12 +322,13 @@ impl TaskboardPlugin {
             lt.task.status,
             TaskStatus::Claimed
                 | TaskStatus::Planned
-                | TaskStatus::Approved
+                | TaskStatus::InProgress
                 | TaskStatus::AwaitingReview
+                | TaskStatus::ReviewClaimed
         ) {
             return (
                 format!(
-                    "task {task_id} is {} (must be claimed/planned/approved/in_review to update)",
+                    "task {task_id} is {} (must be claimed/planned/in_progress/in_review/review_claimed to update)",
                     lt.task.status
                 ),
                 false,
@@ -338,7 +340,7 @@ impl TaskboardPlugin {
         let mut warning = String::new();
         if !matches!(
             lt.task.status,
-            TaskStatus::Approved | TaskStatus::AwaitingReview
+            TaskStatus::InProgress | TaskStatus::AwaitingReview | TaskStatus::ReviewClaimed
         ) {
             warning = format!(" [warning: task is {} — not yet approved]", lt.task.status);
         }
@@ -369,12 +371,13 @@ impl TaskboardPlugin {
             lt.task.status,
             TaskStatus::Claimed
                 | TaskStatus::Planned
-                | TaskStatus::Approved
+                | TaskStatus::InProgress
                 | TaskStatus::AwaitingReview
+                | TaskStatus::ReviewClaimed
         ) {
             return (
                 format!(
-                    "task {task_id} is {} (must be claimed/planned/approved/in_review to release)",
+                    "task {task_id} is {} (must be claimed/planned/in_progress/in_review/review_claimed to release)",
                     lt.task.status
                 ),
                 false,
@@ -522,13 +525,10 @@ impl TaskboardPlugin {
             Some(lt) => lt,
             None => return (format!("task {task_id} not found"), false),
         };
-        if !matches!(
-            lt.task.status,
-            TaskStatus::Claimed | TaskStatus::Planned | TaskStatus::Approved
-        ) {
+        if lt.task.status != TaskStatus::InProgress {
             return (
                 format!(
-                    "task {task_id} is {} (must be claimed/planned/approved to move to review)",
+                    "task {task_id} is {} (must be in_progress to move to review)",
                     lt.task.status
                 ),
                 false,
@@ -567,14 +567,11 @@ impl TaskboardPlugin {
         };
         if !matches!(
             lt.task.status,
-            TaskStatus::Claimed
-                | TaskStatus::Planned
-                | TaskStatus::Approved
-                | TaskStatus::AwaitingReview
+            TaskStatus::InProgress | TaskStatus::AwaitingReview | TaskStatus::ReviewClaimed
         ) {
             return (
                 format!(
-                    "task {task_id} is {} (must be claimed/planned/approved/in_review to finish)",
+                    "task {task_id} is {} (must be in_progress/in_review/review_claimed to finish)",
                     lt.task.status
                 ),
                 false,
@@ -722,7 +719,7 @@ mod tests {
         assert!(result.contains("approved"));
         assert!(broadcast);
         let board = plugin.board.lock().unwrap();
-        assert_eq!(board[0].task.status, TaskStatus::Approved);
+        assert_eq!(board[0].task.status, TaskStatus::InProgress);
     }
 
     #[test]
@@ -812,6 +809,12 @@ mod tests {
         let (plugin, _tmp) = make_plugin();
         plugin.handle_post(&test_ctx("ba", &["post", "task"]));
         plugin.handle_claim(&test_ctx("agent", &["claim", "tb-001"]));
+        plugin.handle_plan(&test_ctx("agent", &["plan", "tb-001", "my plan"]));
+        plugin.handle_approve(&test_ctx_with_host(
+            "ba",
+            &["approve", "tb-001"],
+            Some("ba"),
+        ));
         let (result, broadcast) = plugin.handle_finish(&test_ctx("agent", &["finish", "tb-001"]));
         assert!(result.contains("finished"));
         assert!(broadcast);
@@ -1269,6 +1272,12 @@ mod tests {
         let (plugin, _tmp) = make_plugin();
         plugin.handle_post(&test_ctx("ba", &["post", "task"]));
         plugin.handle_claim(&test_ctx("agent-a", &["claim", "tb-001"]));
+        plugin.handle_plan(&test_ctx("agent-a", &["plan", "tb-001", "my plan"]));
+        plugin.handle_approve(&test_ctx_with_host(
+            "ba",
+            &["approve", "tb-001"],
+            Some("ba"),
+        ));
         let (result, broadcast) = plugin.handle_review(&test_ctx("agent-b", &["review", "tb-001"]));
         assert!(result.contains("only be moved to review by the assignee"));
         assert!(!broadcast);
@@ -1290,7 +1299,7 @@ mod tests {
         plugin.handle_post(&test_ctx("ba", &["post", "task"]));
         // Task is Open — cannot move to review.
         let (result, broadcast) = plugin.handle_review(&test_ctx("ba", &["review", "tb-001"]));
-        assert!(result.contains("must be claimed/planned/approved"));
+        assert!(result.contains("must be in_progress"));
         assert!(!broadcast);
     }
 
@@ -1330,6 +1339,12 @@ mod tests {
         let (plugin, _tmp) = make_plugin();
         plugin.handle_post(&test_ctx("ba", &["post", "task"]));
         plugin.handle_claim(&test_ctx("agent", &["claim", "tb-001"]));
+        plugin.handle_plan(&test_ctx("agent", &["plan", "tb-001", "my plan"]));
+        plugin.handle_approve(&test_ctx_with_host(
+            "ba",
+            &["approve", "tb-001"],
+            Some("ba"),
+        ));
         plugin.handle_review(&test_ctx("agent", &["review", "tb-001"]));
         let (result, broadcast) = plugin.handle_finish(&test_ctx("agent", &["finish", "tb-001"]));
         assert!(result.contains("finished"));
@@ -1343,6 +1358,12 @@ mod tests {
         let (plugin, _tmp) = make_plugin();
         plugin.handle_post(&test_ctx("ba", &["post", "task"]));
         plugin.handle_claim(&test_ctx("agent", &["claim", "tb-001"]));
+        plugin.handle_plan(&test_ctx("agent", &["plan", "tb-001", "my plan"]));
+        plugin.handle_approve(&test_ctx_with_host(
+            "ba",
+            &["approve", "tb-001"],
+            Some("ba"),
+        ));
         plugin.handle_review(&test_ctx("agent", &["review", "tb-001"]));
         let (result, broadcast) = plugin.handle_release(&test_ctx("agent", &["release", "tb-001"]));
         assert!(result.contains("released"));
@@ -1356,6 +1377,12 @@ mod tests {
         let (plugin, _tmp) = make_plugin();
         plugin.handle_post(&test_ctx("ba", &["post", "task"]));
         plugin.handle_claim(&test_ctx("agent", &["claim", "tb-001"]));
+        plugin.handle_plan(&test_ctx("agent", &["plan", "tb-001", "my plan"]));
+        plugin.handle_approve(&test_ctx_with_host(
+            "ba",
+            &["approve", "tb-001"],
+            Some("ba"),
+        ));
         plugin.handle_review(&test_ctx("agent", &["review", "tb-001"]));
         let (result, broadcast) =
             plugin.handle_cancel(&test_ctx("ba", &["cancel", "tb-001", "scope changed"]));
@@ -1411,6 +1438,12 @@ mod tests {
         let (plugin, _tmp) = make_plugin();
         plugin.handle_post(&test_ctx("ba", &["post", "task"]));
         plugin.handle_claim(&test_ctx("agent", &["claim", "tb-001"]));
+        plugin.handle_plan(&test_ctx("agent", &["plan", "tb-001", "my plan"]));
+        plugin.handle_approve(&test_ctx_with_host(
+            "ba",
+            &["approve", "tb-001"],
+            Some("ba"),
+        ));
         plugin.handle_review(&test_ctx("agent", &["review", "tb-001"]));
         // sweep_expired should NOT touch AwaitingReview tasks.
         let expired = plugin.sweep_expired();
@@ -1424,6 +1457,12 @@ mod tests {
         let (plugin, _tmp) = make_plugin();
         plugin.handle_post(&test_ctx("ba", &["post", "task"]));
         plugin.handle_claim(&test_ctx("agent", &["claim", "tb-001"]));
+        plugin.handle_plan(&test_ctx("agent", &["plan", "tb-001", "my plan"]));
+        plugin.handle_approve(&test_ctx_with_host(
+            "ba",
+            &["approve", "tb-001"],
+            Some("ba"),
+        ));
         plugin.handle_review(&test_ctx("agent", &["review", "tb-001"]));
         let (result, broadcast) =
             plugin.handle_update(&test_ctx("agent", &["update", "tb-001", "review notes"]));
@@ -1546,6 +1585,7 @@ mod tests {
             updated_at: None,
             notes: None,
             team: Some("backend".to_owned()),
+            reviewer: None,
         };
         let json = serde_json::to_string(&task).unwrap();
         assert!(json.contains("\"team\":\"backend\""));
