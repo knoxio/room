@@ -9,6 +9,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `/taskboard reject <task-id> [reason]` subcommand — reviewer sends task back to implementer.
+  Transitions ReviewClaimed → InProgress, clears reviewer/approved fields, sets rejection
+  reason in notes. Only reviewer or host can reject. Emits `TaskRejected` event. (#845)
 - `/taskboard review_claim` subcommand — claim reviewer role on tasks in AwaitingReview status.
   Sets reviewer field and restarts lease timer. Emits `ReviewClaimed` event. (#844)
 - `/taskboard qa-queue` subcommand — filtered view showing only tasks in AwaitingReview status,
