@@ -151,9 +151,7 @@ impl TaskboardPlugin {
         let board = self.board.lock().unwrap();
         let completed: Vec<&LiveTask> = board
             .iter()
-            .filter(|lt| {
-                matches!(lt.task.status, TaskStatus::Finished | TaskStatus::Cancelled)
-            })
+            .filter(|lt| matches!(lt.task.status, TaskStatus::Finished | TaskStatus::Cancelled))
             .collect();
         if completed.is_empty() {
             return "no completed tasks".to_owned();
