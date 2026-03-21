@@ -2,6 +2,9 @@
 # pre-push.sh — Run before every push to ensure CI will pass.
 # Install as a git hook:  ln -sf ../../scripts/pre-push.sh .git/hooks/pre-push
 # Or run manually:        bash scripts/pre-push.sh
+#
+# Only runs fast checks locally (check, fmt, clippy, unit tests).
+# Full integration tests run in CI.
 set -euo pipefail
 
 RED='\033[0;31m'
@@ -31,7 +34,7 @@ info() {
 # 1. cargo check catches syntax/type errors and conflict markers first.
 # 2. cargo fmt reformats; if it changes anything, you have uncommitted diffs.
 # 3. cargo clippy catches lint issues.
-# 4. cargo test — crate-scoped when possible, full suite as fallback.
+# 4. Unit tests only (--lib) — integration tests run in CI.
 
 step "cargo check"
 cargo check 2>&1 || fail "cargo check"
@@ -45,52 +48,8 @@ step "cargo clippy -- -D warnings"
 cargo clippy -- -D warnings 2>&1 || fail "cargo clippy"
 pass "cargo clippy"
 
-# Detect changed crates for scoped testing.
-# Falls back to full suite on master, cross-crate changes, or root Cargo.toml changes.
-CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
-
-run_full_suite() {
-  step "cargo test (full suite)"
-  cargo test 2>&1 || fail "cargo test"
-  pass "cargo test (full suite)"
-}
-
-if [ "$CURRENT_BRANCH" = "master" ] || [ "$CURRENT_BRANCH" = "main" ]; then
-  info "on $CURRENT_BRANCH — running full test suite"
-  run_full_suite
-else
-  # Find merge base with master to detect changed files.
-  MERGE_BASE=$(git merge-base origin/master HEAD 2>/dev/null || echo "")
-  if [ -z "$MERGE_BASE" ]; then
-    info "cannot determine merge base — running full test suite"
-    run_full_suite
-  else
-    # Check for root Cargo.toml changes (workspace-level).
-    ROOT_CHANGED=$(git diff --name-only "$MERGE_BASE"..HEAD -- Cargo.toml | wc -l)
-
-    # Extract unique crate names from changed files under crates/.
-    CHANGED_CRATES=$(git diff --name-only "$MERGE_BASE"..HEAD -- 'crates/' \
-      | sed -n 's|^crates/\([^/]*\)/.*|\1|p' \
-      | sort -u)
-
-    CRATE_COUNT=$(echo "$CHANGED_CRATES" | grep -c . || true)
-
-    if [ "$ROOT_CHANGED" -gt 0 ]; then
-      info "root Cargo.toml changed — running full test suite"
-      run_full_suite
-    elif [ "$CRATE_COUNT" -eq 0 ]; then
-      info "no crate changes detected — skipping tests"
-    elif [ "$CRATE_COUNT" -gt 3 ]; then
-      info "$CRATE_COUNT crates changed — running full test suite"
-      run_full_suite
-    else
-      for crate in $CHANGED_CRATES; do
-        step "cargo test -p $crate"
-        cargo test -p "$crate" 2>&1 || fail "cargo test -p $crate"
-        pass "cargo test -p $crate"
-      done
-    fi
-  fi
-fi
+step "cargo test --lib (unit tests only)"
+cargo test --lib 2>&1 || fail "cargo test --lib"
+pass "cargo test --lib"
 
 printf '\n%s%s[pre-push] All checks passed.%s\n' "$GREEN" "$BOLD" "$RESET"

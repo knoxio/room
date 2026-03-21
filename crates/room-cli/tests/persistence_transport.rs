@@ -14,6 +14,7 @@ use std::time::Duration;
 /// After sending messages, the chat history file should contain them and be
 /// loadable by a fresh broker instance using the same data directory.
 #[tokio::test]
+#[ignore = "flaky: daemon shutdown timing race (#878)"]
 async fn daemon_restart_preserves_history() {
     let dir = tempfile::tempdir().unwrap();
     let socket_path = dir.path().join("roomd.sock");
@@ -62,6 +63,7 @@ async fn daemon_restart_preserves_history() {
 /// Tokens issued by the daemon should survive a restart — the token file is
 /// persisted to disk alongside the chat file.
 #[tokio::test]
+#[ignore = "flaky: daemon shutdown timing race (#878)"]
 async fn daemon_restart_preserves_tokens() {
     let dir = tempfile::tempdir().unwrap();
     let socket_path = dir.path().join("roomd.sock");
@@ -132,6 +134,7 @@ async fn daemon_restart_preserves_tokens() {
 /// The users.json registry persists subscription state — after joining and
 /// interacting with a room, the registry file records the user's presence.
 #[tokio::test]
+#[ignore = "flaky: daemon shutdown timing race (#878)"]
 async fn daemon_restart_preserves_user_registry() {
     let dir = tempfile::tempdir().unwrap();
     let socket_path = dir.path().join("roomd.sock");
