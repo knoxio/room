@@ -22,8 +22,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
-- **ci:** Re-enabled sccache in CI workflow now that GitHub Actions cache outage is
-  resolved. Builds use both sccache and Swatinem/rust-cache for faster compilation. (#864)
+- **ci:** Re-enabled sccache in CI workflow with `continue-on-error` for graceful
+  degradation when GitHub Actions cache is intermittently unavailable. Builds use both
+  sccache and Swatinem/rust-cache for faster compilation. (#864)
 
 ### Fixed
 

@@ -20,6 +20,7 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: mozilla-actions/sccache-action@v0.0.7
+        continue-on-error: true
       - uses: Swatinem/rust-cache@v2
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
