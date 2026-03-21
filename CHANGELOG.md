@@ -34,6 +34,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **taskboard:** Renamed `review` subcommand to `request_review` for clarity — distinguishes
+  the author action (requesting review) from reviewer actions (claiming, approving). All
+  status labels, event types, and tests updated. (#842)
 - **plugin:** Extracted taskboard plugin into its own workspace crate `room-plugin-taskboard`.
   Zero coupling to broker internals — depends only on `room-protocol`. All existing import
   paths preserved via re-export. (#454)

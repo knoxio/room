@@ -84,7 +84,7 @@ impl TaskboardPlugin {
         vec![CommandInfo {
             name: "taskboard".to_owned(),
             description:
-                "Manage task lifecycle — post, list, history, mine, show, claim, assign, plan, approve, update, review, release, finish, cancel"
+                "Manage task lifecycle — post, list, history, mine, show, claim, assign, plan, approve, update, request_review, release, finish, cancel"
                     .to_owned(),
             usage: "/taskboard <action> [args...]".to_owned(),
             params: vec![
@@ -101,7 +101,7 @@ impl TaskboardPlugin {
                         "plan".to_owned(),
                         "approve".to_owned(),
                         "update".to_owned(),
-                        "review".to_owned(),
+                        "request_review".to_owned(),
                         "release".to_owned(),
                         "finish".to_owned(),
                         "cancel".to_owned(),
@@ -178,11 +178,11 @@ impl Plugin for TaskboardPlugin {
                 "show" => (self.handle_show(&ctx), false),
                 "update" => self.handle_update(&ctx),
                 "release" => self.handle_release(&ctx),
-                "review" => self.handle_review(&ctx),
+                "request_review" => self.handle_request_review(&ctx),
                 "finish" => self.handle_finish(&ctx),
                 "cancel" => self.handle_cancel(&ctx),
-                "" => ("usage: /taskboard <post|list|history|mine|show|claim|assign|plan|approve|update|review|release|finish|cancel> [args...]".to_owned(), false),
-                other => (format!("unknown action: {other}. use: post, list, history, mine, show, claim, assign, plan, approve, update, review, release, finish, cancel"), false),
+                "" => ("usage: /taskboard <post|list|history|mine|show|claim|assign|plan|approve|update|request_review|release|finish|cancel> [args...]".to_owned(), false),
+                other => (format!("unknown action: {other}. use: post, list, history, mine, show, claim, assign, plan, approve, update, request_review, release, finish, cancel"), false),
             };
             if broadcast {
                 // Emit a typed event alongside the system broadcast.
@@ -193,7 +193,7 @@ impl Plugin for TaskboardPlugin {
                     "plan" => Some(EventType::TaskPlanned),
                     "approve" => Some(EventType::TaskApproved),
                     "update" => Some(EventType::TaskUpdated),
-                    "review" => Some(EventType::ReviewRequested),
+                    "request_review" => Some(EventType::ReviewRequested),
                     "release" => Some(EventType::TaskReleased),
                     "finish" => Some(EventType::TaskFinished),
                     "cancel" => Some(EventType::TaskCancelled),
@@ -538,7 +538,7 @@ mod tests {
         let (plugin, _tmp) = make_plugin();
         seed_task(&plugin, "tb-001", TaskStatus::Open);
         seed_task(&plugin, "tb-002", TaskStatus::Claimed); // assigned to "bob"
-        seed_task(&plugin, "tb-003", TaskStatus::Approved); // assigned to "bob"
+        seed_task(&plugin, "tb-003", TaskStatus::InProgress); // assigned to "bob"
 
         // Seed one task assigned to "alice".
         {
@@ -557,6 +557,7 @@ mod tests {
                 updated_at: None,
                 notes: None,
                 team: None,
+                reviewer: None,
             };
             board.push(LiveTask::new(t));
         }
