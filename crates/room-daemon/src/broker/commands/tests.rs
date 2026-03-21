@@ -1648,14 +1648,8 @@ mod tests {
         let CommandResult::Reply(json) = result else {
             panic!("expected Reply for /help taskboard plan");
         };
-        assert!(
-            json.contains("plan"),
-            "should show plan subcommand detail"
-        );
-        assert!(
-            json.contains("task-id"),
-            "should show task-id parameter"
-        );
+        assert!(json.contains("plan"), "should show plan subcommand detail");
+        assert!(json.contains("task-id"), "should show task-id parameter");
         assert!(
             json.contains("plan-text"),
             "should show plan-text parameter"
