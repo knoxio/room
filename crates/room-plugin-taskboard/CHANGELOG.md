@@ -7,6 +7,10 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `/taskboard history` subcommand — shows finished and cancelled tasks (#824)
+
 ## [3.5.1] - 2026-03-16
 
 ## [3.5.0] - 2026-03-15
