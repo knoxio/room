@@ -20,6 +20,11 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **taskboard:** Team-restricted task claims — `/taskboard post --team <name>` restricts
   claiming and assignment to team members. Backward-compatible NDJSON persistence. (#516)
 
+### Changed
+
+- **ci:** Re-enabled sccache in CI workflow now that GitHub Actions cache outage is
+  resolved. Builds use both sccache and Swatinem/rust-cache for faster compilation. (#864)
+
 ### Fixed
 
 - **daemon:** Create runtime socket directory on Linux before binding. On systems with
