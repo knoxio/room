@@ -173,6 +173,9 @@ pub(crate) async fn process_inbound_message(
 /// Handle a passthrough message: check send permission, auto-subscribe mentions,
 /// then broadcast or DM.
 async fn process_passthrough(msg: &Message, username: &str, state: &RoomState) -> InboundResult {
+    // Record when this user last sent a message (for /who --verbose).
+    state.record_last_message(username).await;
+
     // DM privacy: reject sends from non-participants.
     if let Err(reason) = auth::check_send_permission(username, state.config.as_ref()) {
         let err = serde_json::json!({
@@ -401,6 +404,8 @@ mod tests {
         Arc::new(RoomState {
             clients: Arc::new(Mutex::new(HashMap::new())),
             status_map: Arc::new(Mutex::new(HashMap::new())),
+            status_timestamps: Arc::new(Mutex::new(HashMap::new())),
+            last_message_times: Arc::new(Mutex::new(HashMap::new())),
             host_user: Arc::new(Mutex::new(None)),
             auth: AuthState {
                 token_map: Arc::new(Mutex::new(HashMap::new())),

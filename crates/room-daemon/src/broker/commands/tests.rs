@@ -206,6 +206,80 @@ mod tests {
         assert!(json.contains("bob"), "bob should be listed: {json}");
     }
 
+    // ── route_command: who --verbose ────────────────────────────────────
+
+    #[tokio::test]
+    async fn route_command_who_verbose_shows_per_user_lines() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+        state.set_status("alice", "reviewing PR".to_owned()).await;
+        state.set_status("bob", String::new()).await;
+        let msg = make_command(
+            "test-room",
+            "alice",
+            "who",
+            vec!["--verbose".to_owned()],
+        );
+        let CommandResult::Reply(json) = route_command(msg, "alice", &state).await.unwrap() else {
+            panic!("expected Reply");
+        };
+        assert!(json.contains("alice"), "should list alice: {json}");
+        assert!(json.contains("bob"), "should list bob: {json}");
+        assert!(json.contains("reviewing PR"), "should show status: {json}");
+        assert!(json.contains("idle"), "bob should show idle: {json}");
+        assert!(json.contains("last msg:"), "should show last msg column: {json}");
+    }
+
+    #[tokio::test]
+    async fn route_command_who_verbose_short_flag() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+        state.set_status("alice", "coding".to_owned()).await;
+        let msg = make_command("test-room", "alice", "who", vec!["-v".to_owned()]);
+        let CommandResult::Reply(json) = route_command(msg, "alice", &state).await.unwrap() else {
+            panic!("expected Reply");
+        };
+        // -v should trigger verbose output (one user per line with duration)
+        assert!(json.contains("alice"), "should list alice: {json}");
+        assert!(json.contains("last msg:"), "should show last msg column: {json}");
+    }
+
+    #[tokio::test]
+    async fn route_command_who_verbose_empty_room() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+        let msg = make_command(
+            "test-room",
+            "alice",
+            "who",
+            vec!["--verbose".to_owned()],
+        );
+        let CommandResult::Reply(json) = route_command(msg, "alice", &state).await.unwrap() else {
+            panic!("expected Reply");
+        };
+        assert!(json.contains("no users online"), "empty room: {json}");
+    }
+
+    #[tokio::test]
+    async fn route_command_who_verbose_shows_last_message_time() {
+        let tmp = NamedTempFile::new().unwrap();
+        let state = make_state(tmp.path().to_path_buf());
+        state.set_status("alice", "working".to_owned()).await;
+        state.record_last_message("alice").await;
+        let msg = make_command(
+            "test-room",
+            "alice",
+            "who",
+            vec!["--verbose".to_owned()],
+        );
+        let CommandResult::Reply(json) = route_command(msg, "alice", &state).await.unwrap() else {
+            panic!("expected Reply");
+        };
+        // Should show a time (HH:MM) instead of "-" for last msg
+        assert!(json.contains("alice"), "should list alice: {json}");
+        assert!(!json.contains("last msg: -"), "should have a real time: {json}");
+    }
+
     // ── route_command: admin permission gating ────────────────────────────
 
     #[tokio::test]

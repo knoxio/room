@@ -73,7 +73,7 @@ pub(crate) async fn route_command(
         }
 
         match cmd.as_str() {
-            "who" => return handle_who(state).await,
+            "who" => return handle_who(params, state).await,
             "who_all" => return handle_who_all(state).await,
             "set_status" => return handle_set_status(params, username, state).await,
             "subscribe" | "set_subscription" => {
