@@ -16,8 +16,11 @@ use room_protocol::EventType;
 
 /// JSON configuration for the taskboard plugin when loaded dynamically.
 ///
+/// `lease_ttl_secs` defaults to `0` (expiry disabled). Set a positive value
+/// to enable automatic lease expiry (e.g. `600` for 10 minutes).
+///
 /// ```json
-/// { "storage_path": "/path/to/room.taskboard", "lease_ttl_secs": 600 }
+/// { "storage_path": "/path/to/room.taskboard", "lease_ttl_secs": 0 }
 /// ```
 #[derive(serde::Deserialize)]
 struct TaskboardConfig {
@@ -42,15 +45,17 @@ fn create_taskboard_from_config(config: &str) -> TaskboardPlugin {
 
 room_protocol::declare_plugin!("taskboard", create_taskboard_from_config);
 
-/// Default lease TTL in seconds (10 minutes).
-const DEFAULT_LEASE_TTL_SECS: u64 = 600;
+/// Default lease TTL in seconds. `0` means lease expiry is disabled (no
+/// auto-release). Set a non-zero value via config to enable time-based expiry.
+const DEFAULT_LEASE_TTL_SECS: u64 = 0;
 
-/// Unified task lifecycle plugin with lease-based expiry.
+/// Unified task lifecycle plugin with optional lease-based expiry.
 ///
 /// Manages a board of tasks that agents can post, claim, plan, get approved,
-/// update, release, and finish. Claimed tasks have a configurable lease TTL —
-/// if not renewed via `/taskboard update` or `/taskboard plan`, they auto-
-/// release back to open status (lazy sweep on access).
+/// update, release, and finish. When `lease_ttl_secs` is non-zero, claimed
+/// tasks auto-release back to open status if not renewed via `/taskboard
+/// update` or `/taskboard plan` within the TTL (lazy sweep on access). When
+/// zero (the default), leases are tracked but never expire.
 pub struct TaskboardPlugin {
     /// In-memory task board with lease timers.
     board: Arc<Mutex<Vec<LiveTask>>>,
@@ -124,9 +129,14 @@ impl TaskboardPlugin {
     }
 
     /// Sweep expired leases (lazy — called before reads).
+    ///
+    /// Returns immediately when the TTL is zero (expiry disabled).
     fn sweep_expired(&self) -> Vec<String> {
-        let mut board = self.board.lock().unwrap();
         let ttl = self.lease_ttl.as_secs();
+        if ttl == 0 {
+            return Vec::new();
+        }
+        let mut board = self.board.lock().unwrap();
         let mut expired_ids = Vec::new();
         for lt in board.iter_mut() {
             if lt.is_expired(ttl)
@@ -743,6 +753,45 @@ mod tests {
                 assert!(lt.lease_start.is_none());
             }
         }
+    }
+
+    /// When lease_ttl_secs is 0 (the default), sweep_expired must be a no-op
+    /// even when tasks have stale lease timestamps.
+    #[test]
+    fn sweep_expired_disabled_when_ttl_zero() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let plugin = TaskboardPlugin::new(tmp.path().to_path_buf(), None); // default = 0
+
+        {
+            let mut board = plugin.board.lock().unwrap();
+            let stale = std::time::Instant::now() - std::time::Duration::from_secs(9999);
+            let t = task::Task {
+                id: "tb-001".to_owned(),
+                description: "should not expire".to_owned(),
+                status: TaskStatus::Claimed,
+                posted_by: "alice".to_owned(),
+                assigned_to: Some("bob".to_owned()),
+                posted_at: chrono::Utc::now(),
+                claimed_at: Some(chrono::Utc::now()),
+                plan: None,
+                approved_by: None,
+                approved_at: None,
+                updated_at: None,
+                notes: None,
+                team: None,
+                reviewer: None,
+            };
+            let mut lt = LiveTask::new(t);
+            lt.lease_start = Some(stale);
+            board.push(lt);
+        }
+
+        let expired = plugin.sweep_expired();
+        assert!(expired.is_empty(), "TTL=0 must disable expiry");
+
+        let board = plugin.board.lock().unwrap();
+        assert_eq!(board[0].task.status, TaskStatus::Claimed);
+        assert_eq!(board[0].task.assigned_to.as_deref(), Some("bob"));
     }
 
     // ── handle_mine tests ────────────────────────────────────────────────
