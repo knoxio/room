@@ -7,6 +7,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [3.6.1] - 2026-03-26
+
 ### Changed
 
 - Lease expiry is now disabled by default (`DEFAULT_LEASE_TTL_SECS` = 0). Tasks no longer

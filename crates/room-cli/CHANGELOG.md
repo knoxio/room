@@ -10,6 +10,8 @@ For changes prior to the workspace restructure (v0.1.2 through v1.0.2), see the
 
 ## [Unreleased]
 
+## [3.6.1] - 2026-03-26
+
 ### Fixed
 
 - **tui:** Command palette no longer sends usage placeholders for optional-param commands.

@@ -7,6 +7,8 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [3.6.1] - 2026-03-26
+
 ### Added
 
 - **plugin:** `CommandInfo` now has a `subcommands: Vec<CommandInfo>` field for
