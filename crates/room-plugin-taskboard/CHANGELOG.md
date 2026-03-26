@@ -9,6 +9,9 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- Lease expiry is now disabled by default (`DEFAULT_LEASE_TTL_SECS` = 0). Tasks no longer
+  auto-release after 10 minutes. Set `lease_ttl_secs` to a positive value in plugin config
+  to re-enable. (#885)
 - `/taskboard approve` is now context-aware — approves plan (Planned → InProgress) when task
   is planned, or approves review (ReviewClaimed → Finished) when task has a claimed reviewer.
   For review approval, only the reviewer or host can approve. (#843)
