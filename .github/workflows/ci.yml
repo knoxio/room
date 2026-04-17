@@ -21,6 +21,13 @@ jobs:
           components: rustfmt, clippy
       - uses: mozilla-actions/sccache-action@v0.0.7
         continue-on-error: true
+      - name: Verify sccache
+        id: sccache-check
+        run: |
+          if ! sccache --start-server 2>/dev/null; then
+            echo "RUSTC_WRAPPER=" >> "$GITHUB_ENV"
+            echo "sccache unavailable, falling back to direct compilation"
+          fi
       - uses: Swatinem/rust-cache@v2
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
